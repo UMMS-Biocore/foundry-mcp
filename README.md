@@ -64,17 +64,39 @@ EOF
 
 2. **Add ViaFoundry Server**
 
-   Add this configuration to your MCP settings:
+   First, find the **actual path** to the `viafoundry-mcp` command:
+
+   ```bash
+   # Find the real path (not the shim)
+   python -c "import sys; print(sys.executable.replace('python', 'viafoundry-mcp'))"
+   ```
+
+   Or manually check:
+   ```bash
+   ls ~/.pyenv/versions/*/bin/viafoundry-mcp
+   # Or for system Python:
+   which -a viafoundry-mcp
+   ```
+
+   Then add this configuration using the **full path**:
    ```json
    {
      "viafoundry": {
-       "command": "bash",
-       "args": ["-l", "-c", "viafoundry-mcp"]
+       "command": "/full/path/to/viafoundry-mcp"
      }
    }
    ```
 
-   **Note:** This uses a shell wrapper to ensure `viafoundry-mcp` is found in your PATH.
+   **Example with pyenv:**
+   ```json
+   {
+     "viafoundry": {
+       "command": "/Users/yourusername/.pyenv/versions/3.12.2/bin/viafoundry-mcp"
+     }
+   }
+   ```
+
+   **⚠️ Important:** Do NOT use pyenv shims (e.g., `~/.pyenv/shims/viafoundry-mcp`) as Cursor cannot execute them properly. Use the direct path to the binary.
 
 3. **Restart Cursor**
    - Close and reopen Cursor completely
