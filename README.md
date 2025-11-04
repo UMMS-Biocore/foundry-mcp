@@ -7,30 +7,62 @@ Connect your AI assistant to ViaFoundry's bioinformatics workflows and data. Use
 
 ---
 
+## Why uvx?
+
+This MCP server uses **uvx** (part of the `uv` package manager) for installation. Benefits:
+
+- ✅ **No Python environment conflicts** - runs in isolated environment
+- ✅ **No path hunting** - works regardless of your Python setup (pyenv, virtualenv, system Python)
+- ✅ **Always up-to-date** - fetches latest version from GitHub
+- ✅ **Cross-platform** - same config works on macOS, Linux, Windows
+
+---
+
 ## Installation
 
-### Step 1: Install the Package
+### Quick Start (Recommended)
 
-Choose one of these methods:
-
-**Using pip (recommended):**
+**Install uv** (includes uvx):
 ```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Or with pip
+pip install uv
+```
+
+That's it! You don't need to install the MCP server separately - `uvx` will handle it automatically when your IDE starts.
+
+---
+
+### Alternative: Traditional Installation
+
+If you prefer pip/uv install (not needed if using uvx):
+
+```bash
+# From GitHub
 pip install git+https://github.com/viascientific/viafoundry-mcp.git
-```
 
-**Using uv:**
-```bash
+# Or with uv
 uv pip install git+https://github.com/viascientific/viafoundry-mcp.git
-```
 
-**For development:**
-```bash
+# From PyPI (coming soon)
+pip install viafoundry-mcp
+
+# For development (editable install)
 git clone https://github.com/viascientific/viafoundry-mcp.git
 cd viafoundry-mcp
 pip install -e .
 ```
 
-### Step 2: Configure Your Credentials
+After installation, you'll need to find the binary path and configure your IDE manually. See the **"🔧 Using Local Installation"** section in Troubleshooting below for detailed instructions.
+
+---
+
+### Configure Your Credentials
 
 Create a `.env` file with your ViaFoundry credentials:
 
@@ -64,39 +96,27 @@ EOF
 
 2. **Add ViaFoundry Server**
 
-   First, find the **actual path** to the `viafoundry-mcp` command:
-
-   ```bash
-   # Find the real path (not the shim)
-   python -c "import sys; print(sys.executable.replace('python', 'viafoundry-mcp'))"
-   ```
-
-   Or manually check:
-   ```bash
-   ls ~/.pyenv/versions/*/bin/viafoundry-mcp
-   # Or for system Python:
-   which -a viafoundry-mcp
-   ```
-
-   Then add this configuration using the **full path**:
+   **Option A: From GitHub (current)**
    ```json
    {
      "viafoundry": {
-       "command": "/full/path/to/viafoundry-mcp"
+       "command": "uvx",
+       "args": ["--from", "git+https://github.com/viascientific/viafoundry-mcp.git", "viafoundry-mcp"]
      }
    }
    ```
 
-   **Example with pyenv:**
+   **Option B: From PyPI (coming soon - simpler!)**
    ```json
    {
      "viafoundry": {
-       "command": "/Users/yourusername/.pyenv/versions/3.12.2/bin/viafoundry-mcp"
+       "command": "uvx",
+       "args": ["viafoundry-mcp"]
      }
    }
    ```
 
-   **⚠️ Important:** Do NOT use pyenv shims (e.g., `~/.pyenv/shims/viafoundry-mcp`) as Cursor cannot execute them properly. Use the direct path to the binary.
+   That's it! No path hunting, no Python environment issues.
 
 3. **Restart Cursor**
    - Close and reopen Cursor completely
@@ -122,31 +142,32 @@ EOF
 2. **Edit Configuration**
 
    Open the file and add:
+
+   **Option A: From GitHub (current)**
    ```json
    {
      "mcpServers": {
        "viafoundry": {
-         "command": "bash",
-         "args": ["-l", "-c", "viafoundry-mcp"]
+         "command": "uvx",
+         "args": ["--from", "git+https://github.com/viascientific/viafoundry-mcp.git", "viafoundry-mcp"]
        }
      }
    }
    ```
 
-   If you already have other servers, add ViaFoundry to the `mcpServers` object:
+   **Option B: From PyPI (coming soon - simpler!)**
    ```json
    {
      "mcpServers": {
-       "existing-server": {
-         "command": "some-other-command"
-       },
        "viafoundry": {
-         "command": "bash",
-         "args": ["-l", "-c", "viafoundry-mcp"]
+         "command": "uvx",
+         "args": ["viafoundry-mcp"]
        }
      }
    }
    ```
+
+   If you already have other servers, add ViaFoundry to the `mcpServers` object using either option above.
 
 3. **Restart Claude Desktop**
    - Quit Claude Desktop completely (Cmd+Q on Mac)
@@ -176,32 +197,33 @@ EOF
 
 3. **Add ViaFoundry Server**
 
-   Add to your config:
+   **Option A: From GitHub (current)**
    ```json
    {
      "mcpServers": [
        {
          "name": "viafoundry",
-         "command": "bash",
-         "args": ["-l", "-c", "viafoundry-mcp"]
+         "command": "uvx",
+         "args": ["--from", "git+https://github.com/viascientific/viafoundry-mcp.git", "viafoundry-mcp"]
        }
      ]
    }
    ```
 
-   If you have other settings, merge it:
+   **Option B: From PyPI (coming soon - simpler!)**
    ```json
    {
-     "models": [...],
      "mcpServers": [
        {
          "name": "viafoundry",
-         "command": "bash",
-         "args": ["-l", "-c", "viafoundry-mcp"]
+         "command": "uvx",
+         "args": ["viafoundry-mcp"]
        }
      ]
    }
    ```
+
+   If you have other settings, merge with your existing config.
 
 4. **Restart VSCode**
    - Reload the window: `Cmd+Shift+P` → "Developer: Reload Window"
@@ -217,12 +239,26 @@ EOF
 ViaFoundry MCP works with any tool supporting the Model Context Protocol:
 
 **Cline, Windsurf, Zed, etc:**
+
+**Option A: From GitHub (current)**
 ```json
 {
   "mcpServers": {
     "viafoundry": {
-      "command": "bash",
-      "args": ["-l", "-c", "viafoundry-mcp"]
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/viascientific/viafoundry-mcp.git", "viafoundry-mcp"]
+    }
+  }
+}
+```
+
+**Option B: From PyPI (coming soon - simpler!)**
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "command": "uvx",
+      "args": ["viafoundry-mcp"]
     }
   }
 }
@@ -349,18 +385,18 @@ AI: Collection: Breast Cancer RNA-Seq Study
 
 ## Troubleshooting
 
-### ❌ "Command not found: viafoundry-mcp"
+### ❌ "Command not found: uvx"
 
 **Solution:**
 ```bash
+# Install uv (includes uvx)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Or with pip
+pip install uv
+
 # Verify installation
-pip install git+https://github.com/viascientific/viafoundry-mcp.git
-
-# Check if command exists
-which viafoundry-mcp
-
-# If not found, check your Python bin directory is in PATH
-echo $PATH
+uvx --version
 ```
 
 ---
@@ -408,13 +444,62 @@ EOF
 ### ❌ "No tools showing up in IDE"
 
 **Solutions:**
-1. **Restart your IDE completely** (not just reload)
-2. **Check MCP server status** in IDE settings
-3. **Verify command works:**
-   ```bash
-   viafoundry-mcp --help
-   ```
+1. **Verify uv is installed:** `uvx --version`
+2. **Check configuration** matches the examples above exactly
+3. **Restart your IDE completely** (quit and reopen, not just reload)
 4. **Check IDE logs** for errors (usually in settings/debug panel)
+5. **Test the server manually:**
+   ```bash
+   uvx --from git+https://github.com/viascientific/viafoundry-mcp.git viafoundry-mcp
+   ```
+
+---
+
+### 🔧 Using Local Installation (Alternative to uvx)
+
+If you installed with pip/uv and want to use the local installation instead of uvx:
+
+**Step 1: Find the correct binary path**
+
+```bash
+# Method 1: Using Python (most reliable)
+python -c "import sys; print(sys.executable.replace('python', 'viafoundry-mcp'))"
+
+# Method 2: For pyenv users - find the actual binary (not the shim!)
+ls ~/.pyenv/versions/*/bin/viafoundry-mcp
+
+# Method 3: Check all locations
+which -a viafoundry-mcp
+```
+
+**Step 2: Use the full path in your IDE config**
+
+**Cursor:**
+```json
+{
+  "viafoundry": {
+    "command": "/Users/yourusername/.pyenv/versions/3.12.2/bin/viafoundry-mcp"
+  }
+}
+```
+
+**Claude Desktop / VSCode Continue:**
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "command": "/Users/yourusername/.pyenv/versions/3.12.2/bin/viafoundry-mcp"
+    }
+  }
+}
+```
+
+**⚠️ Important for pyenv users:**
+- **DO NOT use** `~/.pyenv/shims/viafoundry-mcp` - shims are wrapper scripts that don't work in IDEs
+- **DO use** the actual binary path: `~/.pyenv/versions/X.X.X/bin/viafoundry-mcp`
+- Replace `X.X.X` with your Python version (e.g., `3.12.2`)
+
+**Step 3: Restart your IDE**
 
 ---
 
@@ -450,16 +535,17 @@ python test_mcp_manual.py
 ### Project Structure
 ```
 viafoundry-mcp/
-├── mcp_server/
-│   ├── server.py          # Main MCP server implementation
-│   ├── .env.example       # Credentials template
-│   └── __init__.py
-├── pyproject.toml         # Package configuration
-├── setup.py               # Setup script
-├── LICENSE                # Apache 2.0 License
-├── README.md              # This file
-├── CHANGELOG.md           # Version history
-└── test_mcp_manual.py     # Test client
+├── src/
+│   └── viafoundry_mcp/
+│       ├── server.py          # Main MCP server implementation
+│       ├── config.py          # Configuration management
+│       └── __init__.py
+├── pyproject.toml             # Package configuration
+├── setup.py                   # Setup script
+├── LICENSE                    # Apache 2.0 License
+├── README.md                  # This file
+├── CHANGELOG.md               # Version history
+└── test_mcp_manual.py         # Test client
 ```
 
 ### Contributing
