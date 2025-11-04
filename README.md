@@ -68,10 +68,13 @@ EOF
    ```json
    {
      "viafoundry": {
-       "command": "viafoundry-mcp"
+       "command": "bash",
+       "args": ["-l", "-c", "viafoundry-mcp"]
      }
    }
    ```
+
+   **Note:** This uses a shell wrapper to ensure `viafoundry-mcp` is found in your PATH.
 
 3. **Restart Cursor**
    - Close and reopen Cursor completely
@@ -101,7 +104,8 @@ EOF
    {
      "mcpServers": {
        "viafoundry": {
-         "command": "viafoundry-mcp"
+         "command": "bash",
+         "args": ["-l", "-c", "viafoundry-mcp"]
        }
      }
    }
@@ -115,7 +119,8 @@ EOF
          "command": "some-other-command"
        },
        "viafoundry": {
-         "command": "viafoundry-mcp"
+         "command": "bash",
+         "args": ["-l", "-c", "viafoundry-mcp"]
        }
      }
    }
@@ -155,7 +160,8 @@ EOF
      "mcpServers": [
        {
          "name": "viafoundry",
-         "command": "viafoundry-mcp"
+         "command": "bash",
+         "args": ["-l", "-c", "viafoundry-mcp"]
        }
      ]
    }
@@ -168,7 +174,8 @@ EOF
      "mcpServers": [
        {
          "name": "viafoundry",
-         "command": "viafoundry-mcp"
+         "command": "bash",
+         "args": ["-l", "-c", "viafoundry-mcp"]
        }
      ]
    }
@@ -192,7 +199,8 @@ ViaFoundry MCP works with any tool supporting the Model Context Protocol:
 {
   "mcpServers": {
     "viafoundry": {
-      "command": "viafoundry-mcp"
+      "command": "bash",
+      "args": ["-l", "-c", "viafoundry-mcp"]
     }
   }
 }
