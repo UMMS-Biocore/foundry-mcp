@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viafoundry-mcp"
+version = "1.0.0"
+description = "Model Context Protocol (MCP) server for ViaFoundry SDK"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "ViaScientific", email = "ayush.praveen@viascientific.com"}
+]
+keywords = ["mcp", "viafoundry", "bioinformatics", "workflow", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "viafoundry_sdk>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/viascientific/viafoundry-mcp"
+Documentation = "https://github.com/viascientific/viafoundry-mcp#readme"
+Repository = "https://github.com/viascientific/viafoundry-mcp"
+Issues = "https://github.com/viascientific/viafoundry-mcp/issues"
+
+[project.scripts]
+viafoundry-mcp = "viafoundry_mcp.server:main"
+viafoundry-mcp-setup = "viafoundry_mcp.config:setup_command"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["viafoundry_mcp*"]
+exclude = ["test*"]
+
+[tool.setuptools.package-data]
+viafoundry_mcp = ["*.example", ".env.example"]
