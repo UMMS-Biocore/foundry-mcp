@@ -1138,11 +1138,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             processes = via_client.process.list_processes()
 
             # Convert to dict for JSON serialization
-            result = processes.model_dump() if hasattr(processes, 'model_dump') else processes
+            if hasattr(processes, 'model_dump'):
+                result = processes.model_dump()
+            elif isinstance(processes, list):
+                result = [p.model_dump() if hasattr(p, 'model_dump') else p for p in processes]
+            else:
+                result = processes
 
             return [TextContent(
                 type="text",
-                text=json.dumps(result, indent=2)
+                text=json.dumps(result, indent=2, default=str)
             )]
 
         elif name == "get_process_details":
