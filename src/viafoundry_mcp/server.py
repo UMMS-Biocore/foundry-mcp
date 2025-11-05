@@ -552,27 +552,6 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="collect_report_files",
-            description=(
-                "Collect files from a report matching specific criteria. "
-                "Returns a filtered list of files based on the collection parameters."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    },
-                    "criteria": {
-                        "type": "object",
-                        "description": "Collection criteria (file types, patterns, etc.)"
-                    }
-                },
-                "required": ["report_id"]
-            }
-        ),
-        Tool(
             name="get_field_details",
             description=(
                 "Get detailed information about a specific metadata field. "
@@ -837,27 +816,6 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["data_id", "data_record"]
-            }
-        ),
-        Tool(
-            name="process_parameter",
-            description=(
-                "Process parameter operations for pipelines. "
-                "Performs parameter-related operations on process definitions."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "description": "Parameter operation to perform"
-                    },
-                    "parameter_data": {
-                        "type": "object",
-                        "description": "Parameter operation data"
-                    }
-                },
-                "required": ["operation"]
             }
         ),
 
@@ -1409,7 +1367,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             filters = arguments.get("filters", {})
             logger.info(f"Filtering process parameters")
 
-            filtered = via_client.process.filter_process_parameters(parameters, filters)
+            filtered = via_client.process.filter_parameters(parameters, filters)
             result = filtered.model_dump() if hasattr(filtered, 'model_dump') else filtered
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1442,17 +1400,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             record = via_client.metadata.create_data(collection_id, data)
             result = record.model_dump() if hasattr(record, 'model_dump') else record
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "collect_report_files":
-            report_id = arguments["report_id"]
-            output_dir = arguments["output_dir"]
-            file_patterns = arguments.get("file_patterns", [])
-            logger.info(f"Collecting report files from report {report_id}")
-
-            result_obj = via_client.reports.collect_report_files(report_id, output_dir, file_patterns)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -1510,7 +1457,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             parameter_data = arguments["parameter_data"]
             logger.info(f"Creating process parameter for process {process_id}")
 
-            param = via_client.process.create_process_parameter(process_id, parameter_data)
+            param = via_client.process.create_parameter(parameter_data)
             result = param.model_dump() if hasattr(param, 'model_dump') else param
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1520,7 +1467,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             parameter_data = arguments["parameter_data"]
             logger.info(f"Updating process parameter {parameter_id}")
 
-            updated = via_client.process.update_process_parameter(parameter_id, parameter_data)
+            updated = via_client.process.update_parameter(parameter_id, parameter_data)
             result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1583,15 +1530,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-        elif name == "process_parameter":
-            parameter_id = arguments["parameter_id"]
-            logger.info(f"Getting process parameter {parameter_id}")
-
-            param = via_client.process.get_process_parameter(parameter_id)
-            result = param.model_dump() if hasattr(param, 'model_dump') else param
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
         # Phase 4 Tools - Complete Coverage (14 tools)
         elif name == "delete_process":
             process_id = arguments["process_id"]
@@ -1606,7 +1544,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             parameter_id = arguments["parameter_id"]
             logger.info(f"Deleting process parameter {parameter_id}")
 
-            result_obj = via_client.process.delete_process_parameter(parameter_id)
+            result_obj = via_client.process.delete_parameter(parameter_id)
             result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1651,7 +1589,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             menu_data = arguments["menu_data"]
             logger.info(f"Creating menu group")
 
-            menu = via_client.metadata.create_menu_group(menu_data)
+            menu = via_client.process.create_menu_group(menu_data)
             result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1660,7 +1598,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             filters = arguments.get("filters", {})
             logger.info(f"Listing menu groups")
 
-            menus = via_client.metadata.list_menu_groups(**filters)
+            menus = via_client.process.list_menu_groups(**filters)
             result = menus.model_dump() if hasattr(menus, 'model_dump') else menus
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1670,7 +1608,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             menu_data = arguments["menu_data"]
             logger.info(f"Updating menu group {menu_id}")
 
-            updated = via_client.metadata.update_menu_group(menu_id, menu_data)
+            updated = via_client.process.update_menu_group(menu_id, menu_data)
             result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1679,7 +1617,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             name = arguments["name"]
             logger.info(f"Getting menu group by name: {name}")
 
-            menu = via_client.metadata.get_menu_group_by_name(name)
+            menu = via_client.process.get_menu_group_by_name(name)
             result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]

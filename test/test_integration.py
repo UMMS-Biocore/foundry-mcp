@@ -210,15 +210,15 @@ async def test_mcp_server():
 
             # Test 7: Verify tool count
             print("-"*80)
-            print("STEP 8: Verify Complete SDK Coverage")
+            print("STEP 8: Verify SDK Tool Coverage")
             print("-"*80)
-            expected_tools = 56
+            expected_tools = 50
             actual_tools = len(tools_result.tools)
 
             if actual_tools == expected_tools:
-                print(f"✓ Tool count correct: {actual_tools}/{expected_tools} (100% SDK coverage)")
+                print(f"✓ Tool count correct: {actual_tools} tools available")
             else:
-                print(f"⚠ Tool count mismatch: {actual_tools}/{expected_tools}")
+                print(f"⚠ Tool count mismatch: Expected {expected_tools}, got {actual_tools}")
             print()
 
             print("Tool categories:")
