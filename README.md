@@ -300,7 +300,7 @@ Once configured, ask your AI assistant to:
 
 ---
 
-## Available Tools (22 Total)
+## Available Tools (50 Total)
 
 ### 📊 Report Management (8 tools)
 | Tool | What It Does |
@@ -314,7 +314,8 @@ Once configured, ask your AI assistant to:
 | `get_report_dirs` | Get available upload directories |
 | `get_all_report_paths` | Get all file paths in a report |
 
-### 🔬 Process/Pipeline Management (5 tools)
+### 🔬 Process/Pipeline Management (18 tools)
+**Read Operations:**
 | Tool | What It Does |
 |------|-------------|
 | `list_all_processes` | List all ViaFoundry pipelines |
@@ -323,30 +324,74 @@ Once configured, ask your AI assistant to:
 | `list_process_parameters` | List all available parameters |
 | `get_pipeline_parameters` | Get parameters for a specific pipeline |
 
-### 🎨 Canvas & Visualizations (2 tools)
+**Create/Duplicate:**
+| Tool | What It Does |
+|------|-------------|
+| `duplicate_process` | Duplicate an existing pipeline |
+| `create_process` | Create a new process/pipeline |
+| `create_process_config` | Create process configuration |
+| `create_process_parameter` | Create new process parameter |
+
+**Update:**
+| Tool | What It Does |
+|------|-------------|
+| `update_process` | Update existing process/pipeline |
+| `update_process_parameter` | Update process parameter |
+| `filter_process_parameters` | Filter parameters by criteria |
+
+**Delete:**
+| Tool | What It Does |
+|------|-------------|
+| `delete_process` | Delete a process/pipeline |
+| `delete_process_parameter` | Delete a process parameter |
+
+**Menu Groups:**
+| Tool | What It Does |
+|------|-------------|
+| `create_menu_group` | Create menu group |
+| `list_menu_groups` | List all menu groups |
+| `update_menu_group` | Update menu group |
+| `get_menu_group_by_name` | Get menu group by name |
+
+### 🎨 Canvas & Visualizations (6 tools)
 | Tool | What It Does |
 |------|-------------|
 | `search_canvas` | Search for visualizations/dashboards |
 | `get_canvas_details` | Get detailed canvas information |
+| `get_canvas_fields` | Get all fields in a canvas |
+| `create_canvas` | Create new canvas visualization |
+| `update_canvas` | Update existing canvas |
+| `delete_canvas` | Delete a canvas |
 
-### 🗂️ Metadata Collections & Datasets (3 tools)
+### 🗂️ Metadata Collections & Datasets (7 tools)
 | Tool | What It Does |
 |------|-------------|
 | `search_datasets` | Search for dataset files |
 | `search_collections` | Search for dataset collections |
 | `get_collection_details` | Get collection details |
+| `create_collection` | Create new collection |
+| `update_collection` | Update existing collection |
+| `delete_collection` | Delete a collection |
+| `add_files_to_dataset` | Add files to a dataset |
 
-### 📋 Metadata Fields & Schema (2 tools)
+### 📋 Metadata Fields & Schema (6 tools)
 | Tool | What It Does |
 |------|-------------|
 | `search_metadata_fields` | Search metadata field definitions |
 | `get_collection_fields` | Get fields for a collection |
+| `get_field_details` | Get detailed field information |
+| `create_metadata_field` | Create new metadata field |
+| `update_metadata_field` | Update metadata field |
+| `delete_metadata_field` | Delete metadata field |
 
-### 📝 Metadata Records (2 tools)
+### 📝 Metadata Records (5 tools)
 | Tool | What It Does |
 |------|-------------|
 | `search_metadata_records` | Search metadata data records |
 | `get_metadata_record` | Get specific metadata record |
+| `create_metadata_record` | Create new metadata record |
+| `update_metadata_record` | Update metadata record |
+| `delete_metadata_record` | Delete metadata record |
 
 ---
 

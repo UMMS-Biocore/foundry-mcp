@@ -1433,11 +1433,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "create_process":
-            name = arguments["name"]
-            process_data = arguments.get("process_data", {})
-            logger.info(f"Creating process: {name}")
+            process_data = arguments["process_data"]
+            logger.info(f"Creating process")
 
-            process = via_client.process.create_process(name, **process_data)
+            process = via_client.process.create_process(process_data)
             result = process.model_dump() if hasattr(process, 'model_dump') else process
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1453,9 +1452,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "create_process_parameter":
-            process_id = arguments["process_id"]
             parameter_data = arguments["parameter_data"]
-            logger.info(f"Creating process parameter for process {process_id}")
+            logger.info(f"Creating process parameter")
 
             param = via_client.process.create_parameter(parameter_data)
             result = param.model_dump() if hasattr(param, 'model_dump') else param
@@ -1521,11 +1519,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "update_metadata_record":
-            record_id = arguments["record_id"]
-            data = arguments["data"]
-            logger.info(f"Updating metadata record {record_id}")
+            data_id = arguments["data_id"]
+            data_record = arguments["data_record"]
+            logger.info(f"Updating metadata record {data_id}")
 
-            updated = via_client.metadata.update_data(record_id, data)
+            updated = via_client.metadata.update_data(data_id, data_record)
             result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1577,19 +1575,19 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "delete_metadata_record":
-            record_id = arguments["record_id"]
-            logger.info(f"Deleting metadata record {record_id}")
+            data_id = arguments["data_id"]
+            logger.info(f"Deleting metadata record {data_id}")
 
-            result_obj = via_client.metadata.delete_data(record_id)
+            result_obj = via_client.metadata.delete_data(data_id)
             result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "create_menu_group":
-            menu_data = arguments["menu_data"]
-            logger.info(f"Creating menu group")
+            menu_name = arguments["menu_name"]
+            logger.info(f"Creating menu group: {menu_name}")
 
-            menu = via_client.process.create_menu_group(menu_data)
+            menu = via_client.process.create_menu_group(name=menu_name)
             result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1604,20 +1602,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "update_menu_group":
-            menu_id = arguments["menu_id"]
-            menu_data = arguments["menu_data"]
-            logger.info(f"Updating menu group {menu_id}")
+            menu_group_id = arguments["menu_group_id"]
+            menu_name = arguments["menu_name"]
+            logger.info(f"Updating menu group {menu_group_id}")
 
-            updated = via_client.process.update_menu_group(menu_id, menu_data)
+            updated = via_client.process.update_menu_group(menu_group_id=menu_group_id, name=menu_name)
             result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "get_menu_group_by_name":
-            name = arguments["name"]
-            logger.info(f"Getting menu group by name: {name}")
+            group_name = arguments["group_name"]
+            logger.info(f"Getting menu group by name: {group_name}")
 
-            menu = via_client.process.get_menu_group_by_name(name)
+            menu = via_client.process.get_menu_group_by_name(group_name)
             result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
