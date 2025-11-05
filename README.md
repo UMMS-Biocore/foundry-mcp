@@ -283,17 +283,26 @@ Once configured, ask your AI assistant to:
 - "What pipelines are available in ViaFoundry?"
 - "Show me details about the RNA-Seq pipeline"
 - "What parameters does process 42 need?"
+- "Show me the revision history for pipeline 123"
+- "List all available parameters in the system"
 
 ### Search Data
 - "Find datasets related to 'human genome'"
 - "Search for collections about cancer studies"
 - "Show me details about collection 15"
+- "Search for canvas visualizations about RNA-Seq"
+- "What metadata fields does this collection have?"
+
+### Explore Metadata
+- "Search for metadata records matching 'cancer'"
+- "Show me metadata record 456"
+- "What metadata fields are defined in the system?"
 
 ---
 
-## Available Tools (12 Total)
+## Available Tools (22 Total)
 
-### 📊 Report Management (7 tools)
+### 📊 Report Management (8 tools)
 | Tool | What It Does |
 |------|-------------|
 | `fetch_report` | Get complete report data with metadata |
@@ -303,19 +312,41 @@ Once configured, ask your AI assistant to:
 | `load_file` | View file contents directly in chat |
 | `upload_file` | Upload files to reports |
 | `get_report_dirs` | Get available upload directories |
+| `get_all_report_paths` | Get all file paths in a report |
 
-### 🔬 Process/Pipeline Management (2 tools)
+### 🔬 Process/Pipeline Management (5 tools)
 | Tool | What It Does |
 |------|-------------|
 | `list_all_processes` | List all ViaFoundry pipelines |
 | `get_process_details` | Get detailed pipeline information |
+| `get_process_revisions` | Get version history for a pipeline |
+| `list_process_parameters` | List all available parameters |
+| `get_pipeline_parameters` | Get parameters for a specific pipeline |
 
-### 🗂️ Metadata & Dataset Search (3 tools)
+### 🎨 Canvas & Visualizations (2 tools)
+| Tool | What It Does |
+|------|-------------|
+| `search_canvas` | Search for visualizations/dashboards |
+| `get_canvas_details` | Get detailed canvas information |
+
+### 🗂️ Metadata Collections & Datasets (3 tools)
 | Tool | What It Does |
 |------|-------------|
 | `search_datasets` | Search for dataset files |
 | `search_collections` | Search for dataset collections |
 | `get_collection_details` | Get collection details |
+
+### 📋 Metadata Fields & Schema (2 tools)
+| Tool | What It Does |
+|------|-------------|
+| `search_metadata_fields` | Search metadata field definitions |
+| `get_collection_fields` | Get fields for a collection |
+
+### 📝 Metadata Records (2 tools)
+| Tool | What It Does |
+|------|-------------|
+| `search_metadata_records` | Search metadata data records |
+| `get_metadata_record` | Get specific metadata record |
 
 ---
 
@@ -570,7 +601,7 @@ We welcome contributions! Please:
 ## Technical Details
 
 **Package:** `viafoundry-mcp`
-**Version:** 1.0.0
+**Version:** 1.0.1
 **Python:** 3.9+
 **Protocol:** MCP (Model Context Protocol)
 **Transport:** stdio (local), HTTP/SSE (hosted - coming soon)

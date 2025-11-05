@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.0.1] - 2025-11-05
+
+### Added
+- **Phase 1: 10 New High-Impact Read Tools** (22 tools total):
+
+  **Process Management** (3 new tools):
+  - `get_process_revisions` - Get revision history for a specific process/pipeline
+  - `list_process_parameters` - List all available parameters in ViaFoundry
+  - `get_pipeline_parameters` - Get parameters for a specific pipeline by ID
+
+  **Metadata Canvas** (2 new tools):
+  - `search_canvas` - Search for canvas visualizations in ViaFoundry
+  - `get_canvas_details` - Get detailed information about a specific canvas
+
+  **Metadata Fields** (2 new tools):
+  - `search_metadata_fields` - Search for metadata field definitions
+  - `get_collection_fields` - Get metadata fields for a specific collection
+
+  **Metadata Records** (2 new tools):
+  - `search_metadata_records` - Search for metadata data records
+  - `get_metadata_record` - Get a specific metadata record by ID
+
+  **Reports** (1 new tool):
+  - `get_all_report_paths` - Get all file paths for a specific report
+
+### Improved
+- **SDK Coverage**: Increased from 21% to 39% (22/56 methods)
+- **Module Coverage**:
+  - Reports: 64% (9/14 methods)
+  - Process: 28% (5/18 methods)
+  - Metadata: 33% (8/24 methods)
+
+### Summary
+This release adds 10 carefully selected read-only tools that enable:
+- Version history exploration for pipelines
+- Parameter discovery and inspection
+- Visualization (canvas) discovery
+- Metadata schema exploration
+- Complete metadata record search
+
+All new tools are read-only (safe) and provide high value for data exploration workflows.
+
 ## [1.0.0] - 2025-11-04
 
 ### Added
