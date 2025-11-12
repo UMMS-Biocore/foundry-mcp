@@ -67,6 +67,10 @@ viafoundry-sdk/
 requirements-mcp.txt
 mcp_server/
 
+# Backup files (local only, do not commit)
+src/viafoundry_mcp/update_delete_operations_backup.py
+OPERATIONS_BACKUP_README.md
+
 # Test outputs
 .pytest_cache/
 test/__pycache__/

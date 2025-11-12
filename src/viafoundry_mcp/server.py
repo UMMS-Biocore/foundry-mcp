@@ -606,11 +606,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "input_params": {
                         "type": "array",
-                        "description": "Input parameter definitions"
+                        "description": "Input parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional, test)"
                     },
                     "output_params": {
                         "type": "array",
-                        "description": "Output parameter definitions"
+                        "description": "Output parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional)"
                     },
                     "summary": {
                         "type": "string",
@@ -618,7 +618,19 @@ async def list_tools() -> list[Tool]:
                     },
                     "script_body": {
                         "type": "string",
-                        "description": "Process script body"
+                        "description": "Process script body (raw script content, will be formatted automatically)"
+                    },
+                    "script_language": {
+                        "type": "string",
+                        "description": "Script language/mode (e.g., 'Shell', 'Python', 'R'). Defaults to 'Shell'."
+                    },
+                    "permission_settings": {
+                        "type": "object",
+                        "description": "Permission settings (viewPermissions, writeGroupIds, sharedGroupId)"
+                    },
+                    "revision_comment": {
+                        "type": "string",
+                        "description": "Revision comment for the initial version"
                     }
                 },
                 "required": ["name", "menu_group_name", "script_body"]
@@ -642,27 +654,6 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="update_process",
-            description=(
-                "Update an existing process/pipeline. "
-                "Modifies process configuration, scripts, or parameters."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "process_id": {
-                        "type": "string",
-                        "description": "The ID of the process to update"
-                    },
-                    "process_data": {
-                        "type": "object",
-                        "description": "Updated process configuration"
-                    }
-                },
-                "required": ["process_id", "process_data"]
-            }
-        ),
-        Tool(
             name="create_process_parameter",
             description=(
                 "Create a new parameter for processes. "
@@ -677,27 +668,6 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["parameter_data"]
-            }
-        ),
-        Tool(
-            name="update_process_parameter",
-            description=(
-                "Update an existing process parameter. "
-                "Modifies parameter definition, type, or constraints."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "parameter_id": {
-                        "type": "string",
-                        "description": "The ID of the parameter to update"
-                    },
-                    "parameter_data": {
-                        "type": "object",
-                        "description": "Updated parameter definition"
-                    }
-                },
-                "required": ["parameter_id", "parameter_data"]
             }
         ),
         Tool(
@@ -718,27 +688,6 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="update_canvas",
-            description=(
-                "Update an existing canvas visualization. "
-                "Modifies canvas configuration or visualization settings."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "canvas_id": {
-                        "type": "string",
-                        "description": "The ID of the canvas to update"
-                    },
-                    "canvas_data": {
-                        "type": "object",
-                        "description": "Updated canvas configuration"
-                    }
-                },
-                "required": ["canvas_id", "canvas_data"]
-            }
-        ),
-        Tool(
             name="create_metadata_field",
             description=(
                 "Create a new metadata field definition. "
@@ -755,173 +704,8 @@ async def list_tools() -> list[Tool]:
                 "required": ["field_data"]
             }
         ),
-        Tool(
-            name="update_metadata_field",
-            description=(
-                "Update an existing metadata field definition. "
-                "Modifies field type, constraints, or other properties."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "field_id": {
-                        "type": "string",
-                        "description": "The ID of the field to update"
-                    },
-                    "field_data": {
-                        "type": "object",
-                        "description": "Updated field definition"
-                    }
-                },
-                "required": ["field_id", "field_data"]
-            }
-        ),
-        Tool(
-            name="update_collection",
-            description=(
-                "Update an existing collection. "
-                "Modifies collection name, description, or configuration."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "collection_id": {
-                        "type": "string",
-                        "description": "The ID of the collection to update"
-                    },
-                    "collection_data": {
-                        "type": "object",
-                        "description": "Updated collection data"
-                    }
-                },
-                "required": ["collection_id", "collection_data"]
-            }
-        ),
-        Tool(
-            name="update_metadata_record",
-            description=(
-                "Update an existing metadata record. "
-                "Modifies field values in a metadata data record."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "data_id": {
-                        "type": "string",
-                        "description": "The ID of the metadata record to update"
-                    },
-                    "data_record": {
-                        "type": "object",
-                        "description": "Updated record data"
-                    }
-                },
-                "required": ["data_id", "data_record"]
-            }
-        ),
 
-        # Phase 4 Tools - Complete Coverage
-        Tool(
-            name="delete_process",
-            description=(
-                "Delete a process/pipeline. "
-                "Permanently removes the specified process. Use with caution."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "process_id": {
-                        "type": "string",
-                        "description": "The ID of the process to delete"
-                    }
-                },
-                "required": ["process_id"]
-            }
-        ),
-        Tool(
-            name="delete_process_parameter",
-            description=(
-                "Delete a process parameter. "
-                "Permanently removes the specified parameter. Use with caution."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "parameter_id": {
-                        "type": "string",
-                        "description": "The ID of the parameter to delete"
-                    }
-                },
-                "required": ["parameter_id"]
-            }
-        ),
-        Tool(
-            name="delete_collection",
-            description=(
-                "Delete a collection. "
-                "Permanently removes the specified collection. Use with caution."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "collection_id": {
-                        "type": "string",
-                        "description": "The ID of the collection to delete"
-                    }
-                },
-                "required": ["collection_id"]
-            }
-        ),
-        Tool(
-            name="delete_canvas",
-            description=(
-                "Delete a canvas visualization. "
-                "Permanently removes the specified canvas. Use with caution."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "canvas_id": {
-                        "type": "string",
-                        "description": "The ID of the canvas to delete"
-                    }
-                },
-                "required": ["canvas_id"]
-            }
-        ),
-        Tool(
-            name="delete_metadata_field",
-            description=(
-                "Delete a metadata field definition. "
-                "Permanently removes the specified field. Use with caution."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "field_id": {
-                        "type": "string",
-                        "description": "The ID of the field to delete"
-                    }
-                },
-                "required": ["field_id"]
-            }
-        ),
-        Tool(
-            name="delete_metadata_record",
-            description=(
-                "Delete a metadata record. "
-                "Permanently removes the specified data record. Use with caution."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "data_id": {
-                        "type": "string",
-                        "description": "The ID of the metadata record to delete"
-                    }
-                },
-                "required": ["data_id"]
-            }
-        ),
+        # Phase 4 Tools - Complete Coverage (Note: Update/Delete operations have been moved to backup file)
         Tool(
             name="create_menu_group",
             description=(
@@ -949,27 +733,6 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {},
                 "required": []
-            }
-        ),
-        Tool(
-            name="update_menu_group",
-            description=(
-                "Update an existing menu group. "
-                "Modifies menu group name or properties."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "menu_group_id": {
-                        "type": "string",
-                        "description": "The ID of the menu group to update"
-                    },
-                    "menu_name": {
-                        "type": "string",
-                        "description": "New menu group name"
-                    }
-                },
-                "required": ["menu_group_id", "menu_name"]
             }
         ),
         Tool(
@@ -1428,11 +1191,40 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         # Phase 3 Tools - Advanced Management (12 tools)
         elif name == "create_process_config":
-            process_id = arguments["process_id"]
-            config = arguments["config"]
-            logger.info(f"Creating process config for process {process_id}")
+            name_arg = arguments["name"]
+            menu_group_name = arguments["menu_group_name"]
+            script_body = arguments["script_body"]
+            input_params = arguments.get("input_params")
+            output_params = arguments.get("output_params")
+            summary = arguments.get("summary")
+            script_language = arguments.get("script_language", "Shell")
+            permission_settings = arguments.get("permission_settings")
+            revision_comment = arguments.get("revision_comment")
+            logger.info(f"Creating process config for {name_arg}")
 
-            result_obj = via_client.process.create_process_config(process_id, config)
+            # Format script_body like in the notebook: f"script:\n\"\"\"\n{script_body}\n\"\"\""
+            formatted_script = f"script:\n\"\"\"\n{script_body}\n\"\"\""
+
+            # Build kwargs dict, only including non-None values
+            config_kwargs = {
+                "name": name_arg,
+                "menu_group_name": menu_group_name,
+                "script_body": formatted_script,
+            }
+            if input_params is not None:
+                config_kwargs["input_params"] = input_params
+            if output_params is not None:
+                config_kwargs["output_params"] = output_params
+            if summary is not None:
+                config_kwargs["summary"] = summary
+            if script_language is not None:
+                config_kwargs["script_language"] = script_language
+            if permission_settings is not None:
+                config_kwargs["permission_settings"] = permission_settings
+            if revision_comment is not None:
+                config_kwargs["revision_comment"] = revision_comment
+
+            result_obj = via_client.process.create_process_config(**config_kwargs)
             result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1441,20 +1233,46 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             process_data = arguments["process_data"]
             logger.info(f"Creating process")
 
-            process = via_client.process.create_process(process_data)
-            result = process.model_dump() if hasattr(process, 'model_dump') else process
+            # Remove None values from nested dicts (API may not accept null)
+            def remove_none(obj):
+                if isinstance(obj, dict):
+                    return {k: remove_none(v) for k, v in obj.items() if v is not None}
+                elif isinstance(obj, list):
+                    return [remove_none(item) for item in obj]
+                return obj
+            
+            cleaned_data = remove_none(process_data)
+            
+            # Log the data being sent for debugging
+            logger.debug(f"Process data being sent: {json.dumps(cleaned_data, indent=2)}")
 
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "update_process":
-            process_id = arguments["process_id"]
-            process_data = arguments["process_data"]
-            logger.info(f"Updating process {process_id}")
-
-            updated = via_client.process.update_process(process_id, process_data)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            # SDK accepts process_data as keyword argument (process_data=...)
+            try:
+                process = via_client.process.create_process(process_data=cleaned_data)
+                result = process.model_dump() if hasattr(process, 'model_dump') else process
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                # Capture more detailed error information
+                error_details = {
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "tool": name,
+                }
+                # Try to get more details from the exception
+                if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                    error_details["api_response"] = e.response.text
+                if hasattr(e, 'status_code'):
+                    error_details["status_code"] = e.status_code
+                if hasattr(e, 'args') and e.args:
+                    error_details["exception_args"] = list(e.args)
+                # Try to get all exception attributes
+                if hasattr(e, '__dict__'):
+                    error_details["exception_attributes"] = {
+                        k: str(v) for k, v in e.__dict__.items()
+                        if k not in ['args'] and not k.startswith('_')
+                    }
+                logger.error(f"Error creating process: {error_details}", exc_info=True)
+                return [TextContent(type="text", text=json.dumps(error_details, indent=2))]
 
         elif name == "create_process_parameter":
             parameter_data = arguments["parameter_data"]
@@ -1462,16 +1280,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             param = via_client.process.create_parameter(parameter_data)
             result = param.model_dump() if hasattr(param, 'model_dump') else param
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "update_process_parameter":
-            parameter_id = arguments["parameter_id"]
-            parameter_data = arguments["parameter_data"]
-            logger.info(f"Updating process parameter {parameter_id}")
-
-            updated = via_client.process.update_parameter(parameter_id, parameter_data)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -1484,16 +1292,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-        elif name == "update_canvas":
-            canvas_id = arguments["canvas_id"]
-            canvas_data = arguments["canvas_data"]
-            logger.info(f"Updating canvas {canvas_id}")
-
-            updated = via_client.metadata.update_canvas(canvas_id, canvas_data)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
         elif name == "create_metadata_field":
             field_data = arguments["field_data"]
             logger.info(f"Creating metadata field")
@@ -1503,91 +1301,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-        elif name == "update_metadata_field":
-            field_id = arguments["field_id"]
-            field_data = arguments["field_data"]
-            logger.info(f"Updating metadata field {field_id}")
-
-            updated = via_client.metadata.update_field(field_id, field_data)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "update_collection":
-            collection_id = arguments["collection_id"]
-            collection_data = arguments["collection_data"]
-            logger.info(f"Updating collection {collection_id}")
-
-            updated = via_client.metadata.update_collection(collection_id, collection_data)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "update_metadata_record":
-            data_id = arguments["data_id"]
-            data_record = arguments["data_record"]
-            logger.info(f"Updating metadata record {data_id}")
-
-            updated = via_client.metadata.update_data(data_id, data_record)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        # Phase 4 Tools - Complete Coverage (14 tools)
-        elif name == "delete_process":
-            process_id = arguments["process_id"]
-            logger.info(f"Deleting process {process_id}")
-
-            result_obj = via_client.process.delete_process(process_id)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "delete_process_parameter":
-            parameter_id = arguments["parameter_id"]
-            logger.info(f"Deleting process parameter {parameter_id}")
-
-            result_obj = via_client.process.delete_parameter(parameter_id)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "delete_collection":
-            collection_id = arguments["collection_id"]
-            logger.info(f"Deleting collection {collection_id}")
-
-            result_obj = via_client.metadata.delete_collection(collection_id)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "delete_canvas":
-            canvas_id = arguments["canvas_id"]
-            logger.info(f"Deleting canvas {canvas_id}")
-
-            result_obj = via_client.metadata.delete_canvas(canvas_id)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "delete_metadata_field":
-            field_id = arguments["field_id"]
-            logger.info(f"Deleting metadata field {field_id}")
-
-            result_obj = via_client.metadata.delete_field(field_id)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "delete_metadata_record":
-            data_id = arguments["data_id"]
-            logger.info(f"Deleting metadata record {data_id}")
-
-            result_obj = via_client.metadata.delete_data(data_id)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
+        # Phase 4 Tools - Complete Coverage (Note: Update/Delete operations have been moved to backup file)
         elif name == "create_menu_group":
             menu_name = arguments["menu_name"]
             logger.info(f"Creating menu group: {menu_name}")
@@ -1603,16 +1317,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             menus = via_client.process.list_menu_groups(**filters)
             result = menus.model_dump() if hasattr(menus, 'model_dump') else menus
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "update_menu_group":
-            menu_group_id = arguments["menu_group_id"]
-            menu_name = arguments["menu_name"]
-            logger.info(f"Updating menu group {menu_group_id}")
-
-            updated = via_client.process.update_menu_group(menu_group_id=menu_group_id, name=menu_name)
-            result = updated.model_dump() if hasattr(updated, 'model_dump') else updated
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
