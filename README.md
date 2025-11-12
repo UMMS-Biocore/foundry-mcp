@@ -64,7 +64,22 @@ After installation, you'll need to find the binary path and configure your IDE m
 
 ### Configure Your Credentials
 
-Create a `.env` file with your ViaFoundry credentials:
+**Option 1: Interactive Setup (Easiest)**
+
+Run the built-in setup command:
+
+```bash
+viafoundry-mcp-setup
+```
+
+This will:
+- Prompt you for your ViaFoundry hostname, username, and password
+- Save credentials to `~/.config/viafoundry-mcp/.env`
+- Set proper file permissions automatically
+
+**Option 2: Manual Setup**
+
+Create a `.env` file manually:
 
 ```bash
 # Create config directory (recommended location)
@@ -284,7 +299,7 @@ Once configured, ask your AI assistant to:
 - "Show me details about the RNA-Seq pipeline"
 - "What parameters does process 42 need?"
 - "Show me the revision history for pipeline 123"
-- "List all available parameters in the system"
+- "Create a new process based on an existing one"
 
 ### Search Data
 - "Find datasets related to 'human genome'"
@@ -293,105 +308,113 @@ Once configured, ask your AI assistant to:
 - "Search for canvas visualizations about RNA-Seq"
 - "What metadata fields does this collection have?"
 
-### Explore Metadata
+### Manage Metadata
 - "Search for metadata records matching 'cancer'"
 - "Show me metadata record 456"
 - "What metadata fields are defined in the system?"
+- "Create a new metadata record for my experiment"
 
 ---
 
-## Available Tools (50 Total)
+## Available Tools (37 Total)
 
 ### 📊 Report Management (8 tools)
+
+Access and manage ViaFoundry reports and files.
+
 | Tool | What It Does |
 |------|-------------|
 | `fetch_report` | Get complete report data with metadata |
-| `list_processes` | List all processes in a report |
-| `list_files` | List files (all or by process) |
-| `download_file` | Download files from reports |
-| `load_file` | View file contents directly in chat |
+| `list_processes` | List all processes that generated output in a report |
+| `list_files` | List files (all or by specific process) |
+| `download_file` | Download files from reports to local machine |
+| `load_file` | View file contents directly (tabular data formatted) |
 | `upload_file` | Upload files to reports |
-| `get_report_dirs` | Get available upload directories |
-| `get_all_report_paths` | Get all file paths in a report |
+| `get_report_dirs` | Get available directories for file uploads |
+| `get_all_report_paths` | Get all accessible file paths in a report |
 
-### 🔬 Process/Pipeline Management (18 tools)
-**Read Operations:**
+---
+
+### 🔬 Process & Pipeline Management (10 tools)
+
+Create, explore, and manage bioinformatics pipelines.
+
 | Tool | What It Does |
 |------|-------------|
-| `list_all_processes` | List all ViaFoundry pipelines |
-| `get_process_details` | Get detailed pipeline information |
+| `list_all_processes` | List all processes/pipelines in ViaFoundry |
+| `get_process_details` | Get detailed pipeline configuration and scripts |
 | `get_process_revisions` | Get version history for a pipeline |
-| `list_process_parameters` | List all available parameters |
+| `duplicate_process` | Clone an existing pipeline for modification |
+| `create_process` | Create a new custom process/pipeline |
+| `create_process_config` | Generate process configuration helper |
+| `list_process_parameters` | List all available parameter definitions |
 | `get_pipeline_parameters` | Get parameters for a specific pipeline |
+| `create_process_parameter` | Create new parameter definition |
+| `filter_process_parameters` | Filter parameters by name, type, or qualifier |
 
-**Create/Duplicate:**
+---
+
+### 📂 Menu Group Management (3 tools)
+
+Organize processes into logical groups.
+
 | Tool | What It Does |
 |------|-------------|
-| `duplicate_process` | Duplicate an existing pipeline |
-| `create_process` | Create a new process/pipeline |
-| `create_process_config` | Create process configuration |
-| `create_process_parameter` | Create new process parameter |
+| `create_menu_group` | Create new menu group for organizing processes |
+| `list_menu_groups` | List all available menu groups |
+| `get_menu_group_by_name` | Find menu group ID by name |
 
-**Update:**
+---
+
+### 🗂️ Dataset & Collection Management (6 tools)
+
+Search and organize datasets and collections.
+
 | Tool | What It Does |
 |------|-------------|
-| `update_process` | Update existing process/pipeline |
-| `update_process_parameter` | Update process parameter |
-| `filter_process_parameters` | Filter parameters by criteria |
-
-**Delete:**
-| Tool | What It Does |
-|------|-------------|
-| `delete_process` | Delete a process/pipeline |
-| `delete_process_parameter` | Delete a process parameter |
-
-**Menu Groups:**
-| Tool | What It Does |
-|------|-------------|
-| `create_menu_group` | Create menu group |
-| `list_menu_groups` | List all menu groups |
-| `update_menu_group` | Update menu group |
-| `get_menu_group_by_name` | Get menu group by name |
-
-### 🎨 Canvas & Visualizations (6 tools)
-| Tool | What It Does |
-|------|-------------|
-| `search_canvas` | Search for visualizations/dashboards |
-| `get_canvas_details` | Get detailed canvas information |
-| `get_canvas_fields` | Get all fields in a canvas |
-| `create_canvas` | Create new canvas visualization |
-| `update_canvas` | Update existing canvas |
-| `delete_canvas` | Delete a canvas |
-
-### 🗂️ Metadata Collections & Datasets (7 tools)
-| Tool | What It Does |
-|------|-------------|
-| `search_datasets` | Search for dataset files |
+| `search_datasets` | Search for dataset files by name or criteria |
 | `search_collections` | Search for dataset collections |
-| `get_collection_details` | Get collection details |
-| `create_collection` | Create new collection |
-| `update_collection` | Update existing collection |
-| `delete_collection` | Delete a collection |
-| `add_files_to_dataset` | Add files to a dataset |
+| `get_collection_details` | Get detailed collection information |
+| `get_collection_fields` | Get metadata schema for a collection |
+| `create_collection` | Create new dataset collection |
+| `add_files_to_dataset` | Add files to existing dataset |
 
-### 📋 Metadata Fields & Schema (6 tools)
+---
+
+### 🎨 Canvas & Visualization Management (4 tools)
+
+Create and explore data visualizations and dashboards.
+
+| Tool | What It Does |
+|------|-------------|
+| `search_canvas` | Search for canvas visualizations/dashboards |
+| `get_canvas_details` | Get detailed canvas configuration |
+| `get_canvas_fields` | Get fields/schema for a canvas |
+| `create_canvas` | Create new canvas visualization |
+
+---
+
+### 📋 Metadata Field Management (3 tools)
+
+Define and explore metadata field schemas.
+
 | Tool | What It Does |
 |------|-------------|
 | `search_metadata_fields` | Search metadata field definitions |
-| `get_collection_fields` | Get fields for a collection |
 | `get_field_details` | Get detailed field information |
-| `create_metadata_field` | Create new metadata field |
-| `update_metadata_field` | Update metadata field |
-| `delete_metadata_field` | Delete metadata field |
+| `create_metadata_field` | Create new metadata field definition |
 
-### 📝 Metadata Records (5 tools)
+---
+
+### 📝 Metadata Record Management (3 tools)
+
+Manage metadata data records.
+
 | Tool | What It Does |
 |------|-------------|
-| `search_metadata_records` | Search metadata data records |
-| `get_metadata_record` | Get specific metadata record |
-| `create_metadata_record` | Create new metadata record |
-| `update_metadata_record` | Update metadata record |
-| `delete_metadata_record` | Delete metadata record |
+| `search_metadata_records` | Search for metadata data records |
+| `get_metadata_record` | Get specific metadata record by ID |
+| `create_metadata_record` | Create new metadata data record |
 
 ---
 
@@ -412,49 +435,64 @@ AI: Found 3 files:
     - all_all_vdj_b_filtered_contig_annotations.csv (0.90 MB)
     - all_all_vdj_t_filtered_contig_annotations.csv (4.52 MB)
 
-You: "Download the web summary report"
+You: "Load the first CSV file and show me the first 5 rows"
 
-AI: ✓ Downloaded to: /Users/you/Downloads/all_all_web_summary.html
+AI: Here are the first 5 rows of the VDJ B cell annotations:
+    [Table with barcode, contig_id, chain, v_gene, d_gene, j_gene columns...]
 ```
 
-### Exploring Pipelines
-```
-You: "What bioinformatics pipelines are available?"
+---
 
-AI: Found 25 processes including:
-    - RNA-Seq Analysis
-    - ChIP-Seq Pipeline
-    - ATAC-Seq Workflow
-    - Single Cell RNA-Seq
-    - Variant Calling Pipeline
+### Creating Custom Pipelines
+```
+You: "I need to create a new process that runs STAR alignment. Can you help?"
+
+AI: I'll help you create a STAR alignment process. First, let me get a list
+    of available menu groups so we can organize it properly.
+
+    [Lists menu groups]
+
+You: "Put it in the RNA-Seq menu group"
+
+AI: Perfect. Now, what input parameters do you need? Typically STAR needs:
+    - FASTQ files (input)
+    - Genome index directory (input)
+    - Output directory (output)
+
+You: "Yes, that's right. Also add a threads parameter"
+
+AI: I'll create the process configuration with those parameters...
+    [Creates and shows configuration]
+
+    Would you like me to create this process now?
+```
+
+---
+
+### Exploring Research Data
+```
+You: "Find all datasets related to breast cancer from 2024"
+
+AI: Found 8 datasets matching 'breast cancer' from 2024:
+    1. breast_cancer_rnaseq_cohort1_2024.bam
+    2. breast_cancer_chipseq_h3k27ac_2024.bed
+    3. BRCA_patient_samples_2024.fastq
     ...
 
-You: "Tell me about the RNA-Seq pipeline"
+You: "Show me the collection details for the RNA-seq dataset"
 
-AI: RNA-Seq Analysis (Process ID: 42)
-    - Type: Nextflow workflow
-    - Parameters: genome, fastq_files, output_dir, quality_threshold
-    - Owner: admin
-    - Created: 2025-01-15
-```
+AI: Collection: Breast Cancer RNA-Seq Cohort 1 (2024)
+    - ID: 1245
+    - 120 patient samples
+    - Created: 2024-03-15
+    - Owner: oncology_research_team
+    - Description: Comprehensive transcriptome analysis of breast cancer patients
+    - Fields: patient_id, tissue_type, tumor_stage, collection_date, treatment_status
 
-### Finding Research Data
-```
-You: "Find datasets with 'cancer' in the name"
+You: "What metadata fields are available for this collection?"
 
-AI: Found 12 datasets:
-    - breast_cancer_rnaseq_2025.bam
-    - lung_cancer_chipseq.bed
-    - prostate_cancer_samples.fastq
-    ...
-
-You: "Show me the breast cancer collection"
-
-AI: Collection: Breast Cancer RNA-Seq Study
-    - 120 samples
-    - Created: 2025-01-15
-    - Owner: research_team
-    - Description: Comprehensive breast cancer transcriptome analysis
+AI: The collection has 12 metadata fields:
+    [Lists fields with types and descriptions]
 ```
 
 ---
@@ -490,8 +528,8 @@ uvx --version
 # Check if .env file exists
 ls -la ~/.config/viafoundry-mcp/.env
 
-# Test connection (if you have the SDK)
-python -c "from viafoundry.client import ViaFoundryClient; print('✓ SDK imports OK')"
+# View (sanitized) to verify format
+cat ~/.config/viafoundry-mcp/.env | sed 's/PASSWORD=.*/PASSWORD=***/'
 ```
 
 ---
@@ -505,7 +543,12 @@ The server checks these locations **in order**:
 4. Parent directory `mcp_server/.env`
 5. `~/.viafoundry-mcp.env` (legacy)
 
-**Create in recommended location:**
+**Solution 1: Use the setup command (easiest)**
+```bash
+viafoundry-mcp-setup
+```
+
+**Solution 2: Create manually**
 ```bash
 mkdir -p ~/.config/viafoundry-mcp
 cat > ~/.config/viafoundry-mcp/.env << EOF
@@ -640,6 +683,7 @@ We welcome contributions! Please:
 - ♻️ **Auto token refresh** for long-running sessions
 - ✅ **Path validation** for all file operations
 - 🚫 **No telemetry** - your data stays between you and ViaFoundry
+- 🛡️ **Read and create operations** - Safe, non-destructive operations only
 
 ---
 
