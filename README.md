@@ -301,6 +301,13 @@ Once configured, ask your AI assistant to:
 - "Show me the revision history for pipeline 123"
 - "Create a new process based on an existing one"
 
+### Launch Apps
+- "What apps are available?"
+- "Launch CellxGene"
+- "Run the JupyterLab app"
+- "Show me all available applications"
+- "Start RStudio in cluster mode"
+
 ### Search Data
 - "Find datasets related to 'human genome'"
 - "Search for collections about cancer studies"
@@ -316,7 +323,7 @@ Once configured, ask your AI assistant to:
 
 ---
 
-## Available Tools (37 Total)
+## Available Tools (40 Total)
 
 ### 📊 Report Management (8 tools)
 
@@ -363,6 +370,18 @@ Organize processes into logical groups.
 | `create_menu_group` | Create new menu group for organizing processes |
 | `list_menu_groups` | List all available menu groups |
 | `get_menu_group_by_name` | Find menu group ID by name |
+
+---
+
+### 🚀 App Management & Launch (3 tools)
+
+Discover and launch applications in ViaFoundry.
+
+| Tool | What It Does |
+|------|-------------|
+| `list_apps` | List all available applications with names, IDs, and details |
+| `launch_app` | Launch/run an application with specified parameters |
+| `discover_app_endpoints` | Discover available API endpoints (advanced/debugging) |
 
 ---
 
@@ -439,6 +458,44 @@ You: "Load the first CSV file and show me the first 5 rows"
 
 AI: Here are the first 5 rows of the VDJ B cell annotations:
     [Table with barcode, contig_id, chain, v_gene, d_gene, j_gene columns...]
+```
+
+---
+
+### Launching Applications
+```
+You: "What apps are available in ViaFoundry?"
+
+AI: Let me list the available applications for you.
+    [Uses list_apps()]
+
+    Available applications:
+    1. CellxGene (ID: 42) - Interactive single-cell data visualization
+    2. JupyterLab (ID: 23) - Interactive notebook environment
+    3. RStudio (ID: 15) - R statistical computing environment
+    4. IGV (ID: 8) - Integrative Genomics Viewer
+    ...
+
+You: "Launch CellxGene for me"
+
+AI: I'll launch CellxGene for you.
+    [Uses list_apps(search="CellxGene") to find the app]
+    Found: CellxGene (ID: 42)
+
+    [Uses launch_app(app_id="42", run_type="standalone")]
+
+    ✓ CellxGene has been launched successfully!
+    You can access it once it's ready.
+
+You: "Can you start RStudio in cluster mode?"
+
+AI: Sure! Let me launch RStudio on the cluster.
+    [Uses list_apps(search="RStudio")]
+    Found: RStudio (ID: 15)
+
+    [Uses launch_app(app_id="15", run_type="cluster")]
+
+    ✓ RStudio launched in cluster mode!
 ```
 
 ---

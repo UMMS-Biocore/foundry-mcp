@@ -751,6 +751,81 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["group_name"]
             }
+        ),
+
+        # App Launch Tools
+        Tool(
+            name="list_apps",
+            description=(
+                "List all available applications in ViaFoundry with their names, IDs, and details. "
+                "Use this to find apps by name before launching them. "
+                "Returns app information including ID, name, description, image, and configuration."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": "Optional: Filter apps by name (case-insensitive search)"
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="discover_app_endpoints",
+            description=(
+                "Discover and search for available API endpoints in ViaFoundry. "
+                "Search by name, description, or endpoint path. "
+                "Returns endpoint details including path, methods, and descriptions. "
+                "Use list_apps for finding apps by name instead."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": (
+                            "Search term to filter endpoints. Can be free-text (searches all fields) "
+                            "or key=value format (e.g., 'endpoint=app' or 'description=launch')"
+                        )
+                    },
+                    "as_json": {
+                        "type": "boolean",
+                        "description": "Return results as formatted JSON string",
+                        "default": False
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="launch_app",
+            description=(
+                "Launch/run an application or pipeline in ViaFoundry. "
+                "Executes a specific app with the provided parameters. "
+                "Use discover_app_endpoints first to find the correct app_id and endpoint."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "app_id": {
+                        "type": "string",
+                        "description": "The ID of the app/pipeline to launch"
+                    },
+                    "run_type": {
+                        "type": "string",
+                        "description": "Type of run execution",
+                        "enum": ["standalone", "cluster"],
+                        "default": "standalone"
+                    },
+                    "parameters": {
+                        "type": "object",
+                        "description": "Optional runtime parameters for the app/pipeline execution"
+                    }
+                },
+                "required": ["app_id"]
+            }
         )
     ]
 
@@ -1326,6 +1401,76 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             menu = via_client.process.get_menu_group_by_name(group_name)
             result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
+
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        # App Launch Tools
+        elif name == "list_apps":
+            search_term = arguments.get("search")
+            logger.info(f"Listing apps with search filter: {search_term}")
+
+            # Call the /api/app/v1 endpoint to get all apps (note the /api prefix)
+            response = via_client.call(
+                method="GET",
+                endpoint="/api/app/v1"
+            )
+
+            # Extract apps from paginated response
+            if isinstance(response, dict) and 'data' in response:
+                apps = response['data']
+            else:
+                apps = response if isinstance(response, list) else []
+
+            # If search filter provided, filter apps by name
+            if search_term and isinstance(apps, list):
+                search_lower = search_term.lower()
+                filtered_apps = [
+                    app for app in apps
+                    if search_lower in str(app.get('name', '')).lower()
+                ]
+                result = filtered_apps
+            else:
+                result = apps
+
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "discover_app_endpoints":
+            search = arguments.get("search")
+            as_json = arguments.get("as_json", False)
+            logger.info(f"Discovering app endpoints with search: {search}")
+
+            # Use the SDK's discover method to find endpoints
+            endpoints = via_client.discover(search=search, as_json=as_json)
+
+            # If as_json is True, endpoints is already a JSON string
+            if as_json:
+                return [TextContent(type="text", text=endpoints)]
+            else:
+                # Convert dict to formatted JSON
+                return [TextContent(type="text", text=json.dumps(endpoints, indent=2))]
+
+        elif name == "launch_app":
+            app_id = arguments["app_id"]
+            run_type = arguments.get("run_type", "standalone")
+            parameters = arguments.get("parameters", {})
+
+            logger.info(f"Launching app {app_id} with type {run_type}")
+
+            # Build the endpoint - adjust based on actual API structure
+            endpoint = f"/api/app/v1/call/{app_id}"
+
+            # Prepare the request data
+            data = {
+                "type": run_type,
+                **parameters  # Merge additional parameters
+            }
+
+            # Make the API call using the generic call method
+            result = via_client.call(
+                method="POST",
+                endpoint=endpoint,
+                data=data
+            )
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
