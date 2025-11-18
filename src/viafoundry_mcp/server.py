@@ -716,18 +716,18 @@ async def list_tools() -> list[Tool]:
                     },
                     "input_params": {
                         "type": "array",
-                        "description": "Input parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional, test)",
+                        "description": "Input parameter definitions (array of dicts with parameterId, name, displayName, fileType, qualifier, optional, test, etc.)",
                         "items": {
                             "type": "object",
-                            "additionalProperties": False
+                            "additionalProperties": True
                         }
                     },
                     "output_params": {
                         "type": "array",
-                        "description": "Output parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional)",
+                        "description": "Output parameter definitions (array of dicts with parameterId, name, displayName, fileType, qualifier, optional, etc.)",
                         "items": {
                             "type": "object",
-                            "additionalProperties": False
+                            "additionalProperties": True
                         }
                     },
                     "summary": {
