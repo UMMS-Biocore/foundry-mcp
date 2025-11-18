@@ -716,18 +716,18 @@ async def list_tools() -> list[Tool]:
                     },
                     "input_params": {
                         "type": "array",
-                        "description": "Input parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional, test)",
+                        "description": "Input parameters - array of objects to reference existing parameters. Use 'id' field to reference by parameter ID (e.g., [{\"id\": 41}]), or provide name/qualifier/fileType to match/create parameters (e.g., [{\"name\": \"input_file\", \"qualifier\": \"file\", \"fileType\": \"fastq\"}]). Optional fields: displayName, operator, operatorContent, optional, test. Use list_process_parameters to find available parameter IDs.",
                         "items": {
                             "type": "object",
-                            "additionalProperties": False
+                            "additionalProperties": True
                         }
                     },
                     "output_params": {
                         "type": "array",
-                        "description": "Output parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional)",
+                        "description": "Output parameters - array of objects to reference existing parameters. Use 'id' field to reference by parameter ID (e.g., [{\"id\": 285}]), or provide name/qualifier/fileType to match/create parameters (e.g., [{\"name\": \"output_file\", \"qualifier\": \"file\", \"fileType\": \"txt\"}]). Optional fields: displayName, operator, operatorContent, optional, test. Use list_process_parameters to find available parameter IDs.",
                         "items": {
                             "type": "object",
-                            "additionalProperties": False
+                            "additionalProperties": True
                         }
                     },
                     "summary": {
@@ -760,15 +760,75 @@ async def list_tools() -> list[Tool]:
             name="create_process",
             description=(
                 "Create a new custom process/pipeline. "
-                "Requires complete process configuration including scripts and parameters."
+                "Requires complete process configuration including scripts and parameters. "
+                "Use the output from create_process_config as the process_data input."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "process_data": {
                         "type": "object",
-                        "description": "Complete process configuration",
-                        "additionalProperties": False
+                        "description": "Complete process configuration object from create_process_config",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Process name"
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "Process summary/description"
+                            },
+                            "menuGroupId": {
+                                "type": "integer",
+                                "description": "Menu group ID for organization"
+                            },
+                            "inputParameters": {
+                                "type": "array",
+                                "description": "Input parameters with full details (parameterId, displayName, etc.)",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": True
+                                }
+                            },
+                            "outputParameters": {
+                                "type": "array",
+                                "description": "Output parameters with full details (parameterId, displayName, etc.)",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": True
+                                }
+                            },
+                            "script": {
+                                "type": "object",
+                                "description": "Script configuration with body, header, footer, language",
+                                "properties": {
+                                    "body": {"type": "string"},
+                                    "header": {"type": "string"},
+                                    "footer": {"type": "string"},
+                                    "language": {"type": "string"}
+                                },
+                                "additionalProperties": True
+                            },
+                            "permissionSettings": {
+                                "type": "object",
+                                "description": "Permission settings",
+                                "properties": {
+                                    "viewPermissions": {"type": "integer"},
+                                    "sharedGroupId": {"type": ["integer", "null"]},
+                                    "writeGroupIds": {
+                                        "type": "array",
+                                        "items": {"type": "integer"}
+                                    }
+                                },
+                                "additionalProperties": True
+                            },
+                            "revisionComment": {
+                                "type": "string",
+                                "description": "Revision comment for the initial version"
+                            }
+                        },
+                        "required": ["name", "menuGroupId", "script"],
+                        "additionalProperties": True
                     }
                 },
                 "required": ["process_data"],
@@ -1333,7 +1393,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             parameters = via_client.process.list_parameters()
 
             # Convert to dict for JSON serialization
-            result = parameters.model_dump() if hasattr(parameters, 'model_dump') else parameters
+            if isinstance(parameters, list):
+                result = [p.model_dump() if hasattr(p, 'model_dump') else p for p in parameters]
+            else:
+                result = parameters.model_dump() if hasattr(parameters, 'model_dump') else parameters
 
             return [TextContent(
                 type="text",
@@ -1568,7 +1631,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         elif name == "create_process":
             process_data = arguments["process_data"]
-            logger.info(f"Creating process")
+            logger.info(f"Creating process: {process_data.get('name', 'unnamed')}")
+
+            # The SDK's create_process expects a ProcessConfig object, not a dict
+            # We need to reconstruct the ProcessConfig from the dict returned by create_process_config
 
             # Remove None values from nested dicts (API may not accept null)
             def remove_none(obj):
@@ -1577,15 +1643,29 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 elif isinstance(obj, list):
                     return [remove_none(item) for item in obj]
                 return obj
-            
-            cleaned_data = remove_none(process_data)
-            
-            # Log the data being sent for debugging
-            logger.debug(f"Process data being sent: {json.dumps(cleaned_data, indent=2)}")
 
-            # SDK accepts process_data as keyword argument (process_data=...)
+            cleaned_data = remove_none(process_data)
+
+            # Import ProcessConfig model from SDK
+            from viafoundry.models.domain.process import ProcessConfig
+
+            # Reconstruct ProcessConfig object from dict
             try:
-                process = via_client.process.create_process(process_data=cleaned_data)
+                process_config = ProcessConfig.model_validate(cleaned_data)
+                logger.debug(f"ProcessConfig validated successfully: {process_config.name}")
+            except Exception as e:
+                logger.error(f"Failed to validate ProcessConfig: {e}")
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Invalid process configuration: {str(e)}",
+                        "details": "The process_data must match the output from create_process_config"
+                    }, indent=2)
+                )]
+
+            # SDK accepts ProcessConfig object as process_data argument
+            try:
+                process = via_client.process.create_process(process_data=process_config)
                 result = process.model_dump() if hasattr(process, 'model_dump') else process
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
             except Exception as e:
@@ -1653,7 +1733,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             logger.info(f"Listing menu groups")
 
             menus = via_client.process.list_menu_groups(**filters)
-            result = menus.model_dump() if hasattr(menus, 'model_dump') else menus
+
+            # Convert to dict for JSON serialization
+            if isinstance(menus, list):
+                result = [m.model_dump() if hasattr(m, 'model_dump') else m for m in menus]
+            else:
+                result = menus.model_dump() if hasattr(menus, 'model_dump') else menus
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
