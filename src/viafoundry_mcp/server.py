@@ -34,25 +34,28 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="fetch_report",
             description=(
-                "Fetch report data by report ID. Returns JSON data containing "
-                "all processes, files, and metadata for the specified report."
+                "Fetch report data by report ID (same as run ID). Returns JSON data containing "
+                "all processes, files, and metadata for the specified report. "
+                "You can get the report_id from list_runs or get_run tools."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "report_id": {
                         "type": "string",
-                        "description": "The ID of the report to fetch"
+                        "description": "The ID of the report/run to fetch (report_id is same as run_id)"
                     }
                 },
-                "required": ["report_id"]
+                "required": ["report_id"],
+                "additionalProperties": False
             }
         ),
         Tool(
             name="list_processes",
             description=(
                 "List all unique processes in a report. Returns a list of process names "
-                "that have generated output in the specified report."
+                "that have generated output in the specified report. "
+                "Note: report_id is the same as run_id."
             ),
             inputSchema={
                 "type": "object",
@@ -62,7 +65,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the report"
                     }
                 },
-                "required": ["report_id"]
+                "required": ["report_id"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -70,7 +74,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 "List files in a report. If process_name is provided, lists files for that "
                 "specific process. Otherwise, lists all files across all processes in the report. "
-                "Returns file metadata including file paths, sizes, and extensions."
+                "Returns file metadata including file paths, sizes, and extensions. "
+                "Note: report_id is the same as run_id."
             ),
             inputSchema={
                 "type": "object",
@@ -84,7 +89,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: The name of the process to list files for"
                     }
                 },
-                "required": ["report_id"]
+                "required": ["report_id"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -110,7 +116,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: Directory to save the file (defaults to current directory)"
                     }
                 },
-                "required": ["report_id", "file_path"]
+                "required": ["report_id", "file_path"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -136,7 +143,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: Separator for tabular files (defaults to tab '\\t')"
                     }
                 },
-                "required": ["report_id", "file_path"]
+                "required": ["report_id", "file_path"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -161,7 +169,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: Directory name for organizing files in the report"
                     }
                 },
-                "required": ["report_id", "local_file_path"]
+                "required": ["report_id", "local_file_path"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -178,7 +187,84 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the report"
                     }
                 },
-                "required": ["report_id"]
+                "required": ["report_id"],
+            "additionalProperties": False
+            }
+        ),
+
+        # Run Management Tools
+        Tool(
+            name="list_runs",
+            description=(
+                "List and search for runs/pipeline executions in ViaFoundry. "
+                "Supports fuzzy search by name, pagination, and sorting. "
+                "Returns run details including ID (same as report_id), name, status, pipeline info, and dates. "
+                "Use this to discover runs and get their IDs for use with other tools."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search_query": {
+                        "type": "string",
+                        "description": "Optional: Search query for fuzzy matching run names. Supports partial matches."
+                    },
+                    "take": {
+                        "type": "integer",
+                        "description": "Optional: Maximum number of results to return (1-100, default: 10)",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 10
+                    },
+                    "skip": {
+                        "type": "integer",
+                        "description": "Optional: Number of results to skip for pagination (default: 0)",
+                        "minimum": 0,
+                        "default": 0
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "Optional: Field to sort by (default: dateCreated)",
+                        "enum": ["id", "name", "status", "username", "dateCreated", "pipelineName", "summary", "dateCreatedLastRun"],
+                        "default": "dateCreated"
+                    },
+                    "order": {
+                        "type": "string",
+                        "description": "Optional: Sort order (default: desc)",
+                        "enum": ["asc", "desc"],
+                        "default": "desc"
+                    }
+                },
+                "required": [],
+                "additionalProperties": False
+            }
+        ),
+        Tool(
+            name="get_run",
+            description=(
+                "Get detailed information about a specific run by its ID or name. "
+                "Supports fuzzy name matching - if exact match not found, returns similar matches. "
+                "Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports. "
+                "The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The ID of the run to fetch (either run_id or run_name must be provided)"
+                    },
+                    "run_name": {
+                        "type": "string",
+                        "description": "The name of the run to fetch. Supports fuzzy matching if exact match not found."
+                    },
+                    "include_reports": {
+                        "type": "boolean",
+                        "description": "Optional: Include report metadata in the response (default: false)",
+                        "default": False
+                    }
+                },
+                "required": [],
+                "additionalProperties": False
             }
         ),
 
@@ -192,7 +278,8 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
-                "required": []
+                "required": [],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -209,7 +296,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the process to fetch"
                     }
                 },
-                "required": ["process_id"]
+                "required": ["process_id"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -231,7 +319,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: Filter by collection ID"
                     }
                 },
-                "required": ["query"]
+                "required": ["query"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -249,7 +338,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Search query (collection name or description)"
                     }
                 },
-                "required": ["query"]
+                "required": ["query"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -266,7 +356,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the collection to fetch"
                     }
                 },
-                "required": ["collection_id"]
+                "required": ["collection_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -285,7 +376,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the process to get revisions for"
                     }
                 },
-                "required": ["process_id"]
+                "required": ["process_id"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -297,7 +389,8 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
-                "required": []
+                "required": [],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -314,7 +407,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the pipeline to get parameters for"
                     }
                 },
-                "required": ["pipeline_id"]
+                "required": ["pipeline_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -334,7 +428,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Search query for canvas name or description"
                     }
                 },
-                "required": ["query"]
+                "required": ["query"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -351,7 +446,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the canvas to fetch"
                     }
                 },
-                "required": ["canvas_id"]
+                "required": ["canvas_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -371,7 +467,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Search query for field name or description"
                     }
                 },
-                "required": ["query"]
+                "required": ["query"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -388,7 +485,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the collection to get fields for"
                     }
                 },
-                "required": ["collection_id"]
+                "required": ["collection_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -408,7 +506,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Search query for metadata records"
                     }
                 },
-                "required": ["query"]
+                "required": ["query"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -425,7 +524,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the metadata record to fetch"
                     }
                 },
-                "required": ["data_id"]
+                "required": ["data_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -444,7 +544,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the report to get paths for"
                     }
                 },
-                "required": ["report_id"]
+                "required": ["report_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -463,7 +564,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the process to duplicate"
                     }
                 },
-                "required": ["process_id"]
+                "required": ["process_id"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -492,7 +594,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: Filter by parameter ID"
                     }
                 },
-                "required": []
+                "required": [],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -514,7 +617,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Array of file IDs to add to the dataset"
                     }
                 },
-                "required": ["dataset_id", "file_ids"]
+                "required": ["dataset_id", "file_ids"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -528,10 +632,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "collection_data": {
                         "type": "object",
-                        "description": "Collection configuration (name, description, etc.)"
+                        "description": "Collection configuration (name, description, etc.)",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["collection_data"]
+                "required": ["collection_data"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -545,10 +651,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "data_record": {
                         "type": "object",
-                        "description": "Metadata record with field values"
+                        "description": "Metadata record with field values",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["data_record"]
+                "required": ["data_record"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -565,7 +673,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the field to fetch"
                     }
                 },
-                "required": ["field_id"]
+                "required": ["field_id"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -582,7 +691,8 @@ async def list_tools() -> list[Tool]:
                         "description": "The ID of the canvas to get fields for"
                     }
                 },
-                "required": ["canvas_id"]
+                "required": ["canvas_id"],
+            "additionalProperties": False
             }
         ),
 
@@ -606,11 +716,19 @@ async def list_tools() -> list[Tool]:
                     },
                     "input_params": {
                         "type": "array",
-                        "description": "Input parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional, test)"
+                        "description": "Input parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional, test)",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False
+                        }
                     },
                     "output_params": {
                         "type": "array",
-                        "description": "Output parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional)"
+                        "description": "Output parameter definitions (array of dicts with name, displayName, fileType, qualifier, optional)",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False
+                        }
                     },
                     "summary": {
                         "type": "string",
@@ -626,14 +744,16 @@ async def list_tools() -> list[Tool]:
                     },
                     "permission_settings": {
                         "type": "object",
-                        "description": "Permission settings (viewPermissions, writeGroupIds, sharedGroupId)"
+                        "description": "Permission settings (viewPermissions, writeGroupIds, sharedGroupId)",
+                        "additionalProperties": False
                     },
                     "revision_comment": {
                         "type": "string",
                         "description": "Revision comment for the initial version"
                     }
                 },
-                "required": ["name", "menu_group_name", "script_body"]
+                "required": ["name", "menu_group_name", "script_body"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -647,10 +767,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "process_data": {
                         "type": "object",
-                        "description": "Complete process configuration"
+                        "description": "Complete process configuration",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["process_data"]
+                "required": ["process_data"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -664,10 +786,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "parameter_data": {
                         "type": "object",
-                        "description": "Parameter definition (name, type, constraints)"
+                        "description": "Parameter definition (name, type, constraints)",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["parameter_data"]
+                "required": ["parameter_data"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -681,10 +805,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "canvas_data": {
                         "type": "object",
-                        "description": "Canvas configuration and visualization settings"
+                        "description": "Canvas configuration and visualization settings",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["canvas_data"]
+                "required": ["canvas_data"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -698,10 +824,12 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "field_data": {
                         "type": "object",
-                        "description": "Field definition (name, type, constraints)"
+                        "description": "Field definition (name, type, constraints)",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["field_data"]
+                "required": ["field_data"],
+            "additionalProperties": False
             }
         ),
 
@@ -720,7 +848,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Name of the menu group to create"
                     }
                 },
-                "required": ["menu_name"]
+                "required": ["menu_name"],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -732,7 +861,8 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
-                "required": []
+                "required": [],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -749,7 +879,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Name of the menu group to find"
                     }
                 },
-                "required": ["group_name"]
+                "required": ["group_name"],
+            "additionalProperties": False
             }
         ),
 
@@ -769,7 +900,8 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional: Filter apps by name (case-insensitive search)"
                     }
                 },
-                "required": []
+                "required": [],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -796,7 +928,8 @@ async def list_tools() -> list[Tool]:
                         "default": False
                     }
                 },
-                "required": []
+                "required": [],
+            "additionalProperties": False
             }
         ),
         Tool(
@@ -821,10 +954,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "parameters": {
                         "type": "object",
-                        "description": "Optional runtime parameters for the app/pipeline execution"
+                        "description": "Optional runtime parameters for the app/pipeline execution",
+                        "additionalProperties": False
                     }
                 },
-                "required": ["app_id"]
+                "required": ["app_id"],
+            "additionalProperties": False
             }
         )
     ]
@@ -968,6 +1103,133 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(
                 type="text",
                 text=json.dumps({"directories": directories}, indent=2)
+            )]
+
+        # Run Management Tools
+        elif name == "list_runs":
+            search_query = arguments.get("search_query", "")
+            take = arguments.get("take", 10)
+            skip = arguments.get("skip", 0)
+            sort = arguments.get("sort", "dateCreated")
+            order = arguments.get("order", "desc")
+
+            logger.info(f"Listing runs (search: '{search_query}', take: {take}, skip: {skip})")
+
+            # Call the /api/v1/run/list endpoint
+            response = via_client.call(
+                method="POST",
+                endpoint="/api/v1/run/list",
+                params={
+                    "take": take,
+                    "skip": skip,
+                    "sort": sort,
+                    "order": order
+                },
+                data={"searchKey": search_query}
+            )
+
+            return [TextContent(
+                type="text",
+                text=json.dumps(response, indent=2)
+            )]
+
+        elif name == "get_run":
+            run_id = arguments.get("run_id")
+            run_name = arguments.get("run_name")
+            include_reports = arguments.get("include_reports", False)
+
+            if not run_id and not run_name:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "Either run_id or run_name must be provided"
+                    }, indent=2)
+                )]
+
+            # If run_name provided, search for it
+            if run_name and not run_id:
+                logger.info(f"Searching for run by name: {run_name}")
+                search_response = via_client.call(
+                    method="POST",
+                    endpoint="/api/v1/run/list",
+                    params={"take": 100},
+                    data={"searchKey": run_name}
+                )
+
+                runs = search_response.get("data", [])
+
+                # Try exact match first
+                exact_match = next((run for run in runs if run.get("name") == run_name), None)
+
+                if exact_match:
+                    logger.info(f"Found exact match for '{run_name}'")
+                    run_id = str(exact_match.get("id"))
+                    result = {
+                        "match_type": "exact",
+                        "run": exact_match
+                    }
+                elif runs:
+                    # Fuzzy match - return the best matches
+                    logger.info(f"No exact match for '{run_name}', returning fuzzy matches")
+                    result = {
+                        "match_type": "fuzzy",
+                        "message": f"No exact match found for '{run_name}'. Showing similar runs:",
+                        "matches": runs[:10]  # Top 10 matches
+                    }
+
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2)
+                    )]
+                else:
+                    result = {
+                        "match_type": "none",
+                        "error": f"No runs found matching '{run_name}'"
+                    }
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps(result, indent=2)
+                    )]
+            else:
+                # run_id provided, fetch directly
+                logger.info(f"Fetching run by ID: {run_id}")
+                search_response = via_client.call(
+                    method="POST",
+                    endpoint="/api/v1/run/list",
+                    params={"take": 1, "filter": f"id:eq={run_id}"},
+                    data={"searchKey": ""}
+                )
+
+                runs = search_response.get("data", [])
+                if runs:
+                    result = {
+                        "match_type": "id",
+                        "run": runs[0]
+                    }
+                else:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": f"No run found with ID: {run_id}"
+                        }, indent=2)
+                    )]
+
+            # If include_reports is True, fetch reports for this run
+            if include_reports and run_id:
+                logger.info(f"Fetching reports for run ID: {run_id}")
+                try:
+                    reports = via_client.call(
+                        method="GET",
+                        endpoint=f"/api/v1/run/{run_id}/reports"
+                    )
+                    result["reports"] = reports
+                except Exception as e:
+                    logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                    result["reports"] = {"error": str(e)}
+
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
             )]
 
         elif name == "list_all_processes":
