@@ -3,31 +3,77 @@
 Utility functions for ViaFoundry MCP.
 """
 
+# Maximum recursion depth to prevent stack overflow
+MAX_SERIALIZATION_DEPTH = 50
 
-def serialize_response(obj):
+
+def serialize_response(obj, _visited: set | None = None, _depth: int = 0):
     """
     Recursively serialize response objects to JSON-compatible dicts.
     Handles Pydantic models, lists, dicts, and other common types.
+    
+    Includes protection against circular references and excessive recursion.
+    
+    Args:
+        obj: The object to serialize
+        _visited: Internal set tracking visited object IDs (for circular reference detection)
+        _depth: Internal counter for recursion depth
+    
+    Returns:
+        JSON-serializable representation of the object
     """
+    # Check recursion depth
+    if _depth > MAX_SERIALIZATION_DEPTH:
+        return f"<max depth exceeded: {type(obj).__name__}>"
+    
+    # Initialize visited set on first call
+    if _visited is None:
+        _visited = set()
+    
+    # Handle None and primitives (no circular reference possible)
     if obj is None:
         return None
     
     if isinstance(obj, (str, int, float, bool)):
         return obj
     
+    # For mutable objects, check for circular references using object ID
+    obj_id = id(obj)
+    if obj_id in _visited:
+        return f"<circular reference: {type(obj).__name__}>"
+    
     # Pydantic v2 models
     if hasattr(obj, 'model_dump'):
-        return serialize_response(obj.model_dump())
+        _visited.add(obj_id)
+        try:
+            return serialize_response(obj.model_dump(), _visited, _depth + 1)
+        finally:
+            _visited.discard(obj_id)
     
     if isinstance(obj, dict):
-        return {k: serialize_response(v) for k, v in obj.items()}
+        _visited.add(obj_id)
+        try:
+            return {k: serialize_response(v, _visited, _depth + 1) for k, v in obj.items()}
+        finally:
+            _visited.discard(obj_id)
     
     if isinstance(obj, (list, tuple)):
-        return [serialize_response(item) for item in obj]
+        _visited.add(obj_id)
+        try:
+            return [serialize_response(item, _visited, _depth + 1) for item in obj]
+        finally:
+            _visited.discard(obj_id)
     
     # Dataclasses, custom objects
     if hasattr(obj, '__dict__'):
-        return {k: serialize_response(v) for k, v in obj.__dict__.items() if not k.startswith('_')}
+        _visited.add(obj_id)
+        try:
+            return {
+                k: serialize_response(v, _visited, _depth + 1) 
+                for k, v in obj.__dict__.items() 
+                if not k.startswith('_')
+            }
+        finally:
+            _visited.discard(obj_id)
     
     return str(obj)
-
