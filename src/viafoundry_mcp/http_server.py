@@ -21,7 +21,6 @@ import json
 import logging
 import argparse
 import contextlib
-from typing import Any
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp.server.fastmcp import FastMCP
