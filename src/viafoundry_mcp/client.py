@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
 ViaFoundry client management for MCP server.
+
+Credentials are passed via HTTP headers from mcp.json.
 """
 
 import logging
-from typing import Optional
 from viafoundry.client import ViaFoundryClient
 from .config import get_credentials, validate_credentials
 
 logger = logging.getLogger('viafoundry-mcp')
 
-# Global client instance
-_client: Optional[ViaFoundryClient] = None
+# Cache clients by hostname to avoid re-creating
+_clients: dict[str, ViaFoundryClient] = {}
 
 
-def get_client(interactive: bool = False) -> ViaFoundryClient:
+def get_client() -> ViaFoundryClient:
     """
-    Get or initialize the ViaFoundry client.
-
-    Args:
-        interactive: If True, prompt user for credentials if not found
+    Get or initialize the ViaFoundry client using credentials from request headers.
 
     Returns:
         Initialized ViaFoundryClient instance
@@ -27,42 +25,42 @@ def get_client(interactive: bool = False) -> ViaFoundryClient:
     Raises:
         ValueError: If credentials are missing or invalid
     """
-    global _client
+    hostname, token = get_credentials()
 
-    if _client is None:
-        # Get credentials from environment or prompt user
-        hostname, username, password = get_credentials(interactive=interactive)
-
-        # Validate credentials
-        if not all([hostname, username, password]):
-            raise ValueError(
-                "Missing required credentials. "
-                "Run 'viafoundry-mcp-setup' to configure, or set environment variables:\n"
-                "  VIAFOUNDRY_HOSTNAME, VIAFOUNDRY_USERNAME, VIAFOUNDRY_PASSWORD"
-            )
-
-        if not validate_credentials(hostname, username, password):
-            raise ValueError(
-                "Invalid credentials. "
-                "Hostname must start with http:// or https://"
-            )
-
-        # Initialize client
-        logger.info(f"Initializing ViaFoundry client for {hostname}")
-        _client = ViaFoundryClient()
-
-        # Configure authentication
-        _client.configure_auth(
-            hostname=hostname,
-            username=username,
-            password=password
+    if not hostname or not token:
+        raise ValueError(
+            "Missing credentials. Configure in mcp.json:\n"
+            '{\n'
+            '  "viafoundry": {\n'
+            '    "url": "http://127.0.0.1:8000/mcp",\n'
+            '    "headers": {\n'
+            '      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",\n'
+            '      "X-ViaFoundry-Token": "your-token-here"\n'
+            '    }\n'
+            '  }\n'
+            '}'
         )
-        logger.info("ViaFoundry client authenticated successfully")
 
-    return _client
+    if not validate_credentials(hostname, token):
+        raise ValueError("Invalid credentials. Hostname must start with http:// or https://")
+
+    # Return cached client if exists for this hostname
+    cache_key = f"{hostname}:{token[:8]}"
+    if cache_key in _clients:
+        return _clients[cache_key]
+
+    # Create new client
+    logger.info(f"Initializing ViaFoundry client for {hostname}")
+    client = ViaFoundryClient()
+    client.configure_auth_token(hostname=hostname, token=token)
+    logger.info("ViaFoundry client authenticated")
+
+    # Cache it
+    _clients[cache_key] = client
+    return client
 
 
-def reset_client():
-    """Reset the global client instance. Useful for testing."""
-    global _client
-    _client = None
+def reset_clients():
+    """Reset all cached client instances."""
+    global _clients
+    _clients = {}

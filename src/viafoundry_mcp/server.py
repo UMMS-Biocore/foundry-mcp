@@ -15,6 +15,7 @@ from mcp.server.stdio import stdio_server
 
 # Import from our modules
 from .client import get_client
+from .utils import serialize_response
 
 # Configure logging
 logging.basicConfig(
@@ -285,7 +286,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             report_data = via_client.reports.fetch_report_data(report_id)
 
             # Convert to dict for JSON serialization
-            result = report_data.model_dump() if hasattr(report_data, 'model_dump') else report_data
+            result = serialize_response(report_data)
 
             return [TextContent(
                 type="text",
@@ -394,7 +395,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
             # Convert response to dict
-            result = response.model_dump() if hasattr(response, 'model_dump') else response
+            result = serialize_response(response)
 
             return [TextContent(
                 type="text",
@@ -418,7 +419,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             processes = via_client.process.list_processes()
 
             # Convert to dict for JSON serialization
-            result = processes.model_dump() if hasattr(processes, 'model_dump') else processes
+            result = serialize_response(processes)
 
             return [TextContent(
                 type="text",
@@ -432,7 +433,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             process = via_client.process.get_process(process_id)
 
             # Convert to dict for JSON serialization
-            result = process.model_dump() if hasattr(process, 'model_dump') else process
+            result = serialize_response(process)
 
             return [TextContent(
                 type="text",
@@ -452,7 +453,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
             # Convert to dict for JSON serialization
-            result = datasets.model_dump() if hasattr(datasets, 'model_dump') else datasets
+            result = serialize_response(datasets)
 
             return [TextContent(
                 type="text",
@@ -463,10 +464,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             query = arguments["query"]
             logger.info(f"Searching collections with query: {query}")
 
-            collections = via_client.metadata.search_collections(query=query)
+            collections = via_client.metadata.search_collections(query)
 
             # Convert to dict for JSON serialization
-            result = collections.model_dump() if hasattr(collections, 'model_dump') else collections
+            result = serialize_response(collections)
 
             return [TextContent(
                 type="text",
@@ -480,7 +481,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             collection = via_client.metadata.get_collection(collection_id)
 
             # Convert to dict for JSON serialization
-            result = collection.model_dump() if hasattr(collection, 'model_dump') else collection
+            result = serialize_response(collection)
 
             return [TextContent(
                 type="text",

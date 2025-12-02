@@ -28,8 +28,9 @@ classifiers = [
 
 dependencies = [
     "mcp>=1.0.0",
-    "python-dotenv>=1.0.0",
     "viafoundry_sdk>=1.0.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.37.0",
 ]
 
 [project.optional-dependencies]
@@ -46,7 +47,7 @@ Issues = "https://github.com/viascientific/viafoundry-mcp/issues"
 
 [project.scripts]
 viafoundry-mcp = "viafoundry_mcp.server:main"
-viafoundry-mcp-setup = "viafoundry_mcp.config:setup_command"
+viafoundry-mcp-http = "viafoundry_mcp.http_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -54,4 +55,4 @@ include = ["viafoundry_mcp*"]
 exclude = ["test*"]
 
 [tool.setuptools.package-data]
-viafoundry_mcp = ["*.example", ".env.example"]
+viafoundry_mcp = ["py.typed"]
