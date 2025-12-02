@@ -26,7 +26,7 @@ from mcp.server.fastmcp import FastMCP
 
 # Import from our modules
 from .client import get_client
-from .config import set_credentials, HEADER_HOSTNAME, HEADER_TOKEN
+from .config import set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN
 from .utils import serialize_response
 
 
@@ -40,8 +40,10 @@ logger = logging.getLogger('viafoundry-mcp-http')
 
 class CredentialsMiddleware:
     """
-    Middleware that extracts ViaFoundry credentials from request headers
-    and stores them in context variables for use by tool handlers.
+    Middleware that extracts ViaFoundry credentials from request headers,
+    validates them, and stores them in context variables for use by tool handlers.
+    
+    Returns 401 Unauthorized if credentials are missing or invalid.
     """
     
     def __init__(self, app: ASGIApp):
@@ -49,6 +51,12 @@ class CredentialsMiddleware:
     
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] == "http":
+            # Skip credential check for OPTIONS requests (CORS preflight)
+            method = scope.get("method", "")
+            if method == "OPTIONS":
+                await self.app(scope, receive, send)
+                return
+            
             # Extract headers (they're stored as list of tuples)
             headers = dict(scope.get("headers", []))
             
@@ -56,12 +64,50 @@ class CredentialsMiddleware:
             hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
             token = headers.get(HEADER_TOKEN.encode(), b"").decode()
             
-            # Set credentials in context for this request
-            if hostname and token:
-                set_credentials(hostname, token)
-                logger.debug(f"Credentials set from headers: {hostname}")
+            # Validate credentials
+            if not validate_credentials(hostname, token):
+                # Return 401 Unauthorized response
+                logger.warning(f"Invalid or missing credentials from {scope.get('client', ('unknown',))[0]}")
+                await self._send_unauthorized_response(send, hostname, token)
+                return
+            
+            # Set validated credentials in context for this request
+            set_credentials(hostname, token)
+            logger.debug(f"Credentials validated and set from headers: {hostname}")
         
         await self.app(scope, receive, send)
+    
+    async def _send_unauthorized_response(self, send: Send, hostname: str, token: str) -> None:
+        """Send a 401 Unauthorized response with details about what's missing."""
+        if not hostname and not token:
+            detail = "Missing credentials. Provide X-ViaFoundry-Hostname and X-ViaFoundry-Token headers."
+        elif not hostname:
+            detail = "Missing X-ViaFoundry-Hostname header."
+        elif not token:
+            detail = "Missing X-ViaFoundry-Token header."
+        elif not (hostname.startswith("http://") or hostname.startswith("https://")):
+            detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
+        else:
+            detail = "Invalid credentials."
+        
+        body = json.dumps({
+            "error": "Unauthorized",
+            "detail": detail,
+            "help": "Configure credentials in mcp.json headers: X-ViaFoundry-Hostname and X-ViaFoundry-Token"
+        }).encode("utf-8")
+        
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+        })
 
 
 def create_mcp_server(stateless: bool = False) -> FastMCP:
