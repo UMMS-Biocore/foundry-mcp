@@ -7,7 +7,7 @@ Utility functions for ViaFoundry MCP.
 MAX_SERIALIZATION_DEPTH = 50
 
 
-def serialize_response(obj, _visited: set | None = None, _depth: int = 0):
+def serialize_response(obj, _visited=None, _depth: int = 0):
     """
     Recursively serialize response objects to JSON-compatible dicts.
     Handles Pydantic models, lists, dicts, and other common types.

@@ -6,13 +6,14 @@ Credentials are passed via HTTP headers from mcp.json.
 """
 
 import logging
+from typing import Dict
 from viafoundry.client import ViaFoundryClient
 from .config import get_credentials, validate_credentials
 
 logger = logging.getLogger('viafoundry-mcp')
 
 # Cache clients by hostname to avoid re-creating
-_clients: dict[str, ViaFoundryClient] = {}
+_clients: Dict[str, ViaFoundryClient] = {}
 
 
 def get_client() -> ViaFoundryClient:

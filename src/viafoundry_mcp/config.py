@@ -20,30 +20,31 @@ Configure in ~/.cursor/mcp.json:
 
 import logging
 from contextvars import ContextVar
+from typing import Optional, Tuple
 
 logger = logging.getLogger('viafoundry-mcp')
 
 # Context variables for request-scoped credentials
-_hostname_var: ContextVar[str | None] = ContextVar('viafoundry_hostname', default=None)
-_token_var: ContextVar[str | None] = ContextVar('viafoundry_token', default=None)
+_hostname_var: ContextVar[Optional[str]] = ContextVar('viafoundry_hostname', default=None)
+_token_var: ContextVar[Optional[str]] = ContextVar('viafoundry_token', default=None)
 
 # Header names
 HEADER_HOSTNAME = "x-viafoundry-hostname"
 HEADER_TOKEN = "x-viafoundry-token"
 
 
-def set_credentials(hostname: str | None, token: str | None) -> None:
+def set_credentials(hostname: Optional[str], token: Optional[str]) -> None:
     """Set credentials in the current context (called by middleware)."""
     _hostname_var.set(hostname)
     _token_var.set(token)
 
 
-def get_credentials() -> tuple[str | None, str | None]:
+def get_credentials() -> Tuple[Optional[str], Optional[str]]:
     """Get credentials from the current context."""
     return _hostname_var.get(), _token_var.get()
 
 
-def validate_credentials(hostname: str | None, token: str | None) -> bool:
+def validate_credentials(hostname: Optional[str], token: Optional[str]) -> bool:
     """Validate that credentials are non-empty and properly formatted."""
     if not hostname or not token:
         return False
