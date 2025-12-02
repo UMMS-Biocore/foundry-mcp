@@ -6,6 +6,7 @@ Credentials are passed via HTTP headers from mcp.json.
 """
 
 import logging
+import threading
 from typing import Dict
 from viafoundry.client import ViaFoundryClient
 from .config import get_credentials, validate_credentials
@@ -14,6 +15,7 @@ logger = logging.getLogger('viafoundry-mcp')
 
 # Cache clients by hostname to avoid re-creating
 _clients: Dict[str, ViaFoundryClient] = {}
+_clients_lock = threading.Lock()
 
 
 def get_client() -> ViaFoundryClient:
@@ -47,21 +49,23 @@ def get_client() -> ViaFoundryClient:
 
     # Return cached client if exists for this hostname/token combination
     cache_key = f"{hostname}:{token}"
-    if cache_key in _clients:
-        return _clients[cache_key]
+    
+    with _clients_lock:
+        if cache_key in _clients:
+            return _clients[cache_key]
 
-    # Create new client
-    logger.info(f"Initializing ViaFoundry client for {hostname}")
-    client = ViaFoundryClient()
-    client.configure_auth_token(hostname=hostname, token=token)
-    logger.info("ViaFoundry client authenticated")
+        # Create new client
+        logger.info(f"Initializing ViaFoundry client for {hostname}")
+        client = ViaFoundryClient()
+        client.configure_auth_token(hostname=hostname, token=token)
+        logger.info("ViaFoundry client authenticated")
 
-    # Cache it
-    _clients[cache_key] = client
-    return client
+        # Cache it
+        _clients[cache_key] = client
+        return client
 
 
 def reset_clients():
     """Reset all cached client instances."""
-    global _clients
-    _clients = {}
+    with _clients_lock:
+        _clients.clear()
