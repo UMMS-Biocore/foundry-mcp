@@ -19,11 +19,11 @@ async def test_mcp_server():
     print("="*80)
     print()
 
-    # Server parameters
+    # Server parameters - using the new module path
     server_params = StdioServerParameters(
         command="python",
-        args=["-m", "mcp_server.server"],
-        env=None  # Will use .env file from mcp_server directory
+        args=["-m", "viafoundry_mcp.server"],
+        env=None
     )
 
     print("Starting MCP server...")
