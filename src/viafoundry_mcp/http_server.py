@@ -135,8 +135,9 @@ mcp = create_mcp_server(stateless=False)
 @mcp.tool()
 def fetch_report(report_id: str) -> str:
     """
-    Fetch report data by report ID. Returns JSON data containing
+    Fetch report data by report ID (same as run ID). Returns JSON data containing
     all processes, files, and metadata for the specified report.
+    You can get the report_id from list_runs or get_run tools.
     """
     try:
         via_client = get_client()
@@ -154,6 +155,7 @@ def list_processes(report_id: str) -> str:
     """
     List all unique processes in a report. Returns a list of process names
     that have generated output in the specified report.
+    Note: report_id is the same as run_id.
     """
     try:
         via_client = get_client()
@@ -172,6 +174,7 @@ def list_files(report_id: str, process_name: str = None) -> str:
     List files in a report. If process_name is provided, lists files for that
     specific process. Otherwise, lists all files across all processes in the report.
     Returns file metadata including file paths, sizes, and extensions.
+    Note: report_id is the same as run_id.
     """
     try:
         via_client = get_client()
@@ -291,6 +294,158 @@ def get_report_dirs(report_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def get_all_report_paths(report_id: str) -> str:
+    """
+    Get all file paths (routePaths) for a specific report.
+    Returns a comprehensive list of all accessible file paths in the report.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting all paths for report {report_id}")
+        
+        paths = via_client.reports.get_all_report_paths(report_id)
+        result = serialize_response(paths)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting report paths: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Run Management Tools
+# ============================================================================
+
+@mcp.tool()
+def list_runs(
+    search_query: str = "",
+    take: int = 10,
+    skip: int = 0,
+    sort: str = "dateCreated",
+    order: str = "desc"
+) -> str:
+    """
+    List and search for runs/pipeline executions in ViaFoundry.
+    Supports fuzzy search by name, pagination, and sorting.
+    Returns run details including ID (same as report_id), name, status, pipeline info, and dates.
+    Use this to discover runs and get their IDs for use with other tools.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing runs (search: '{search_query}', take: {take}, skip: {skip})")
+        
+        response = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/list",
+            params={
+                "take": take,
+                "skip": skip,
+                "sort": sort,
+                "order": order
+            },
+            data={"searchKey": search_query}
+        )
+        
+        return json.dumps(response, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing runs: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_run(run_id: str = None, run_name: str = None, include_reports: bool = False) -> str:
+    """
+    Get detailed information about a specific run by its ID or name.
+    Supports fuzzy name matching - if exact match not found, returns similar matches.
+    Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports.
+    The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file).
+    """
+    try:
+        via_client = get_client()
+        
+        if not run_id and not run_name:
+            return json.dumps({
+                "error": "Either run_id or run_name must be provided"
+            }, indent=2)
+        
+        # If run_name provided, search for it
+        if run_name and not run_id:
+            logger.info(f"Searching for run by name: {run_name}")
+            search_response = via_client.call(
+                method="POST",
+                endpoint="/api/v1/run/list",
+                params={"take": 100},
+                data={"searchKey": run_name}
+            )
+            
+            runs = search_response.get("data", [])
+            
+            # Try exact match first
+            exact_match = next((run for run in runs if run.get("name") == run_name), None)
+            
+            if exact_match:
+                logger.info(f"Found exact match for '{run_name}'")
+                run_id = str(exact_match.get("id"))
+                result = {
+                    "match_type": "exact",
+                    "run": exact_match
+                }
+            elif runs:
+                # Fuzzy match - return the best matches
+                logger.info(f"No exact match for '{run_name}', returning fuzzy matches")
+                result = {
+                    "match_type": "fuzzy",
+                    "message": f"No exact match found for '{run_name}'. Showing similar runs:",
+                    "matches": runs[:10]
+                }
+                return json.dumps(result, indent=2)
+            else:
+                result = {
+                    "match_type": "none",
+                    "error": f"No runs found matching '{run_name}'"
+                }
+                return json.dumps(result, indent=2)
+        else:
+            # run_id provided, fetch directly
+            logger.info(f"Fetching run by ID: {run_id}")
+            search_response = via_client.call(
+                method="POST",
+                endpoint="/api/v1/run/list",
+                params={"take": 1, "filter": f"id:eq={run_id}"},
+                data={"searchKey": ""}
+            )
+            
+            runs = search_response.get("data", [])
+            if runs:
+                result = {
+                    "match_type": "id",
+                    "run": runs[0]
+                }
+            else:
+                return json.dumps({
+                    "error": f"No run found with ID: {run_id}"
+                }, indent=2)
+        
+        # If include_reports is True, fetch reports for this run
+        if include_reports and run_id:
+            logger.info(f"Fetching reports for run ID: {run_id}")
+            try:
+                reports = via_client.call(
+                    method="GET",
+                    endpoint=f"/api/v1/run/{run_id}/reports"
+                )
+                result["reports"] = reports
+            except Exception as e:
+                logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                result["reports"] = {"error": str(e)}
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting run: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
@@ -306,7 +461,7 @@ def list_all_processes() -> str:
         logger.info("Listing all processes")
         processes = via_client.process.list_processes()
         result = serialize_response(processes)
-        return json.dumps(result, indent=2)
+        return json.dumps(result, indent=2, default=str)
     except Exception as e:
         logger.error(f"Error listing all processes: {e}", exc_info=True)
         return json.dumps({"error": str(e)})
@@ -326,6 +481,309 @@ def get_process_details(process_id: str) -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting process details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_process_revisions(process_id: str) -> str:
+    """
+    Get revision history for a specific process/pipeline.
+    Returns all versions and their changes over time.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting revisions for process {process_id}")
+        
+        revisions = via_client.process.get_process_revisions(process_id)
+        result = serialize_response(revisions)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting process revisions: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_process_parameters() -> str:
+    """
+    List all available parameters in ViaFoundry.
+    Returns parameter definitions including name, type, and constraints.
+    """
+    try:
+        via_client = get_client()
+        logger.info("Listing all process parameters")
+        
+        parameters = via_client.process.list_parameters()
+        result = serialize_response(parameters)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing process parameters: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_pipeline_parameters(pipeline_id: str) -> str:
+    """
+    Get parameters for a specific pipeline by ID.
+    Returns the parameter configuration for the pipeline.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting parameters for pipeline {pipeline_id}")
+        
+        parameters = via_client.process.get_pipeline_parameters(pipeline_id)
+        result = serialize_response(parameters)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting pipeline parameters: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def duplicate_process(process_id: str, new_name: str = None) -> str:
+    """
+    Duplicate/clone an existing process/pipeline.
+    Creates a copy of the specified process that can be modified independently.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Duplicating process {process_id}")
+        
+        duplicated = via_client.process.duplicate_process(process_id, new_name)
+        result = serialize_response(duplicated)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error duplicating process: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def filter_process_parameters(
+    name: str = None,
+    qualifier: str = None,
+    file_type: str = None,
+    id: str = None
+) -> str:
+    """
+    Filter parameters by name, qualifier, file type, or ID.
+    Returns parameters matching the specified criteria.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Filtering process parameters")
+        
+        filters = {}
+        if name:
+            filters["name"] = name
+        if qualifier:
+            filters["qualifier"] = qualifier
+        if file_type:
+            filters["file_type"] = file_type
+        if id:
+            filters["id"] = id
+        
+        filtered = via_client.process.filter_parameters({}, filters)
+        result = serialize_response(filtered)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error filtering process parameters: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_process_config(
+    name: str,
+    menu_group_name: str,
+    script_body: str,
+    input_params: list = None,
+    output_params: list = None,
+    summary: str = None,
+    script_language: str = "Shell",
+    permission_settings: dict = None,
+    revision_comment: str = None
+) -> str:
+    """
+    Generate a full process configuration using menu group and parameters.
+    Creates a complete process definition ready for creation.
+    
+    input_params and output_params: Array of objects to reference existing parameters.
+    Use 'id' field to reference by parameter ID (e.g., [{"id": 41}]),
+    or provide name/qualifier/fileType to match/create parameters.
+    Use list_process_parameters to find available parameter IDs.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating process config for {name}")
+        
+        # Format script_body like in the notebook
+        formatted_script = f"script:\n\"\"\"\n{script_body}\n\"\"\""
+        
+        # Build kwargs dict, only including non-None values
+        config_kwargs = {
+            "name": name,
+            "menu_group_name": menu_group_name,
+            "script_body": formatted_script,
+        }
+        if input_params is not None:
+            config_kwargs["input_params"] = input_params
+        if output_params is not None:
+            config_kwargs["output_params"] = output_params
+        if summary is not None:
+            config_kwargs["summary"] = summary
+        if script_language is not None:
+            config_kwargs["script_language"] = script_language
+        if permission_settings is not None:
+            config_kwargs["permission_settings"] = permission_settings
+        if revision_comment is not None:
+            config_kwargs["revision_comment"] = revision_comment
+        
+        result_obj = via_client.process.create_process_config(**config_kwargs)
+        result = serialize_response(result_obj)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating process config: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_process(process_data: dict) -> str:
+    """
+    Create a new custom process/pipeline.
+    Requires complete process configuration including scripts and parameters.
+    Use the output from create_process_config as the process_data input.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating process: {process_data.get('name', 'unnamed')}")
+        
+        # Remove None values from nested dicts
+        def remove_none(obj):
+            if isinstance(obj, dict):
+                return {k: remove_none(v) for k, v in obj.items() if v is not None}
+            elif isinstance(obj, list):
+                return [remove_none(item) for item in obj]
+            return obj
+        
+        cleaned_data = remove_none(process_data)
+        
+        # Import ProcessConfig model from SDK
+        from viafoundry.models.domain.process import ProcessConfig
+        
+        # Reconstruct ProcessConfig object from dict
+        try:
+            process_config = ProcessConfig.model_validate(cleaned_data)
+            logger.debug(f"ProcessConfig validated successfully: {process_config.name}")
+        except Exception as e:
+            logger.error(f"Failed to validate ProcessConfig: {e}")
+            return json.dumps({
+                "error": f"Invalid process configuration: {str(e)}",
+                "details": "The process_data must match the output from create_process_config"
+            }, indent=2)
+        
+        # SDK accepts ProcessConfig object as process_data argument
+        try:
+            process = via_client.process.create_process(process_data=process_config)
+            result = serialize_response(process)
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            error_details = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+            }
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                error_details["api_response"] = e.response.text
+            if hasattr(e, 'status_code'):
+                error_details["status_code"] = e.status_code
+            logger.error(f"Error creating process: {error_details}", exc_info=True)
+            return json.dumps(error_details, indent=2)
+            
+    except Exception as e:
+        logger.error(f"Error creating process: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_process_parameter(parameter_data: dict) -> str:
+    """
+    Create a new parameter for processes.
+    Defines a new parameter that can be used across multiple processes.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating process parameter")
+        
+        param = via_client.process.create_parameter(parameter_data)
+        result = serialize_response(param)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating process parameter: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Menu Group Management Tools
+# ============================================================================
+
+@mcp.tool()
+def create_menu_group(menu_name: str) -> str:
+    """
+    Create a new menu group for organizing processes.
+    Menu groups help organize processes in the UI.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating menu group: {menu_name}")
+        
+        menu = via_client.process.create_menu_group(name=menu_name)
+        result = serialize_response(menu)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating menu group: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_menu_groups() -> str:
+    """
+    List all menu groups in ViaFoundry.
+    Returns all available menu groups used for process organization.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing menu groups")
+        
+        menus = via_client.process.list_menu_groups()
+        result = serialize_response(menus)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing menu groups: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_menu_group_by_name(group_name: str) -> str:
+    """
+    Find a menu group by its name.
+    Returns the menu group ID for the specified name.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting menu group by name: {group_name}")
+        
+        menu = via_client.process.get_menu_group_by_name(group_name)
+        result = serialize_response(menu)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting menu group by name: {e}", exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -389,6 +847,375 @@ def get_collection_details(collection_id: str) -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting collection details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_collection(collection_data: dict) -> str:
+    """
+    Create a new dataset collection.
+    Collections group related datasets together for organization.
+    """
+    try:
+        via_client = get_client()
+        name = collection_data.get("name", "")
+        description = collection_data.get("description")
+        logger.info(f"Creating collection: {name}")
+        
+        collection = via_client.metadata.create_collection(name, description)
+        result = serialize_response(collection)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating collection: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def add_files_to_dataset(dataset_id: str, file_ids: list) -> str:
+    """
+    Add files to an existing dataset.
+    Associates specified files with a dataset collection.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Adding {len(file_ids)} files to dataset {dataset_id}")
+        
+        result_obj = via_client.metadata.add_files_to_dataset(dataset_id, file_ids)
+        result = serialize_response(result_obj)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error adding files to dataset: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_collection_fields(collection_id: str) -> str:
+    """
+    Get metadata fields associated with a specific collection.
+    Returns the schema/structure of metadata for the collection.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting fields for collection {collection_id}")
+        
+        fields = via_client.metadata.get_collection_fields(collection_id)
+        result = serialize_response(fields)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting collection fields: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata Canvas Tools
+# ============================================================================
+
+@mcp.tool()
+def search_canvas(query: str) -> str:
+    """
+    Search for canvas visualizations in ViaFoundry.
+    Canvas objects represent data visualizations and dashboards.
+    Returns matching canvas items with their metadata.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching canvas with query: {query}")
+        
+        canvas_results = via_client.metadata.search_canvas(query=query)
+        result = serialize_response(canvas_results)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching canvas: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_canvas_details(canvas_id: str) -> str:
+    """
+    Get detailed information about a specific canvas by ID.
+    Returns canvas configuration, fields, and visualization settings.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting details for canvas {canvas_id}")
+        
+        canvas = via_client.metadata.get_canvas(canvas_id)
+        result = serialize_response(canvas)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting canvas details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_canvas_fields(canvas_id: str) -> str:
+    """
+    Get metadata fields associated with a specific canvas.
+    Returns the schema/structure used by the canvas visualization.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting fields for canvas {canvas_id}")
+        
+        fields = via_client.metadata.get_canvas_fields(canvas_id)
+        result = serialize_response(fields)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting canvas fields: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_canvas(canvas_data: dict) -> str:
+    """
+    Create a new canvas visualization/dashboard.
+    Defines a new data visualization or analysis dashboard.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating canvas")
+        
+        canvas = via_client.metadata.create_canvas(canvas_data)
+        result = serialize_response(canvas)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating canvas: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata Fields Tools
+# ============================================================================
+
+@mcp.tool()
+def search_metadata_fields(query: str) -> str:
+    """
+    Search for metadata field definitions in ViaFoundry.
+    Fields define the schema for metadata records.
+    Returns matching field definitions with their types and constraints.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching metadata fields with query: {query}")
+        
+        fields = via_client.metadata.search_fields(query=query)
+        result = serialize_response(fields)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching metadata fields: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_field_details(field_id: str) -> str:
+    """
+    Get detailed information about a specific metadata field.
+    Returns field definition, type, constraints, and usage.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting field details for field {field_id}")
+        
+        field = via_client.metadata.get_field(field_id)
+        result = serialize_response(field)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting field details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_metadata_field(field_data: dict) -> str:
+    """
+    Create a new metadata field definition.
+    Defines a new field that can be used in metadata records.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating metadata field")
+        
+        field = via_client.metadata.create_field(field_data)
+        result = serialize_response(field)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating metadata field: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata Records Tools
+# ============================================================================
+
+@mcp.tool()
+def search_metadata_records(query: str) -> str:
+    """
+    Search for metadata records (data entries) in ViaFoundry.
+    Metadata records contain actual data values for defined fields.
+    Returns matching records with their field values.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching metadata records with query: {query}")
+        
+        records = via_client.metadata.search_data(query=query)
+        result = serialize_response(records)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching metadata records: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_metadata_record(data_id: str) -> str:
+    """
+    Get a specific metadata record by ID.
+    Returns the complete metadata record with all field values.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting metadata record {data_id}")
+        
+        record = via_client.metadata.get_data(data_id)
+        result = serialize_response(record)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting metadata record: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_metadata_record(data_record: dict) -> str:
+    """
+    Create a new metadata data record.
+    Adds a new entry with field values to the metadata system.
+    """
+    try:
+        via_client = get_client()
+        collection_id = data_record.get("collection_id")
+        data = data_record.get("data", {})
+        logger.info(f"Creating metadata record in collection {collection_id}")
+        
+        record = via_client.metadata.create_data(collection_id, data)
+        result = serialize_response(record)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating metadata record: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# App Launch Tools
+# ============================================================================
+
+@mcp.tool()
+def list_apps(search: str = None) -> str:
+    """
+    List all available applications in ViaFoundry with their names, IDs, and details.
+    Use this to find apps by name before launching them.
+    Returns app information including ID, name, description, image, and configuration.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing apps with search filter: {search}")
+        
+        # Call the /api/app/v1 endpoint to get all apps
+        response = via_client.call(
+            method="GET",
+            endpoint="/api/app/v1"
+        )
+        
+        # Extract apps from paginated response
+        if isinstance(response, dict) and 'data' in response:
+            apps = response['data']
+        else:
+            apps = response if isinstance(response, list) else []
+        
+        # If search filter provided, filter apps by name
+        if search and isinstance(apps, list):
+            search_lower = search.lower()
+            filtered_apps = [
+                app for app in apps
+                if search_lower in str(app.get('name', '')).lower()
+            ]
+            result = filtered_apps
+        else:
+            result = apps
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing apps: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def discover_app_endpoints(search: str = None, as_json: bool = False) -> str:
+    """
+    Discover and search for available API endpoints in ViaFoundry.
+    Search by name, description, or endpoint path.
+    Returns endpoint details including path, methods, and descriptions.
+    Use list_apps for finding apps by name instead.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Discovering app endpoints with search: {search}")
+        
+        # Use the SDK's discover method to find endpoints
+        endpoints = via_client.discover(search=search, as_json=as_json)
+        
+        # If as_json is True, endpoints is already a JSON string
+        if as_json:
+            return endpoints
+        else:
+            return json.dumps(endpoints, indent=2)
+    except Exception as e:
+        logger.error(f"Error discovering app endpoints: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = None) -> str:
+    """
+    Launch/run an application or pipeline in ViaFoundry.
+    Executes a specific app with the provided parameters.
+    Use discover_app_endpoints first to find the correct app_id and endpoint.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Launching app {app_id} with type {run_type}")
+        
+        # Build the endpoint
+        endpoint = f"/api/app/v1/call/{app_id}"
+        
+        # Prepare the request data
+        data = {
+            "type": run_type,
+        }
+        if parameters:
+            data.update(parameters)
+        
+        # Make the API call using the generic call method
+        result = via_client.call(
+            method="POST",
+            endpoint=endpoint,
+            data=data
+        )
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error launching app: {e}", exc_info=True)
         return json.dumps({"error": str(e)})
 
 
@@ -470,4 +1297,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-
