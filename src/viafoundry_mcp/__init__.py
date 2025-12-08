@@ -4,7 +4,7 @@ ViaFoundry MCP Server
 A Model Context Protocol (MCP) server for ViaFoundry.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from .client import get_client, reset_clients
 from .config import get_credentials, set_credentials

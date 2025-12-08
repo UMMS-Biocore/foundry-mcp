@@ -61,7 +61,8 @@ def test_get_client_configures_auth_token(mock_client_class, mock_credentials):
     )
 
 
-def test_get_client_missing_credentials():
+@patch('src.viafoundry_mcp.config.load_env_file')
+def test_get_client_missing_credentials(mock_load_env):
     """Test that get_client raises error when credentials are missing."""
     set_credentials(None, None)
     with pytest.raises(ValueError, match="Missing credentials"):

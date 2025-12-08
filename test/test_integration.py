@@ -160,6 +160,81 @@ async def test_mcp_server():
                         print(f"  {i}. {dir}")
             print()
 
+            # Test 5: Phase 1 - List all processes
+            print("-"*80)
+            print("STEP 6: Test list_all_processes (Phase 1)")
+            print("-"*80)
+            print("Calling tool: list_all_processes")
+            print()
+
+            result5 = await session.call_tool(
+                "list_all_processes",
+                arguments={}
+            )
+
+            print("Response:")
+            for content in result5.content:
+                if hasattr(content, 'text'):
+                    response_data = json.loads(content.text)
+                    processes = response_data.get('processes', [])
+                    print(f"Found {len(processes)} total processes")
+                    if processes:
+                        print(f"Sample processes:")
+                        for i, proc in enumerate(processes[:3], 1):
+                            print(f"  {i}. {proc.get('name')} (ID: {proc.get('id')})")
+            print()
+
+            # Test 6: Phase 1 - Search collections
+            print("-"*80)
+            print("STEP 7: Test search_collections (Phase 1)")
+            print("-"*80)
+            print("Calling tool: search_collections")
+            print()
+
+            result6 = await session.call_tool(
+                "search_collections",
+                arguments={}
+            )
+
+            print("Response:")
+            for content in result6.content:
+                if hasattr(content, 'text'):
+                    response_data = json.loads(content.text)
+                    collections = response_data.get('collections', [])
+                    print(f"Found {len(collections)} collections")
+                    if collections:
+                        print(f"Sample collections:")
+                        for i, coll in enumerate(collections[:3], 1):
+                            print(f"  {i}. {coll.get('name')} (ID: {coll.get('id')})")
+            print()
+
+            # Test 7: Verify tool count
+            print("-"*80)
+            print("STEP 8: Verify SDK Tool Coverage")
+            print("-"*80)
+            expected_tools = 50
+            actual_tools = len(tools_result.tools)
+
+            if actual_tools == expected_tools:
+                print(f"✓ Tool count correct: {actual_tools} tools available")
+            else:
+                print(f"⚠ Tool count mismatch: Expected {expected_tools}, got {actual_tools}")
+            print()
+
+            print("Tool categories:")
+            tool_names = [t.name for t in tools_result.tools]
+
+            # Count by phase
+            phase1_tools = [t for t in tool_names if any(x in t for x in ['get_process_revisions', 'list_process_parameters', 'search_canvas', 'search_metadata_fields', 'search_metadata_records'])]
+            phase2_tools = [t for t in tool_names if any(x in t for x in ['duplicate_process', 'filter_process_parameters', 'add_files_to_dataset', 'create_collection', 'collect_report_files'])]
+            phase3_tools = [t for t in tool_names if any(x in t for x in ['create_process', 'update_process', 'create_canvas', 'update_canvas', 'create_metadata_field'])]
+            phase4_tools = [t for t in tool_names if any(x in t for x in ['delete_process', 'delete_collection', 'delete_canvas', 'menu_group'])]
+
+            print(f"  • Reports: {len([t for t in tool_names if 'report' in t or 'fetch' in t])} tools")
+            print(f"  • Processes: {len([t for t in tool_names if 'process' in t])} tools")
+            print(f"  • Metadata: {len([t for t in tool_names if any(x in t for x in ['metadata', 'collection', 'canvas', 'field', 'data', 'menu'])])} tools")
+            print()
+
             print("="*80)
             print("ALL TESTS COMPLETED SUCCESSFULLY! ✓")
             print("="*80)
