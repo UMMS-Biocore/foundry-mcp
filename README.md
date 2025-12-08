@@ -375,7 +375,7 @@ pip install -e ".[dev]"
 ```
 viafoundry-mcp/
 ├── src/viafoundry_mcp/
-│   ├── http_server.py   # MCP HTTP server
+│   ├── server.py        # MCP HTTP server
 │   ├── client.py        # ViaFoundry client
 │   ├── config.py        # Configuration
 │   └── utils.py         # Utility functions

@@ -46,7 +46,7 @@ Repository = "https://github.com/viascientific/viafoundry-mcp"
 Issues = "https://github.com/viascientific/viafoundry-mcp/issues"
 
 [project.scripts]
-viafoundry-mcp = "viafoundry_mcp.http_server:main"
+viafoundry-mcp = "viafoundry_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

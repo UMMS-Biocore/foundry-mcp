@@ -15,7 +15,7 @@ class TestMCPTools:
     
     def test_tools_registered(self):
         """Verify that tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         
@@ -23,7 +23,7 @@ class TestMCPTools:
     
     def test_report_tools_registered(self):
         """Verify report management tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -44,7 +44,7 @@ class TestMCPTools:
     
     def test_run_tools_registered(self):
         """Verify run management tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -59,7 +59,7 @@ class TestMCPTools:
     
     def test_process_tools_registered(self):
         """Verify process management tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -82,7 +82,7 @@ class TestMCPTools:
     
     def test_menu_group_tools_registered(self):
         """Verify menu group tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -98,7 +98,7 @@ class TestMCPTools:
     
     def test_metadata_tools_registered(self):
         """Verify metadata tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -127,7 +127,7 @@ class TestMCPTools:
     
     def test_app_tools_registered(self):
         """Verify app launch tools are registered."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -143,7 +143,7 @@ class TestMCPTools:
     
     def test_all_tools_have_docstrings(self):
         """Verify all tools have documentation."""
-        from viafoundry_mcp.http_server import mcp
+        from viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         
