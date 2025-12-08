@@ -3,7 +3,28 @@ Tests for utility functions.
 """
 
 import pytest
-from src.viafoundry_mcp.utils import serialize_response, MAX_SERIALIZATION_DEPTH
+from src.viafoundry_mcp.utils import serialize_response, is_valid_mcp_token, MCP_TOKEN_PREFIX, MAX_SERIALIZATION_DEPTH
+
+
+class TestIsValidMcpToken:
+    """Tests for the is_valid_mcp_token function."""
+
+    def test_valid_mcp_tokens(self):
+        """Tokens with via_mcp_ prefix should be valid."""
+        assert is_valid_mcp_token("via_mcp_abc123") is True
+        assert is_valid_mcp_token("via_mcp_") is True
+        assert is_valid_mcp_token("via_mcp_longtoken12345") is True
+
+    def test_invalid_tokens(self):
+        """Tokens without via_mcp_ prefix should be invalid."""
+        assert is_valid_mcp_token("regular_token_12345") is False
+        assert is_valid_mcp_token("mcp_token") is False
+        assert is_valid_mcp_token("abc123") is False
+
+    def test_empty_and_none(self):
+        """Empty and None tokens should be invalid."""
+        assert is_valid_mcp_token("") is False
+        assert is_valid_mcp_token(None) is False
 
 
 class TestSerializeResponse:

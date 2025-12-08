@@ -3,8 +3,18 @@
 Utility functions for ViaFoundry MCP.
 """
 
+from typing import Optional
+
 # Maximum recursion depth to prevent stack overflow
 MAX_SERIALIZATION_DEPTH = 50
+
+# MCP token prefix - required for all MCP tokens
+MCP_TOKEN_PREFIX = "via_mcp_"
+
+
+def is_valid_mcp_token(token: Optional[str]) -> bool:
+    """Check if token starts with 'via_mcp_' prefix."""
+    return bool(token and token.startswith(MCP_TOKEN_PREFIX))
 
 
 def serialize_response(obj, _visited=None, _depth: int = 0):

@@ -41,6 +41,9 @@ docker compose up --build -d
 2. Go to **Profile** → **Personal Access Tokens**
 3. Create a new token and copy it
 
+> **Note:** MCP tokens must start with the `via_mcp_` prefix. If your token doesn't have this prefix, be sure to generate a new MCP token from ViaFoundry.
+
+
 ---
 
 ## Available Tools

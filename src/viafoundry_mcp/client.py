@@ -45,7 +45,11 @@ def get_client() -> ViaFoundryClient:
         )
 
     if not validate_credentials(hostname, token):
-        raise ValueError("Invalid credentials. Hostname must start with http:// or https://")
+        raise ValueError(
+            "Invalid credentials.\n"
+            "- Hostname must start with http:// or https://\n"
+            "- Token must start with 'via_mcp_'"
+        )
 
     # Return cached client if exists for this hostname/token combination
     cache_key = f"{hostname}:{token}"

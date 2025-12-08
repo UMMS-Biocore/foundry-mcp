@@ -12,7 +12,7 @@ Configure in ~/.cursor/mcp.json:
     "url": "http://127.0.0.1:8000/mcp",
     "headers": {
       "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
-      "X-ViaFoundry-Token": "your-token-here"
+      "X-ViaFoundry-Token": "via_mcp_your-token-here"
     }
   }
 }
@@ -21,6 +21,8 @@ Configure in ~/.cursor/mcp.json:
 import logging
 from contextvars import ContextVar
 from typing import Optional, Tuple
+
+from .utils import is_valid_mcp_token, MCP_TOKEN_PREFIX
 
 logger = logging.getLogger('viafoundry-mcp')
 
@@ -50,5 +52,8 @@ def validate_credentials(hostname: Optional[str], token: Optional[str]) -> bool:
         return False
     if not (hostname.startswith("http://") or hostname.startswith("https://")):
         logger.error(f"Invalid hostname: {hostname} (must start with http:// or https://)")
+        return False
+    if not is_valid_mcp_token(token):
+        logger.error(f"Invalid token: must start with '{MCP_TOKEN_PREFIX}'")
         return False
     return True
