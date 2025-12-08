@@ -3,7 +3,7 @@ Tests for HTTP server middleware and functionality.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 
 class TestCredentialsMiddleware:

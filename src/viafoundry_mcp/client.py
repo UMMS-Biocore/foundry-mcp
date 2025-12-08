@@ -52,7 +52,7 @@ def get_client() -> ViaFoundryClient:
         )
 
     # Return cached client if exists for this hostname/token combination
-    cache_key = f"{hostname}:{token}"
+    cache_key = (hostname, token)
     
     with _clients_lock:
         if cache_key in _clients:

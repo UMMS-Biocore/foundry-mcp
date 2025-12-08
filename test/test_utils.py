@@ -2,7 +2,6 @@
 Tests for utility functions.
 """
 
-import pytest
 from src.viafoundry_mcp.utils import serialize_response, is_valid_mcp_token, MCP_TOKEN_PREFIX, MAX_SERIALIZATION_DEPTH
 
 
@@ -10,10 +9,14 @@ class TestIsValidMcpToken:
     """Tests for the is_valid_mcp_token function."""
 
     def test_valid_mcp_tokens(self):
-        """Tokens with via_mcp_ prefix should be valid."""
-        assert is_valid_mcp_token("via_mcp_abc123") is True
-        assert is_valid_mcp_token("via_mcp_") is True
-        assert is_valid_mcp_token("via_mcp_longtoken12345") is True
+        """Tokens with via_mcp_ prefix and content after it should be valid."""
+        assert is_valid_mcp_token(f"{MCP_TOKEN_PREFIX}abc123") is True
+        assert is_valid_mcp_token(f"{MCP_TOKEN_PREFIX}x") is True
+        assert is_valid_mcp_token(f"{MCP_TOKEN_PREFIX}longtoken12345") is True
+
+    def test_prefix_only_is_invalid(self):
+        """Token with only the prefix (no content after) should be invalid."""
+        assert is_valid_mcp_token(MCP_TOKEN_PREFIX) is False
 
     def test_invalid_tokens(self):
         """Tokens without via_mcp_ prefix should be invalid."""
