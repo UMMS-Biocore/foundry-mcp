@@ -356,8 +356,8 @@ Then update your client config with the HTTPS URL:
 # Install
 pip install git+https://github.com/viascientific/viafoundry-mcp.git
 
-# Run HTTP server
-viafoundry-mcp-http --port 8000
+# Run server
+viafoundry-mcp --port 8000
 ```
 
 ---
@@ -375,10 +375,10 @@ pip install -e ".[dev]"
 ```
 viafoundry-mcp/
 ├── src/viafoundry_mcp/
-│   ├── server.py        # MCP server (stdio)
-│   ├── http_server.py   # MCP server (HTTP)
+│   ├── http_server.py   # MCP HTTP server
 │   ├── client.py        # ViaFoundry client
-│   └── config.py        # Configuration
+│   ├── config.py        # Configuration
+│   └── utils.py         # Utility functions
 ├── Dockerfile
 ├── docker-compose.yml
 └── pyproject.toml

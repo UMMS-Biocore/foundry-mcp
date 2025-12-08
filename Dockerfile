@@ -56,5 +56,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT})); s.close()" || exit 1
 
 # Run the HTTP server (bind to 0.0.0.0 for Docker)
-CMD ["sh", "-c", "viafoundry-mcp-http --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "viafoundry-mcp --host 0.0.0.0 --port ${PORT}"]
 

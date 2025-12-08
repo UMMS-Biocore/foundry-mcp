@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "viafoundry-mcp"
-version = "1.0.1"
+version = "1.1.0"
 description = "Model Context Protocol (MCP) server for ViaFoundry SDK"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -46,8 +46,7 @@ Repository = "https://github.com/viascientific/viafoundry-mcp"
 Issues = "https://github.com/viascientific/viafoundry-mcp/issues"
 
 [project.scripts]
-viafoundry-mcp = "viafoundry_mcp.server:main"
-viafoundry-mcp-http = "viafoundry_mcp.http_server:main"
+viafoundry-mcp = "viafoundry_mcp.http_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
