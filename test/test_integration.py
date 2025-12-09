@@ -13,7 +13,7 @@ class TestMCPTools:
     
     def test_tools_registered(self):
         """Verify that tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         
@@ -21,7 +21,7 @@ class TestMCPTools:
     
     def test_report_tools_registered(self):
         """Verify report management tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -42,7 +42,7 @@ class TestMCPTools:
     
     def test_run_tools_registered(self):
         """Verify run management tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -57,7 +57,7 @@ class TestMCPTools:
     
     def test_process_tools_registered(self):
         """Verify process management tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -80,7 +80,7 @@ class TestMCPTools:
     
     def test_menu_group_tools_registered(self):
         """Verify menu group tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -96,7 +96,7 @@ class TestMCPTools:
     
     def test_metadata_tools_registered(self):
         """Verify metadata tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -125,7 +125,7 @@ class TestMCPTools:
     
     def test_app_tools_registered(self):
         """Verify app launch tools are registered."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
@@ -141,7 +141,7 @@ class TestMCPTools:
     
     def test_all_tools_have_docstrings(self):
         """Verify all tools have documentation."""
-        from viafoundry_mcp.server import mcp
+        from src.viafoundry_mcp.server import mcp
         
         tools = mcp._tool_manager._tools
         
@@ -154,7 +154,7 @@ class TestUtilities:
     
     def test_serialize_response_primitives(self):
         """Test serialization of primitive types."""
-        from viafoundry_mcp.utils import serialize_response
+        from src.viafoundry_mcp.utils import serialize_response
         
         assert serialize_response(None) is None
         assert serialize_response("test") == "test"
@@ -164,7 +164,7 @@ class TestUtilities:
     
     def test_serialize_response_dict(self):
         """Test serialization of dictionaries."""
-        from viafoundry_mcp.utils import serialize_response
+        from src.viafoundry_mcp.utils import serialize_response
         
         data = {"key": "value", "nested": {"a": 1}}
         result = serialize_response(data)
@@ -173,7 +173,7 @@ class TestUtilities:
     
     def test_serialize_response_list(self):
         """Test serialization of lists."""
-        from viafoundry_mcp.utils import serialize_response
+        from src.viafoundry_mcp.utils import serialize_response
         
         data = [1, 2, {"key": "value"}]
         result = serialize_response(data)
@@ -182,7 +182,7 @@ class TestUtilities:
     
     def test_serialize_response_circular_reference(self):
         """Test that circular references are handled."""
-        from viafoundry_mcp.utils import serialize_response
+        from src.viafoundry_mcp.utils import serialize_response
         
         data = {"key": "value"}
         data["self"] = data  # Create circular reference
@@ -197,14 +197,14 @@ class TestConfig:
     
     def test_validate_credentials_valid(self):
         """Test validation of valid credentials."""
-        from viafoundry_mcp.config import validate_credentials
+        from src.viafoundry_mcp.config import validate_credentials
         
         assert validate_credentials("https://example.com", "via_mcp_token123")
         assert validate_credentials("http://localhost:8080", "via_mcp_test")
     
     def test_validate_credentials_invalid(self):
         """Test validation of invalid credentials."""
-        from viafoundry_mcp.config import validate_credentials
+        from src.viafoundry_mcp.config import validate_credentials
         
         # Missing values
         assert not validate_credentials("", "via_mcp_token")

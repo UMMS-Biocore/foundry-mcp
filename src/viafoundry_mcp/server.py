@@ -27,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 # Import from our modules
 from .client import get_client
 from .config import set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN
-from .utils import serialize_response
+from .utils import serialize_response, MCP_TOKEN_PREFIX
 
 
 # Configure logging
