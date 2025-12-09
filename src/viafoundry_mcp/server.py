@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """
-ViaFoundry MCP Server
+ViaFoundry MCP HTTP Server
 
-This MCP server provides access to ViaFoundry's reporting and authentication capabilities.
+Credentials are configured in mcp.json via headers:
+{
+  "viafoundry": {
+    "url": "http://127.0.0.1:8000/mcp",
+    "headers": {
+      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
+      "X-ViaFoundry-Token": "your-token-here"
+    }
+  }
+}
+
+Run with: python -m viafoundry_mcp.server --port 8000
 """
 
 import os
 import json
 import logging
-from typing import Any
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-from mcp.server.stdio import stdio_server
+import argparse
+
+from starlette.types import ASGIApp, Receive, Scope, Send
+from mcp.server.fastmcp import FastMCP
 
 # Import from our modules
 from .client import get_client
+from .config import set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN
+from .utils import serialize_response, MCP_TOKEN_PREFIX
+
 
 # Configure logging
 logging.basicConfig(
@@ -23,1835 +37,1264 @@ logging.basicConfig(
 )
 logger = logging.getLogger('viafoundry-mcp')
 
-# Initialize the MCP server
-app = Server("viafoundry-mcp")
+
+class CredentialsMiddleware:
+    """
+    Middleware that extracts ViaFoundry credentials from request headers,
+    validates them, and stores them in context variables for use by tool handlers.
+    
+    Returns 401 Unauthorized if credentials are missing or invalid.
+    """
+    
+    def __init__(self, app: ASGIApp):
+        self.app = app
+    
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "http":
+            # Skip credential check for OPTIONS requests (CORS preflight)
+            method = scope.get("method", "")
+            if method == "OPTIONS":
+                await self.app(scope, receive, send)
+                return
+            
+            # Extract headers (they're stored as list of tuples)
+            headers = dict(scope.get("headers", []))
+            
+            # Get credentials from headers (header names are lowercase bytes)
+            hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+            token = headers.get(HEADER_TOKEN.encode(), b"").decode()
+            
+            # Validate credentials
+            if not validate_credentials(hostname, token):
+                # Return 401 Unauthorized response
+                logger.warning(f"Invalid or missing credentials from {scope.get('client', ('unknown',))[0]}")
+                await self._send_unauthorized_response(send, hostname, token)
+                return
+            
+            # Set validated credentials in context for this request
+            set_credentials(hostname, token)
+            logger.debug(f"Credentials validated and set from headers: {hostname}")
+        
+        await self.app(scope, receive, send)
+    
+    async def _send_unauthorized_response(self, send: Send, hostname: str, token: str) -> None:
+        """Send a 401 Unauthorized response with details about what's missing."""
+        if not hostname and not token:
+            detail = "Missing credentials. Provide X-ViaFoundry-Hostname and X-ViaFoundry-Token headers."
+        elif not hostname:
+            detail = "Missing X-ViaFoundry-Hostname header."
+        elif not token:
+            detail = "Missing X-ViaFoundry-Token header."
+        elif not (hostname.startswith("http://") or hostname.startswith("https://")):
+            detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
+        elif not token.startswith(MCP_TOKEN_PREFIX):
+            detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+        else:
+            detail = "Invalid credentials."
+        
+        body = json.dumps({
+            "error": "Unauthorized",
+            "detail": detail,
+            "help": "Configure credentials in mcp.json headers: X-ViaFoundry-Hostname and X-ViaFoundry-Token"
+        }).encode("utf-8")
+        
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+        })
 
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available MCP tools."""
-    return [
-        Tool(
-            name="fetch_report",
-            description=(
-                "Fetch report data by report ID (same as run ID). Returns JSON data containing "
-                "all processes, files, and metadata for the specified report. "
-                "You can get the report_id from list_runs or get_run tools."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report/run to fetch (report_id is same as run_id)"
-                    }
-                },
-                "required": ["report_id"],
-                "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="list_processes",
-            description=(
-                "List all unique processes in a report. Returns a list of process names "
-                "that have generated output in the specified report. "
-                "Note: report_id is the same as run_id."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    }
-                },
-                "required": ["report_id"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="list_files",
-            description=(
-                "List files in a report. If process_name is provided, lists files for that "
-                "specific process. Otherwise, lists all files across all processes in the report. "
-                "Returns file metadata including file paths, sizes, and extensions. "
-                "Note: report_id is the same as run_id."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    },
-                    "process_name": {
-                        "type": "string",
-                        "description": "Optional: The name of the process to list files for"
-                    }
-                },
-                "required": ["report_id"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="download_file",
-            description=(
-                "Download a specific file from a report. Saves the file to the specified "
-                "download directory (defaults to current directory). Returns the local path "
-                "where the file was saved."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "The path of the file to download (e.g., 'rsem_summary/genes_expression_expected_count.tsv')"
-                    },
-                    "download_dir": {
-                        "type": "string",
-                        "description": "Optional: Directory to save the file (defaults to current directory)"
-                    }
-                },
-                "required": ["report_id", "file_path"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="load_file",
-            description=(
-                "Load and return the contents of a file from a report. For tabular files "
-                "(CSV, TSV, TXT), returns a formatted table. For other files, returns raw content. "
-                "Use this when you need to analyze file contents without downloading."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "The path of the file to load"
-                    },
-                    "separator": {
-                        "type": "string",
-                        "description": "Optional: Separator for tabular files (defaults to tab '\\t')"
-                    }
-                },
-                "required": ["report_id", "file_path"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="upload_file",
-            description=(
-                "Upload a file to a report. The file will be organized in the specified "
-                "directory within the report. Returns upload status and file information."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    },
-                    "local_file_path": {
-                        "type": "string",
-                        "description": "The local path to the file to upload"
-                    },
-                    "remote_dir": {
-                        "type": "string",
-                        "description": "Optional: Directory name for organizing files in the report"
-                    }
-                },
-                "required": ["report_id", "local_file_path"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_report_dirs",
-            description=(
-                "Get all available directories in a report where files can be uploaded. "
-                "Returns a list of directory names that can be used with upload_file."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report"
-                    }
-                },
-                "required": ["report_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Run Management Tools
-        Tool(
-            name="list_runs",
-            description=(
-                "List and search for runs/pipeline executions in ViaFoundry. "
-                "Supports fuzzy search by name, pagination, and sorting. "
-                "Returns run details including ID (same as report_id), name, status, pipeline info, and dates. "
-                "Use this to discover runs and get their IDs for use with other tools."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "search_query": {
-                        "type": "string",
-                        "description": "Optional: Search query for fuzzy matching run names. Supports partial matches."
-                    },
-                    "take": {
-                        "type": "integer",
-                        "description": "Optional: Maximum number of results to return (1-100, default: 10)",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "default": 10
-                    },
-                    "skip": {
-                        "type": "integer",
-                        "description": "Optional: Number of results to skip for pagination (default: 0)",
-                        "minimum": 0,
-                        "default": 0
-                    },
-                    "sort": {
-                        "type": "string",
-                        "description": "Optional: Field to sort by (default: dateCreated)",
-                        "enum": ["id", "name", "status", "username", "dateCreated", "pipelineName", "summary", "dateCreatedLastRun"],
-                        "default": "dateCreated"
-                    },
-                    "order": {
-                        "type": "string",
-                        "description": "Optional: Sort order (default: desc)",
-                        "enum": ["asc", "desc"],
-                        "default": "desc"
-                    }
-                },
-                "required": [],
-                "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_run",
-            description=(
-                "Get detailed information about a specific run by its ID or name. "
-                "Supports fuzzy name matching - if exact match not found, returns similar matches. "
-                "Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports. "
-                "The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "run_id": {
-                        "type": "string",
-                        "description": "The ID of the run to fetch (either run_id or run_name must be provided)"
-                    },
-                    "run_name": {
-                        "type": "string",
-                        "description": "The name of the run to fetch. Supports fuzzy matching if exact match not found."
-                    },
-                    "include_reports": {
-                        "type": "boolean",
-                        "description": "Optional: Include report metadata in the response (default: false)",
-                        "default": False
-                    }
-                },
-                "required": [],
-                "additionalProperties": False
-            }
-        ),
-
-        # Process Management Tools
-        Tool(
-            name="list_all_processes",
-            description=(
-                "List all processes/pipelines in ViaFoundry. Returns details including "
-                "process ID, name, summary, and owner information."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": [],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_process_details",
-            description=(
-                "Get detailed information about a specific process/pipeline by ID. "
-                "Returns complete process configuration, scripts, parameters, and metadata."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "process_id": {
-                        "type": "string",
-                        "description": "The ID of the process to fetch"
-                    }
-                },
-                "required": ["process_id"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="search_datasets",
-            description=(
-                "Search for dataset files in ViaFoundry metadata system. "
-                "Search by filename, collection, or other criteria. "
-                "Returns matching dataset files with their metadata."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (filename, path, or other criteria)"
-                    },
-                    "collection_id": {
-                        "type": "string",
-                        "description": "Optional: Filter by collection ID"
-                    }
-                },
-                "required": ["query"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="search_collections",
-            description=(
-                "Search for collections in ViaFoundry metadata system. "
-                "Collections are groups of related datasets. "
-                "Returns matching collections with their metadata."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (collection name or description)"
-                    }
-                },
-                "required": ["query"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_collection_details",
-            description=(
-                "Get detailed information about a specific collection by ID. "
-                "Returns collection metadata and associated datasets."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "collection_id": {
-                        "type": "string",
-                        "description": "The ID of the collection to fetch"
-                    }
-                },
-                "required": ["collection_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 1 Tools - Process Management
-        Tool(
-            name="get_process_revisions",
-            description=(
-                "Get revision history for a specific process/pipeline. "
-                "Returns all versions and their changes over time."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "process_id": {
-                        "type": "string",
-                        "description": "The ID of the process to get revisions for"
-                    }
-                },
-                "required": ["process_id"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="list_process_parameters",
-            description=(
-                "List all available parameters in ViaFoundry. "
-                "Returns parameter definitions including name, type, and constraints."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": [],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_pipeline_parameters",
-            description=(
-                "Get parameters for a specific pipeline by ID. "
-                "Returns the parameter configuration for the pipeline."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "pipeline_id": {
-                        "type": "string",
-                        "description": "The ID of the pipeline to get parameters for"
-                    }
-                },
-                "required": ["pipeline_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 1 Tools - Metadata Canvas
-        Tool(
-            name="search_canvas",
-            description=(
-                "Search for canvas visualizations in ViaFoundry. "
-                "Canvas objects represent data visualizations and dashboards. "
-                "Returns matching canvas items with their metadata."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for canvas name or description"
-                    }
-                },
-                "required": ["query"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_canvas_details",
-            description=(
-                "Get detailed information about a specific canvas by ID. "
-                "Returns canvas configuration, fields, and visualization settings."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "canvas_id": {
-                        "type": "string",
-                        "description": "The ID of the canvas to fetch"
-                    }
-                },
-                "required": ["canvas_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 1 Tools - Metadata Fields
-        Tool(
-            name="search_metadata_fields",
-            description=(
-                "Search for metadata field definitions in ViaFoundry. "
-                "Fields define the schema for metadata records. "
-                "Returns matching field definitions with their types and constraints."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for field name or description"
-                    }
-                },
-                "required": ["query"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_collection_fields",
-            description=(
-                "Get metadata fields associated with a specific collection. "
-                "Returns the schema/structure of metadata for the collection."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "collection_id": {
-                        "type": "string",
-                        "description": "The ID of the collection to get fields for"
-                    }
-                },
-                "required": ["collection_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 1 Tools - Metadata Data Records
-        Tool(
-            name="search_metadata_records",
-            description=(
-                "Search for metadata records (data entries) in ViaFoundry. "
-                "Metadata records contain actual data values for defined fields. "
-                "Returns matching records with their field values."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for metadata records"
-                    }
-                },
-                "required": ["query"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_metadata_record",
-            description=(
-                "Get a specific metadata record by ID. "
-                "Returns the complete metadata record with all field values."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "data_id": {
-                        "type": "string",
-                        "description": "The ID of the metadata record to fetch"
-                    }
-                },
-                "required": ["data_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 1 Tools - Reports
-        Tool(
-            name="get_all_report_paths",
-            description=(
-                "Get all file paths (routePaths) for a specific report. "
-                "Returns a comprehensive list of all accessible file paths in the report."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "report_id": {
-                        "type": "string",
-                        "description": "The ID of the report to get paths for"
-                    }
-                },
-                "required": ["report_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 2 Tools - Workflow Enablers
-        Tool(
-            name="duplicate_process",
-            description=(
-                "Duplicate/clone an existing process/pipeline. "
-                "Creates a copy of the specified process that can be modified independently."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "process_id": {
-                        "type": "string",
-                        "description": "The ID of the process to duplicate"
-                    }
-                },
-                "required": ["process_id"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="filter_process_parameters",
-            description=(
-                "Filter parameters by name, qualifier, file type, or ID. "
-                "Returns parameters matching the specified criteria."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Optional: Filter by parameter name"
-                    },
-                    "qualifier": {
-                        "type": "string",
-                        "description": "Optional: Filter by qualifier (e.g., 'input', 'output')"
-                    },
-                    "file_type": {
-                        "type": "string",
-                        "description": "Optional: Filter by file type (e.g., 'fastq', 'bam')"
-                    },
-                    "id": {
-                        "type": "string",
-                        "description": "Optional: Filter by parameter ID"
-                    }
-                },
-                "required": [],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="add_files_to_dataset",
-            description=(
-                "Add files to an existing dataset. "
-                "Associates specified files with a dataset collection."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "dataset_id": {
-                        "type": "string",
-                        "description": "The ID of the dataset to add files to"
-                    },
-                    "file_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Array of file IDs to add to the dataset"
-                    }
-                },
-                "required": ["dataset_id", "file_ids"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="create_collection",
-            description=(
-                "Create a new dataset collection. "
-                "Collections group related datasets together for organization."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "collection_data": {
-                        "type": "object",
-                        "description": "Collection configuration (name, description, etc.)",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["collection_data"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="create_metadata_record",
-            description=(
-                "Create a new metadata data record. "
-                "Adds a new entry with field values to the metadata system."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "data_record": {
-                        "type": "object",
-                        "description": "Metadata record with field values",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["data_record"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_field_details",
-            description=(
-                "Get detailed information about a specific metadata field. "
-                "Returns field definition, type, constraints, and usage."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "field_id": {
-                        "type": "string",
-                        "description": "The ID of the field to fetch"
-                    }
-                },
-                "required": ["field_id"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_canvas_fields",
-            description=(
-                "Get metadata fields associated with a specific canvas. "
-                "Returns the schema/structure used by the canvas visualization."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "canvas_id": {
-                        "type": "string",
-                        "description": "The ID of the canvas to get fields for"
-                    }
-                },
-                "required": ["canvas_id"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 3 Tools - Advanced Management
-        Tool(
-            name="create_process_config",
-            description=(
-                "Generate a full process configuration using menu group and parameters. "
-                "Creates a complete process definition ready for creation."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Process name"
-                    },
-                    "menu_group_name": {
-                        "type": "string",
-                        "description": "Menu group name for organization"
-                    },
-                    "input_params": {
-                        "type": "array",
-                        "description": "Input parameters - array of objects to reference existing parameters. Use 'id' field to reference by parameter ID (e.g., [{\"id\": 41}]), or provide name/qualifier/fileType to match/create parameters (e.g., [{\"name\": \"input_file\", \"qualifier\": \"file\", \"fileType\": \"fastq\"}]). Optional fields: displayName, operator, operatorContent, optional, test. Use list_process_parameters to find available parameter IDs.",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": True
-                        }
-                    },
-                    "output_params": {
-                        "type": "array",
-                        "description": "Output parameters - array of objects to reference existing parameters. Use 'id' field to reference by parameter ID (e.g., [{\"id\": 285}]), or provide name/qualifier/fileType to match/create parameters (e.g., [{\"name\": \"output_file\", \"qualifier\": \"file\", \"fileType\": \"txt\"}]). Optional fields: displayName, operator, operatorContent, optional, test. Use list_process_parameters to find available parameter IDs.",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": True
-                        }
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "Process summary/description"
-                    },
-                    "script_body": {
-                        "type": "string",
-                        "description": "Process script body (raw script content, will be formatted automatically)"
-                    },
-                    "script_language": {
-                        "type": "string",
-                        "description": "Script language/mode (e.g., 'Shell', 'Python', 'R'). Defaults to 'Shell'."
-                    },
-                    "permission_settings": {
-                        "type": "object",
-                        "description": "Permission settings (viewPermissions, writeGroupIds, sharedGroupId)",
-                        "additionalProperties": False
-                    },
-                    "revision_comment": {
-                        "type": "string",
-                        "description": "Revision comment for the initial version"
-                    }
-                },
-                "required": ["name", "menu_group_name", "script_body"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="create_process",
-            description=(
-                "Create a new custom process/pipeline. "
-                "Requires complete process configuration including scripts and parameters. "
-                "Use the output from create_process_config as the process_data input."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "process_data": {
-                        "type": "object",
-                        "description": "Complete process configuration object from create_process_config",
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "Process name"
-                            },
-                            "summary": {
-                                "type": "string",
-                                "description": "Process summary/description"
-                            },
-                            "menuGroupId": {
-                                "type": "integer",
-                                "description": "Menu group ID for organization"
-                            },
-                            "inputParameters": {
-                                "type": "array",
-                                "description": "Input parameters with full details (parameterId, displayName, etc.)",
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": True
-                                }
-                            },
-                            "outputParameters": {
-                                "type": "array",
-                                "description": "Output parameters with full details (parameterId, displayName, etc.)",
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": True
-                                }
-                            },
-                            "script": {
-                                "type": "object",
-                                "description": "Script configuration with body, header, footer, language",
-                                "properties": {
-                                    "body": {"type": "string"},
-                                    "header": {"type": "string"},
-                                    "footer": {"type": "string"},
-                                    "language": {"type": "string"}
-                                },
-                                "additionalProperties": True
-                            },
-                            "permissionSettings": {
-                                "type": "object",
-                                "description": "Permission settings",
-                                "properties": {
-                                    "viewPermissions": {"type": "integer"},
-                                    "sharedGroupId": {"type": ["integer", "null"]},
-                                    "writeGroupIds": {
-                                        "type": "array",
-                                        "items": {"type": "integer"}
-                                    }
-                                },
-                                "additionalProperties": True
-                            },
-                            "revisionComment": {
-                                "type": "string",
-                                "description": "Revision comment for the initial version"
-                            }
-                        },
-                        "required": ["name", "menuGroupId", "script"],
-                        "additionalProperties": True
-                    }
-                },
-                "required": ["process_data"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="create_process_parameter",
-            description=(
-                "Create a new parameter for processes. "
-                "Defines a new parameter that can be used across multiple processes."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "parameter_data": {
-                        "type": "object",
-                        "description": "Parameter definition (name, type, constraints)",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["parameter_data"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="create_canvas",
-            description=(
-                "Create a new canvas visualization/dashboard. "
-                "Defines a new data visualization or analysis dashboard."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "canvas_data": {
-                        "type": "object",
-                        "description": "Canvas configuration and visualization settings",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["canvas_data"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="create_metadata_field",
-            description=(
-                "Create a new metadata field definition. "
-                "Defines a new field that can be used in metadata records."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "field_data": {
-                        "type": "object",
-                        "description": "Field definition (name, type, constraints)",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["field_data"],
-            "additionalProperties": False
-            }
-        ),
-
-        # Phase 4 Tools - Complete Coverage (Note: Update/Delete operations have been moved to backup file)
-        Tool(
-            name="create_menu_group",
-            description=(
-                "Create a new menu group for organizing processes. "
-                "Menu groups help organize processes in the UI."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "menu_name": {
-                        "type": "string",
-                        "description": "Name of the menu group to create"
-                    }
-                },
-                "required": ["menu_name"],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="list_menu_groups",
-            description=(
-                "List all menu groups in ViaFoundry. "
-                "Returns all available menu groups used for process organization."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": [],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="get_menu_group_by_name",
-            description=(
-                "Find a menu group by its name. "
-                "Returns the menu group ID for the specified name."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "group_name": {
-                        "type": "string",
-                        "description": "Name of the menu group to find"
-                    }
-                },
-                "required": ["group_name"],
-            "additionalProperties": False
-            }
-        ),
-
-        # App Launch Tools
-        Tool(
-            name="list_apps",
-            description=(
-                "List all available applications in ViaFoundry with their names, IDs, and details. "
-                "Use this to find apps by name before launching them. "
-                "Returns app information including ID, name, description, image, and configuration."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "search": {
-                        "type": "string",
-                        "description": "Optional: Filter apps by name (case-insensitive search)"
-                    }
-                },
-                "required": [],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="discover_app_endpoints",
-            description=(
-                "Discover and search for available API endpoints in ViaFoundry. "
-                "Search by name, description, or endpoint path. "
-                "Returns endpoint details including path, methods, and descriptions. "
-                "Use list_apps for finding apps by name instead."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "search": {
-                        "type": "string",
-                        "description": (
-                            "Search term to filter endpoints. Can be free-text (searches all fields) "
-                            "or key=value format (e.g., 'endpoint=app' or 'description=launch')"
-                        )
-                    },
-                    "as_json": {
-                        "type": "boolean",
-                        "description": "Return results as formatted JSON string",
-                        "default": False
-                    }
-                },
-                "required": [],
-            "additionalProperties": False
-            }
-        ),
-        Tool(
-            name="launch_app",
-            description=(
-                "Launch/run an application or pipeline in ViaFoundry. "
-                "Executes a specific app with the provided parameters. "
-                "Use discover_app_endpoints first to find the correct app_id and endpoint."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "app_id": {
-                        "type": "string",
-                        "description": "The ID of the app/pipeline to launch"
-                    },
-                    "run_type": {
-                        "type": "string",
-                        "description": "Type of run execution",
-                        "enum": ["standalone", "cluster"],
-                        "default": "standalone"
-                    },
-                    "parameters": {
-                        "type": "object",
-                        "description": "Optional runtime parameters for the app/pipeline execution",
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["app_id"],
-            "additionalProperties": False
-            }
-        )
-    ]
+def create_mcp_server(stateless: bool = False) -> FastMCP:
+    """
+    Create and configure the FastMCP server.
+    
+    Args:
+        stateless: If True, run in stateless mode (no session persistence).
+                   Better for serverless/Lambda deployments.
+    """
+    return FastMCP(
+        "viafoundry-mcp",
+        stateless_http=stateless,
+    )
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: Any) -> list[TextContent]:
-    """Handle tool calls."""
+# Initialize the FastMCP server (stateful by default)
+mcp = create_mcp_server(stateless=False)
+
+
+# ============================================================================
+# Report Management Tools
+# ============================================================================
+
+@mcp.tool()
+def fetch_report(report_id: str) -> str:
+    """
+    Fetch report data by report ID (same as run ID). Returns JSON data containing
+    all processes, files, and metadata for the specified report.
+    You can get the report_id from list_runs or get_run tools.
+    """
     try:
         via_client = get_client()
+        logger.info(f"Fetching report {report_id}")
+        report_data = via_client.reports.fetch_report_data(report_id)
+        result = serialize_response(report_data)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error fetching report: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-        if name == "fetch_report":
-            report_id = arguments["report_id"]
-            logger.info(f"Fetching report {report_id}")
 
-            report_data = via_client.reports.fetch_report_data(report_id)
+@mcp.tool()
+def list_processes(report_id: str) -> str:
+    """
+    List all unique processes in a report. Returns a list of process names
+    that have generated output in the specified report.
+    Note: report_id is the same as run_id.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing processes for report {report_id}")
+        report_data = via_client.reports.fetch_report_data(report_id)
+        processes = via_client.reports.get_process_names(report_data)
+        return json.dumps({"processes": processes}, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing processes: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-            # Convert to dict for JSON serialization
-            result = report_data.model_dump() if hasattr(report_data, 'model_dump') else report_data
 
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
+@mcp.tool()
+def list_files(report_id: str, process_name: str = None) -> str:
+    """
+    List files in a report. If process_name is provided, lists files for that
+    specific process. Otherwise, lists all files across all processes in the report.
+    Returns file metadata including file paths, sizes, and extensions.
+    Note: report_id is the same as run_id.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing files for report {report_id}" +
+                   (f", process {process_name}" if process_name else " (all processes)"))
+        
+        report_data = via_client.reports.fetch_report_data(report_id)
+        
+        if process_name:
+            files_df = via_client.reports.get_file_names(report_data, process_name)
+        else:
+            files_df = via_client.reports.get_all_files(report_data)
+        
+        files_dict = files_df.to_dict(orient='records')
+        return json.dumps({"files": files_dict}, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing files: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-        elif name == "list_processes":
-            report_id = arguments["report_id"]
-            logger.info(f"Listing processes for report {report_id}")
 
-            report_data = via_client.reports.fetch_report_data(report_id)
-            processes = via_client.reports.get_process_names(report_data)
+@mcp.tool()
+def download_file(report_id: str, file_path: str, download_dir: str = None) -> str:
+    """
+    Download a specific file from a report. Saves the file to the specified
+    download directory (defaults to current directory). Returns the local path
+    where the file was saved.
+    """
+    try:
+        via_client = get_client()
+        if download_dir is None:
+            download_dir = os.getcwd()
+        
+        logger.info(f"Downloading file {file_path} from report {report_id}")
+        
+        report_data = via_client.reports.fetch_report_data(report_id)
+        local_path = via_client.reports.download_file(report_data, file_path, download_dir)
+        
+        return json.dumps({
+            "success": True,
+            "local_path": local_path,
+            "message": f"File downloaded successfully to {local_path}"
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error downloading file: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-            return [TextContent(
-                type="text",
-                text=json.dumps({"processes": processes}, indent=2)
-            )]
 
-        elif name == "list_files":
-            report_id = arguments["report_id"]
-            process_name = arguments.get("process_name")
+@mcp.tool()
+def load_file(report_id: str, file_path: str, separator: str = "\t") -> str:
+    """
+    Load and return the contents of a file from a report. For tabular files
+    (CSV, TSV, TXT), returns a formatted table. For other files, returns raw content.
+    Use this when you need to analyze file contents without downloading.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Loading file {file_path} from report {report_id}")
+        
+        report_data = via_client.reports.fetch_report_data(report_id)
+        content = via_client.reports.load_file(report_data, file_path, sep=separator)
+        
+        if hasattr(content, 'to_dict'):
+            result = {
+                "type": "dataframe",
+                "data": content.to_dict(orient='records'),
+                "shape": content.shape,
+                "columns": list(content.columns)
+            }
+        else:
+            result = {
+                "type": "text",
+                "content": str(content)
+            }
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error loading file: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-            logger.info(f"Listing files for report {report_id}" +
-                       (f", process {process_name}" if process_name else " (all processes)"))
 
-            report_data = via_client.reports.fetch_report_data(report_id)
+@mcp.tool()
+def upload_file(report_id: str, local_file_path: str, remote_dir: str = None) -> str:
+    """
+    Upload a file to a report. The file will be organized in the specified
+    directory within the report. Returns upload status and file information.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Uploading file {local_file_path} to report {report_id}")
+        
+        response = via_client.reports.upload_report_file(
+            report_id,
+            local_file_path,
+            dir=remote_dir
+        )
+        
+        result = serialize_response(response)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error uploading file: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-            if process_name:
-                files_df = via_client.reports.get_file_names(report_data, process_name)
-            else:
-                files_df = via_client.reports.get_all_files(report_data)
 
-            # Convert DataFrame to dict
-            files_dict = files_df.to_dict(orient='records')
+@mcp.tool()
+def get_report_dirs(report_id: str) -> str:
+    """
+    Get all available directories in a report where files can be uploaded.
+    Returns a list of directory names that can be used with upload_file.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting report directories for report {report_id}")
+        directories = via_client.reports.get_report_dirs(report_id)
+        return json.dumps({"directories": directories}, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting report directories: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-            return [TextContent(
-                type="text",
-                text=json.dumps({"files": files_dict}, indent=2)
-            )]
 
-        elif name == "download_file":
-            report_id = arguments["report_id"]
-            file_path = arguments["file_path"]
-            download_dir = arguments.get("download_dir", os.getcwd())
+@mcp.tool()
+def get_all_report_paths(report_id: str) -> str:
+    """
+    Get all file paths (routePaths) for a specific report.
+    Returns a comprehensive list of all accessible file paths in the report.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting all paths for report {report_id}")
+        
+        paths = via_client.reports.get_all_report_paths(report_id)
+        result = serialize_response(paths)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting report paths: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-            logger.info(f"Downloading file {file_path} from report {report_id}")
 
-            report_data = via_client.reports.fetch_report_data(report_id)
-            local_path = via_client.reports.download_file(
-                report_data,
-                file_path,
-                download_dir
-            )
+# ============================================================================
+# Run Management Tools
+# ============================================================================
 
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": True,
-                    "local_path": local_path,
-                    "message": f"File downloaded successfully to {local_path}"
-                }, indent=2)
-            )]
+@mcp.tool()
+def list_runs(
+    search_query: str = "",
+    take: int = 10,
+    skip: int = 0,
+    sort: str = "dateCreated",
+    order: str = "desc"
+) -> str:
+    """
+    List and search for runs/pipeline executions in ViaFoundry.
+    Supports fuzzy search by name, pagination, and sorting.
+    Returns run details including ID (same as report_id), name, status, pipeline info, and dates.
+    Use this to discover runs and get their IDs for use with other tools.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing runs (search: '{search_query}', take: {take}, skip: {skip})")
+        
+        response = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/list",
+            params={
+                "take": take,
+                "skip": skip,
+                "sort": sort,
+                "order": order
+            },
+            data={"searchKey": search_query}
+        )
+        
+        return json.dumps(response, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing runs: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-        elif name == "load_file":
-            report_id = arguments["report_id"]
-            file_path = arguments["file_path"]
-            separator = arguments.get("separator", "\t")
 
-            logger.info(f"Loading file {file_path} from report {report_id}")
-
-            report_data = via_client.reports.fetch_report_data(report_id)
-            content = via_client.reports.load_file(report_data, file_path, sep=separator)
-
-            # Check if content is a DataFrame
-            if hasattr(content, 'to_dict'):
-                # Convert DataFrame to dict
-                result = {
-                    "type": "dataframe",
-                    "data": content.to_dict(orient='records'),
-                    "shape": content.shape,
-                    "columns": list(content.columns)
-                }
-            else:
-                # Raw content
-                result = {
-                    "type": "text",
-                    "content": str(content)
-                }
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "upload_file":
-            report_id = arguments["report_id"]
-            local_file_path = arguments["local_file_path"]
-            remote_dir = arguments.get("remote_dir")
-
-            logger.info(f"Uploading file {local_file_path} to report {report_id}")
-
-            response = via_client.reports.upload_report_file(
-                report_id,
-                local_file_path,
-                dir=remote_dir
-            )
-
-            # Convert response to dict
-            result = response.model_dump() if hasattr(response, 'model_dump') else response
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_report_dirs":
-            report_id = arguments["report_id"]
-            logger.info(f"Getting report directories for report {report_id}")
-
-            directories = via_client.reports.get_report_dirs(report_id)
-
-            return [TextContent(
-                type="text",
-                text=json.dumps({"directories": directories}, indent=2)
-            )]
-
-        # Run Management Tools
-        elif name == "list_runs":
-            search_query = arguments.get("search_query", "")
-            take = arguments.get("take", 10)
-            skip = arguments.get("skip", 0)
-            sort = arguments.get("sort", "dateCreated")
-            order = arguments.get("order", "desc")
-
-            logger.info(f"Listing runs (search: '{search_query}', take: {take}, skip: {skip})")
-
-            # Call the /api/v1/run/list endpoint
-            response = via_client.call(
+@mcp.tool()
+def get_run(run_id: str = None, run_name: str = None, include_reports: bool = False) -> str:
+    """
+    Get detailed information about a specific run by its ID or name.
+    Supports fuzzy name matching - if exact match not found, returns similar matches.
+    Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports.
+    The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file).
+    """
+    try:
+        via_client = get_client()
+        
+        if not run_id and not run_name:
+            return json.dumps({
+                "error": "Either run_id or run_name must be provided"
+            }, indent=2)
+        
+        # If run_name provided, search for it
+        if run_name and not run_id:
+            logger.info(f"Searching for run by name: {run_name}")
+            search_response = via_client.call(
                 method="POST",
                 endpoint="/api/v1/run/list",
-                params={
-                    "take": take,
-                    "skip": skip,
-                    "sort": sort,
-                    "order": order
-                },
-                data={"searchKey": search_query}
+                params={"take": 100},
+                data={"searchKey": run_name}
             )
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(response, indent=2)
-            )]
-
-        elif name == "get_run":
-            run_id = arguments.get("run_id")
-            run_name = arguments.get("run_name")
-            include_reports = arguments.get("include_reports", False)
-
-            if not run_id and not run_name:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": "Either run_id or run_name must be provided"
-                    }, indent=2)
-                )]
-
-            # If run_name provided, search for it
-            if run_name and not run_id:
-                logger.info(f"Searching for run by name: {run_name}")
-                search_response = via_client.call(
-                    method="POST",
-                    endpoint="/api/v1/run/list",
-                    params={"take": 100},
-                    data={"searchKey": run_name}
-                )
-
-                runs = search_response.get("data", [])
-
-                # Try exact match first
-                exact_match = next((run for run in runs if run.get("name") == run_name), None)
-
-                if exact_match:
-                    logger.info(f"Found exact match for '{run_name}'")
-                    run_id = str(exact_match.get("id"))
-                    result = {
-                        "match_type": "exact",
-                        "run": exact_match
-                    }
-                elif runs:
-                    # Fuzzy match - return the best matches
-                    logger.info(f"No exact match for '{run_name}', returning fuzzy matches")
-                    result = {
-                        "match_type": "fuzzy",
-                        "message": f"No exact match found for '{run_name}'. Showing similar runs:",
-                        "matches": runs[:10]  # Top 10 matches
-                    }
-
-                    return [TextContent(
-                        type="text",
-                        text=json.dumps(result, indent=2)
-                    )]
-                else:
-                    result = {
-                        "match_type": "none",
-                        "error": f"No runs found matching '{run_name}'"
-                    }
-                    return [TextContent(
-                        type="text",
-                        text=json.dumps(result, indent=2)
-                    )]
-            else:
-                # run_id provided, fetch directly
-                logger.info(f"Fetching run by ID: {run_id}")
-                search_response = via_client.call(
-                    method="POST",
-                    endpoint="/api/v1/run/list",
-                    params={"take": 1, "filter": f"id:eq={run_id}"},
-                    data={"searchKey": ""}
-                )
-
-                runs = search_response.get("data", [])
-                if runs:
-                    result = {
-                        "match_type": "id",
-                        "run": runs[0]
-                    }
-                else:
-                    return [TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "error": f"No run found with ID: {run_id}"
-                        }, indent=2)
-                    )]
-
-            # If include_reports is True, fetch reports for this run
-            if include_reports and run_id:
-                logger.info(f"Fetching reports for run ID: {run_id}")
-                try:
-                    reports = via_client.call(
-                        method="GET",
-                        endpoint=f"/api/v1/run/{run_id}/reports"
-                    )
-                    result["reports"] = reports
-                except Exception as e:
-                    logger.warning(f"Could not fetch reports for run {run_id}: {e}")
-                    result["reports"] = {"error": str(e)}
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "list_all_processes":
-            logger.info("Listing all processes")
-
-            processes = via_client.process.list_processes()
-
-            # Convert to dict for JSON serialization
-            if hasattr(processes, 'model_dump'):
-                result = processes.model_dump()
-            elif isinstance(processes, list):
-                result = [p.model_dump() if hasattr(p, 'model_dump') else p for p in processes]
-            else:
-                result = processes
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2, default=str)
-            )]
-
-        elif name == "get_process_details":
-            process_id = arguments["process_id"]
-            logger.info(f"Getting details for process {process_id}")
-
-            process = via_client.process.get_process(process_id)
-
-            # Convert to dict for JSON serialization
-            result = process.model_dump() if hasattr(process, 'model_dump') else process
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_datasets":
-            query = arguments["query"]
-            collection_id = arguments.get("collection_id")
-
-            logger.info(f"Searching datasets with query: {query}" +
-                       (f", collection_id: {collection_id}" if collection_id else ""))
-
-            datasets = via_client.metadata.search_dataset_files(
-                query=query,
-                collection_id=collection_id
-            )
-
-            # Convert to dict for JSON serialization
-            result = datasets.model_dump() if hasattr(datasets, 'model_dump') else datasets
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_collections":
-            query = arguments["query"]
-            logger.info(f"Searching collections with query: {query}")
-
-            collections = via_client.metadata.search_collections(query=query)
-
-            # Convert to dict for JSON serialization
-            result = collections.model_dump() if hasattr(collections, 'model_dump') else collections
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_collection_details":
-            collection_id = arguments["collection_id"]
-            logger.info(f"Getting details for collection {collection_id}")
-
-            collection = via_client.metadata.get_collection(collection_id)
-
-            # Convert to dict for JSON serialization
-            result = collection.model_dump() if hasattr(collection, 'model_dump') else collection
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        # Phase 1 Tools - Process Management
-        elif name == "get_process_revisions":
-            process_id = arguments["process_id"]
-            logger.info(f"Getting revisions for process {process_id}")
-
-            revisions = via_client.process.get_process_revisions(process_id)
-
-            # Convert to dict for JSON serialization
-            result = revisions.model_dump() if hasattr(revisions, 'model_dump') else revisions
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "list_process_parameters":
-            logger.info("Listing all process parameters")
-
-            parameters = via_client.process.list_parameters()
-
-            # Convert to dict for JSON serialization
-            if isinstance(parameters, list):
-                result = [p.model_dump() if hasattr(p, 'model_dump') else p for p in parameters]
-            else:
-                result = parameters.model_dump() if hasattr(parameters, 'model_dump') else parameters
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_pipeline_parameters":
-            pipeline_id = arguments["pipeline_id"]
-            logger.info(f"Getting parameters for pipeline {pipeline_id}")
-
-            parameters = via_client.process.get_pipeline_parameters(pipeline_id)
-
-            # Convert to dict for JSON serialization
-            result = parameters.model_dump() if hasattr(parameters, 'model_dump') else parameters
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        # Phase 1 Tools - Metadata Canvas
-        elif name == "search_canvas":
-            query = arguments["query"]
-            logger.info(f"Searching canvas with query: {query}")
-
-            canvas_results = via_client.metadata.search_canvas(query=query)
-
-            # Convert to dict for JSON serialization
-            result = canvas_results.model_dump() if hasattr(canvas_results, 'model_dump') else canvas_results
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_canvas_details":
-            canvas_id = arguments["canvas_id"]
-            logger.info(f"Getting details for canvas {canvas_id}")
-
-            canvas = via_client.metadata.get_canvas(canvas_id)
-
-            # Convert to dict for JSON serialization
-            result = canvas.model_dump() if hasattr(canvas, 'model_dump') else canvas
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        # Phase 1 Tools - Metadata Fields
-        elif name == "search_metadata_fields":
-            query = arguments["query"]
-            logger.info(f"Searching metadata fields with query: {query}")
-
-            fields = via_client.metadata.search_fields(query=query)
-
-            # Convert to dict for JSON serialization
-            result = fields.model_dump() if hasattr(fields, 'model_dump') else fields
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_collection_fields":
-            collection_id = arguments["collection_id"]
-            logger.info(f"Getting fields for collection {collection_id}")
-
-            fields = via_client.metadata.get_collection_fields(collection_id)
-
-            # Convert to dict for JSON serialization
-            result = fields.model_dump() if hasattr(fields, 'model_dump') else fields
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        # Phase 1 Tools - Metadata Data Records
-        elif name == "search_metadata_records":
-            query = arguments["query"]
-            logger.info(f"Searching metadata records with query: {query}")
-
-            records = via_client.metadata.search_data(query=query)
-
-            # Convert to dict for JSON serialization
-            result = records.model_dump() if hasattr(records, 'model_dump') else records
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_metadata_record":
-            data_id = arguments["data_id"]
-            logger.info(f"Getting metadata record {data_id}")
-
-            record = via_client.metadata.get_data(data_id)
-
-            # Convert to dict for JSON serialization
-            result = record.model_dump() if hasattr(record, 'model_dump') else record
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        # Phase 1 Tools - Reports
-        elif name == "get_all_report_paths":
-            report_id = arguments["report_id"]
-            logger.info(f"Getting all paths for report {report_id}")
-
-            paths = via_client.reports.get_all_report_paths(report_id)
-
-            # Convert to dict for JSON serialization
-            result = paths.model_dump() if hasattr(paths, 'model_dump') else paths
-
-            return [TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        # Phase 2 Tools - Workflow Enablers (8 tools)
-        elif name == "duplicate_process":
-            process_id = arguments["process_id"]
-            new_name = arguments.get("new_name")
-            logger.info(f"Duplicating process {process_id}")
-
-            duplicated = via_client.process.duplicate_process(process_id, new_name)
-            result = duplicated.model_dump() if hasattr(duplicated, 'model_dump') else duplicated
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "filter_process_parameters":
-            parameters = arguments.get("parameters", {})
-            filters = arguments.get("filters", {})
-            logger.info(f"Filtering process parameters")
-
-            filtered = via_client.process.filter_parameters(parameters, filters)
-            result = filtered.model_dump() if hasattr(filtered, 'model_dump') else filtered
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "add_files_to_dataset":
-            collection_id = arguments["collection_id"]
-            file_paths = arguments["file_paths"]
-            archive_dir = arguments.get("archive_dir")
-            logger.info(f"Adding {len(file_paths)} files to dataset in collection {collection_id}")
-
-            result_obj = via_client.metadata.add_files_to_dataset(collection_id, file_paths, archive_dir)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "create_collection":
-            name = arguments["name"]
-            description = arguments.get("description")
-            logger.info(f"Creating collection: {name}")
-
-            collection = via_client.metadata.create_collection(name, description)
-            result = collection.model_dump() if hasattr(collection, 'model_dump') else collection
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "create_metadata_record":
-            collection_id = arguments["collection_id"]
-            data = arguments["data"]
-            logger.info(f"Creating metadata record in collection {collection_id}")
-
-            record = via_client.metadata.create_data(collection_id, data)
-            result = record.model_dump() if hasattr(record, 'model_dump') else record
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "get_field_details":
-            field_id = arguments["field_id"]
-            logger.info(f"Getting field details for field {field_id}")
-
-            field = via_client.metadata.get_field(field_id)
-            result = field.model_dump() if hasattr(field, 'model_dump') else field
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "get_canvas_fields":
-            canvas_id = arguments["canvas_id"]
-            logger.info(f"Getting fields for canvas {canvas_id}")
-
-            fields = via_client.metadata.get_canvas_fields(canvas_id)
-            result = fields.model_dump() if hasattr(fields, 'model_dump') else fields
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        # Phase 3 Tools - Advanced Management (12 tools)
-        elif name == "create_process_config":
-            name_arg = arguments["name"]
-            menu_group_name = arguments["menu_group_name"]
-            script_body = arguments["script_body"]
-            input_params = arguments.get("input_params")
-            output_params = arguments.get("output_params")
-            summary = arguments.get("summary")
-            script_language = arguments.get("script_language", "Shell")
-            permission_settings = arguments.get("permission_settings")
-            revision_comment = arguments.get("revision_comment")
-            logger.info(f"Creating process config for {name_arg}")
-
-            # Format script_body like in the notebook: f"script:\n\"\"\"\n{script_body}\n\"\"\""
-            formatted_script = f"script:\n\"\"\"\n{script_body}\n\"\"\""
-
-            # Build kwargs dict, only including non-None values
-            config_kwargs = {
-                "name": name_arg,
-                "menu_group_name": menu_group_name,
-                "script_body": formatted_script,
-            }
-            if input_params is not None:
-                config_kwargs["input_params"] = input_params
-            if output_params is not None:
-                config_kwargs["output_params"] = output_params
-            if summary is not None:
-                config_kwargs["summary"] = summary
-            if script_language is not None:
-                config_kwargs["script_language"] = script_language
-            if permission_settings is not None:
-                config_kwargs["permission_settings"] = permission_settings
-            if revision_comment is not None:
-                config_kwargs["revision_comment"] = revision_comment
-
-            result_obj = via_client.process.create_process_config(**config_kwargs)
-            result = result_obj.model_dump() if hasattr(result_obj, 'model_dump') else result_obj
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "create_process":
-            process_data = arguments["process_data"]
-            logger.info(f"Creating process: {process_data.get('name', 'unnamed')}")
-
-            # The SDK's create_process expects a ProcessConfig object, not a dict
-            # We need to reconstruct the ProcessConfig from the dict returned by create_process_config
-
-            # Remove None values from nested dicts (API may not accept null)
-            def remove_none(obj):
-                if isinstance(obj, dict):
-                    return {k: remove_none(v) for k, v in obj.items() if v is not None}
-                elif isinstance(obj, list):
-                    return [remove_none(item) for item in obj]
-                return obj
-
-            cleaned_data = remove_none(process_data)
-
-            # Import ProcessConfig model from SDK
-            from viafoundry.models.domain.process import ProcessConfig
-
-            # Reconstruct ProcessConfig object from dict
-            try:
-                process_config = ProcessConfig.model_validate(cleaned_data)
-                logger.debug(f"ProcessConfig validated successfully: {process_config.name}")
-            except Exception as e:
-                logger.error(f"Failed to validate ProcessConfig: {e}")
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "error": f"Invalid process configuration: {str(e)}",
-                        "details": "The process_data must match the output from create_process_config"
-                    }, indent=2)
-                )]
-
-            # SDK accepts ProcessConfig object as process_data argument
-            try:
-                process = via_client.process.create_process(process_data=process_config)
-                result = process.model_dump() if hasattr(process, 'model_dump') else process
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-            except Exception as e:
-                # Capture more detailed error information
-                error_details = {
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "tool": name,
+            
+            runs = search_response.get("data", [])
+            
+            # Try exact match first
+            exact_match = next((run for run in runs if run.get("name") == run_name), None)
+            
+            if exact_match:
+                logger.info(f"Found exact match for '{run_name}'")
+                run_id = str(exact_match.get("id"))
+                result = {
+                    "match_type": "exact",
+                    "run": exact_match
                 }
-                # Try to get more details from the exception
-                if hasattr(e, 'response') and hasattr(e.response, 'text'):
-                    error_details["api_response"] = e.response.text
-                if hasattr(e, 'status_code'):
-                    error_details["status_code"] = e.status_code
-                if hasattr(e, 'args') and e.args:
-                    error_details["exception_args"] = list(e.args)
-                # Try to get all exception attributes
-                if hasattr(e, '__dict__'):
-                    error_details["exception_attributes"] = {
-                        k: str(v) for k, v in e.__dict__.items()
-                        if k not in ['args'] and not k.startswith('_')
-                    }
-                logger.error(f"Error creating process: {error_details}", exc_info=True)
-                return [TextContent(type="text", text=json.dumps(error_details, indent=2))]
-
-        elif name == "create_process_parameter":
-            parameter_data = arguments["parameter_data"]
-            logger.info(f"Creating process parameter")
-
-            param = via_client.process.create_parameter(parameter_data)
-            result = param.model_dump() if hasattr(param, 'model_dump') else param
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "create_canvas":
-            canvas_data = arguments["canvas_data"]
-            logger.info(f"Creating canvas")
-
-            canvas = via_client.metadata.create_canvas(canvas_data)
-            result = canvas.model_dump() if hasattr(canvas, 'model_dump') else canvas
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "create_metadata_field":
-            field_data = arguments["field_data"]
-            logger.info(f"Creating metadata field")
-
-            field = via_client.metadata.create_field(field_data)
-            result = field.model_dump() if hasattr(field, 'model_dump') else field
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        # Phase 4 Tools - Complete Coverage (Note: Update/Delete operations have been moved to backup file)
-        elif name == "create_menu_group":
-            menu_name = arguments["menu_name"]
-            logger.info(f"Creating menu group: {menu_name}")
-
-            menu = via_client.process.create_menu_group(name=menu_name)
-            result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "list_menu_groups":
-            filters = arguments.get("filters", {})
-            logger.info(f"Listing menu groups")
-
-            menus = via_client.process.list_menu_groups(**filters)
-
-            # Convert to dict for JSON serialization
-            if isinstance(menus, list):
-                result = [m.model_dump() if hasattr(m, 'model_dump') else m for m in menus]
+            elif runs:
+                # Fuzzy match - return the best matches
+                logger.info(f"No exact match for '{run_name}', returning fuzzy matches")
+                result = {
+                    "match_type": "fuzzy",
+                    "message": f"No exact match found for '{run_name}'. Showing similar runs:",
+                    "matches": runs[:10]
+                }
+                return json.dumps(result, indent=2)
             else:
-                result = menus.model_dump() if hasattr(menus, 'model_dump') else menus
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "get_menu_group_by_name":
-            group_name = arguments["group_name"]
-            logger.info(f"Getting menu group by name: {group_name}")
-
-            menu = via_client.process.get_menu_group_by_name(group_name)
-            result = menu.model_dump() if hasattr(menu, 'model_dump') else menu
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        # App Launch Tools
-        elif name == "list_apps":
-            search_term = arguments.get("search")
-            logger.info(f"Listing apps with search filter: {search_term}")
-
-            # Call the /api/app/v1 endpoint to get all apps (note the /api prefix)
-            response = via_client.call(
-                method="GET",
-                endpoint="/api/app/v1"
-            )
-
-            # Extract apps from paginated response
-            if isinstance(response, dict) and 'data' in response:
-                apps = response['data']
-            else:
-                apps = response if isinstance(response, list) else []
-
-            # If search filter provided, filter apps by name
-            if search_term and isinstance(apps, list):
-                search_lower = search_term.lower()
-                filtered_apps = [
-                    app for app in apps
-                    if search_lower in str(app.get('name', '')).lower()
-                ]
-                result = filtered_apps
-            else:
-                result = apps
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-        elif name == "discover_app_endpoints":
-            search = arguments.get("search")
-            as_json = arguments.get("as_json", False)
-            logger.info(f"Discovering app endpoints with search: {search}")
-
-            # Use the SDK's discover method to find endpoints
-            endpoints = via_client.discover(search=search, as_json=as_json)
-
-            # If as_json is True, endpoints is already a JSON string
-            if as_json:
-                return [TextContent(type="text", text=endpoints)]
-            else:
-                # Convert dict to formatted JSON
-                return [TextContent(type="text", text=json.dumps(endpoints, indent=2))]
-
-        elif name == "launch_app":
-            app_id = arguments["app_id"]
-            run_type = arguments.get("run_type", "standalone")
-            parameters = arguments.get("parameters", {})
-
-            logger.info(f"Launching app {app_id} with type {run_type}")
-
-            # Build the endpoint - adjust based on actual API structure
-            endpoint = f"/api/app/v1/call/{app_id}"
-
-            # Prepare the request data
-            data = {
-                "type": run_type,
-                **parameters  # Merge additional parameters
-            }
-
-            # Make the API call using the generic call method
-            result = via_client.call(
-                method="POST",
-                endpoint=endpoint,
-                data=data
-            )
-
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
+                result = {
+                    "match_type": "none",
+                    "error": f"No runs found matching '{run_name}'"
+                }
+                return json.dumps(result, indent=2)
         else:
-            raise ValueError(f"Unknown tool: {name}")
-
+            # run_id provided, fetch directly
+            logger.info(f"Fetching run by ID: {run_id}")
+            search_response = via_client.call(
+                method="POST",
+                endpoint="/api/v1/run/list",
+                params={"take": 1, "filter": f"id:eq={run_id}"},
+                data={"searchKey": ""}
+            )
+            
+            runs = search_response.get("data", [])
+            if runs:
+                result = {
+                    "match_type": "id",
+                    "run": runs[0]
+                }
+            else:
+                return json.dumps({
+                    "error": f"No run found with ID: {run_id}"
+                }, indent=2)
+        
+        # If include_reports is True, fetch reports for this run
+        if include_reports and run_id:
+            logger.info(f"Fetching reports for run ID: {run_id}")
+            try:
+                reports = via_client.call(
+                    method="GET",
+                    endpoint=f"/api/v1/run/{run_id}/reports"
+                )
+                result["reports"] = reports
+            except Exception as e:
+                logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                result["reports"] = {"error": str(e)}
+        
+        return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error executing tool {name}: {str(e)}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "error": str(e),
-                "tool": name,
-                "arguments": arguments
+        logger.error(f"Error getting run: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Process/Pipeline Management Tools
+# ============================================================================
+
+@mcp.tool()
+def list_all_processes() -> str:
+    """
+    List all processes/pipelines in ViaFoundry. Returns details including
+    process ID, name, summary, and owner information.
+    """
+    try:
+        via_client = get_client()
+        logger.info("Listing all processes")
+        processes = via_client.process.list_processes()
+        result = serialize_response(processes)
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Error listing all processes: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_process_details(process_id: str) -> str:
+    """
+    Get detailed information about a specific process/pipeline by ID.
+    Returns complete process configuration, scripts, parameters, and metadata.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting details for process {process_id}")
+        process = via_client.process.get_process(process_id)
+        result = serialize_response(process)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting process details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_process_revisions(process_id: str) -> str:
+    """
+    Get revision history for a specific process/pipeline.
+    Returns all versions and their changes over time.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting revisions for process {process_id}")
+        
+        revisions = via_client.process.get_process_revisions(process_id)
+        result = serialize_response(revisions)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting process revisions: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_process_parameters() -> str:
+    """
+    List all available parameters in ViaFoundry.
+    Returns parameter definitions including name, type, and constraints.
+    """
+    try:
+        via_client = get_client()
+        logger.info("Listing all process parameters")
+        
+        parameters = via_client.process.list_parameters()
+        result = serialize_response(parameters)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing process parameters: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_pipeline_parameters(pipeline_id: str) -> str:
+    """
+    Get parameters for a specific pipeline by ID.
+    Returns the parameter configuration for the pipeline.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting parameters for pipeline {pipeline_id}")
+        
+        parameters = via_client.process.get_pipeline_parameters(pipeline_id)
+        result = serialize_response(parameters)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting pipeline parameters: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def duplicate_process(process_id: str, new_name: str = None) -> str:
+    """
+    Duplicate/clone an existing process/pipeline.
+    Creates a copy of the specified process that can be modified independently.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Duplicating process {process_id}")
+        
+        duplicated = via_client.process.duplicate_process(process_id, new_name)
+        result = serialize_response(duplicated)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error duplicating process: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def filter_process_parameters(
+    name: str = None,
+    qualifier: str = None,
+    file_type: str = None,
+    id: str = None
+) -> str:
+    """
+    Filter parameters by name, qualifier, file type, or ID.
+    Returns parameters matching the specified criteria.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Filtering process parameters")
+        
+        filters = {}
+        if name:
+            filters["name"] = name
+        if qualifier:
+            filters["qualifier"] = qualifier
+        if file_type:
+            filters["file_type"] = file_type
+        if id:
+            filters["id"] = id
+        
+        filtered = via_client.process.filter_parameters({}, filters)
+        result = serialize_response(filtered)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error filtering process parameters: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_process_config(
+    name: str,
+    menu_group_name: str,
+    script_body: str,
+    input_params: list = None,
+    output_params: list = None,
+    summary: str = None,
+    script_language: str = "Shell",
+    permission_settings: dict = None,
+    revision_comment: str = None
+) -> str:
+    """
+    Generate a full process configuration using menu group and parameters.
+    Creates a complete process definition ready for creation.
+    
+    input_params and output_params: Array of objects to reference existing parameters.
+    Use 'id' field to reference by parameter ID (e.g., [{"id": 41}]),
+    or provide name/qualifier/fileType to match/create parameters.
+    Use list_process_parameters to find available parameter IDs.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating process config for {name}")
+        
+        # Format script_body like in the notebook
+        formatted_script = f"script:\n\"\"\"\n{script_body}\n\"\"\""
+        
+        # Build kwargs dict, only including non-None values
+        config_kwargs = {
+            "name": name,
+            "menu_group_name": menu_group_name,
+            "script_body": formatted_script,
+        }
+        if input_params is not None:
+            config_kwargs["input_params"] = input_params
+        if output_params is not None:
+            config_kwargs["output_params"] = output_params
+        if summary is not None:
+            config_kwargs["summary"] = summary
+        if script_language is not None:
+            config_kwargs["script_language"] = script_language
+        if permission_settings is not None:
+            config_kwargs["permission_settings"] = permission_settings
+        if revision_comment is not None:
+            config_kwargs["revision_comment"] = revision_comment
+        
+        result_obj = via_client.process.create_process_config(**config_kwargs)
+        result = serialize_response(result_obj)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating process config: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_process(process_data: dict) -> str:
+    """
+    Create a new custom process/pipeline.
+    Requires complete process configuration including scripts and parameters.
+    Use the output from create_process_config as the process_data input.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating process: {process_data.get('name', 'unnamed')}")
+        
+        # Remove None values from nested dicts
+        def remove_none(obj):
+            if isinstance(obj, dict):
+                return {k: remove_none(v) for k, v in obj.items() if v is not None}
+            elif isinstance(obj, list):
+                return [remove_none(item) for item in obj]
+            return obj
+        
+        cleaned_data = remove_none(process_data)
+        
+        # Import ProcessConfig model from SDK
+        from viafoundry.models.domain.process import ProcessConfig
+        
+        # Reconstruct ProcessConfig object from dict
+        try:
+            process_config = ProcessConfig.model_validate(cleaned_data)
+            logger.debug(f"ProcessConfig validated successfully: {process_config.name}")
+        except Exception as e:
+            logger.error(f"Failed to validate ProcessConfig: {e}")
+            return json.dumps({
+                "error": f"Invalid process configuration: {str(e)}",
+                "details": "The process_data must match the output from create_process_config"
             }, indent=2)
-        )]
+        
+        # SDK accepts ProcessConfig object as process_data argument
+        try:
+            process = via_client.process.create_process(process_data=process_config)
+            result = serialize_response(process)
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            error_details = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+            }
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                error_details["api_response"] = e.response.text
+            if hasattr(e, 'status_code'):
+                error_details["status_code"] = e.status_code
+            logger.error(f"Error creating process: {error_details}", exc_info=True)
+            return json.dumps(error_details, indent=2)
+            
+    except Exception as e:
+        logger.error(f"Error creating process: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
 
-async def async_main():
-    """Run the MCP server (async)."""
-    logger.info("Starting ViaFoundry MCP Server")
+@mcp.tool()
+def create_process_parameter(parameter_data: dict) -> str:
+    """
+    Create a new parameter for processes.
+    Defines a new parameter that can be used across multiple processes.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating process parameter")
+        
+        param = via_client.process.create_parameter(parameter_data)
+        result = serialize_response(param)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating process parameter: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
+
+# ============================================================================
+# Menu Group Management Tools
+# ============================================================================
+
+@mcp.tool()
+def create_menu_group(menu_name: str) -> str:
+    """
+    Create a new menu group for organizing processes.
+    Menu groups help organize processes in the UI.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating menu group: {menu_name}")
+        
+        menu = via_client.process.create_menu_group(name=menu_name)
+        result = serialize_response(menu)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating menu group: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_menu_groups() -> str:
+    """
+    List all menu groups in ViaFoundry.
+    Returns all available menu groups used for process organization.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing menu groups")
+        
+        menus = via_client.process.list_menu_groups()
+        result = serialize_response(menus)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing menu groups: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_menu_group_by_name(group_name: str) -> str:
+    """
+    Find a menu group by its name.
+    Returns the menu group ID for the specified name.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting menu group by name: {group_name}")
+        
+        menu = via_client.process.get_menu_group_by_name(group_name)
+        result = serialize_response(menu)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting menu group by name: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata & Dataset Search Tools
+# ============================================================================
+
+@mcp.tool()
+def search_datasets(query: str, collection_id: str = None) -> str:
+    """
+    Search for dataset files in ViaFoundry metadata system.
+    Search by filename, collection, or other criteria.
+    Returns matching dataset files with their metadata.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching datasets with query: {query}" +
+                   (f", collection_id: {collection_id}" if collection_id else ""))
+        
+        datasets = via_client.metadata.search_dataset_files(
+            query=query,
+            collection_id=collection_id
         )
+        
+        result = serialize_response(datasets)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching datasets: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
 
+
+@mcp.tool()
+def search_collections(query: str) -> str:
+    """
+    Search for collections in ViaFoundry metadata system.
+    Collections are groups of related datasets.
+    Returns matching collections with their metadata.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching collections with query: {query}")
+        collections = via_client.metadata.search_collections(query)
+        result = serialize_response(collections)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching collections: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_collection_details(collection_id: str) -> str:
+    """
+    Get detailed information about a specific collection by ID.
+    Returns collection metadata and associated datasets.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting details for collection {collection_id}")
+        collection = via_client.metadata.get_collection(collection_id)
+        result = serialize_response(collection)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting collection details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_collection(collection_data: dict) -> str:
+    """
+    Create a new dataset collection.
+    Collections group related datasets together for organization.
+    """
+    try:
+        via_client = get_client()
+        name = collection_data.get("name", "")
+        description = collection_data.get("description")
+        logger.info(f"Creating collection: {name}")
+        
+        collection = via_client.metadata.create_collection(name, description)
+        result = serialize_response(collection)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating collection: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def add_files_to_dataset(dataset_id: str, file_ids: list) -> str:
+    """
+    Add files to an existing dataset.
+    Associates specified files with a dataset collection.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Adding {len(file_ids)} files to dataset {dataset_id}")
+        
+        result_obj = via_client.metadata.add_files_to_dataset(dataset_id, file_ids)
+        result = serialize_response(result_obj)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error adding files to dataset: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_collection_fields(collection_id: str) -> str:
+    """
+    Get metadata fields associated with a specific collection.
+    Returns the schema/structure of metadata for the collection.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting fields for collection {collection_id}")
+        
+        fields = via_client.metadata.get_collection_fields(collection_id)
+        result = serialize_response(fields)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting collection fields: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata Canvas Tools
+# ============================================================================
+
+@mcp.tool()
+def search_canvas(query: str) -> str:
+    """
+    Search for canvas visualizations in ViaFoundry.
+    Canvas objects represent data visualizations and dashboards.
+    Returns matching canvas items with their metadata.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching canvas with query: {query}")
+        
+        canvas_results = via_client.metadata.search_canvas(query=query)
+        result = serialize_response(canvas_results)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching canvas: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_canvas_details(canvas_id: str) -> str:
+    """
+    Get detailed information about a specific canvas by ID.
+    Returns canvas configuration, fields, and visualization settings.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting details for canvas {canvas_id}")
+        
+        canvas = via_client.metadata.get_canvas(canvas_id)
+        result = serialize_response(canvas)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting canvas details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_canvas_fields(canvas_id: str) -> str:
+    """
+    Get metadata fields associated with a specific canvas.
+    Returns the schema/structure used by the canvas visualization.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting fields for canvas {canvas_id}")
+        
+        fields = via_client.metadata.get_canvas_fields(canvas_id)
+        result = serialize_response(fields)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting canvas fields: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_canvas(canvas_data: dict) -> str:
+    """
+    Create a new canvas visualization/dashboard.
+    Defines a new data visualization or analysis dashboard.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating canvas")
+        
+        canvas = via_client.metadata.create_canvas(canvas_data)
+        result = serialize_response(canvas)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating canvas: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata Fields Tools
+# ============================================================================
+
+@mcp.tool()
+def search_metadata_fields(query: str) -> str:
+    """
+    Search for metadata field definitions in ViaFoundry.
+    Fields define the schema for metadata records.
+    Returns matching field definitions with their types and constraints.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching metadata fields with query: {query}")
+        
+        fields = via_client.metadata.search_fields(query=query)
+        result = serialize_response(fields)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching metadata fields: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_field_details(field_id: str) -> str:
+    """
+    Get detailed information about a specific metadata field.
+    Returns field definition, type, constraints, and usage.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting field details for field {field_id}")
+        
+        field = via_client.metadata.get_field(field_id)
+        result = serialize_response(field)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting field details: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_metadata_field(field_data: dict) -> str:
+    """
+    Create a new metadata field definition.
+    Defines a new field that can be used in metadata records.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Creating metadata field")
+        
+        field = via_client.metadata.create_field(field_data)
+        result = serialize_response(field)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating metadata field: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Metadata Records Tools
+# ============================================================================
+
+@mcp.tool()
+def search_metadata_records(query: str) -> str:
+    """
+    Search for metadata records (data entries) in ViaFoundry.
+    Metadata records contain actual data values for defined fields.
+    Returns matching records with their field values.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Searching metadata records with query: {query}")
+        
+        records = via_client.metadata.search_data(query=query)
+        result = serialize_response(records)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching metadata records: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def get_metadata_record(data_id: str) -> str:
+    """
+    Get a specific metadata record by ID.
+    Returns the complete metadata record with all field values.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Getting metadata record {data_id}")
+        
+        record = via_client.metadata.get_data(data_id)
+        result = serialize_response(record)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting metadata record: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_metadata_record(data_record: dict) -> str:
+    """
+    Create a new metadata data record.
+    Adds a new entry with field values to the metadata system.
+    """
+    try:
+        via_client = get_client()
+        collection_id = data_record.get("collection_id")
+        data = data_record.get("data", {})
+        logger.info(f"Creating metadata record in collection {collection_id}")
+        
+        record = via_client.metadata.create_data(collection_id, data)
+        result = serialize_response(record)
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating metadata record: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# App Launch Tools
+# ============================================================================
+
+@mcp.tool()
+def list_apps(search: str = None) -> str:
+    """
+    List all available applications in ViaFoundry with their names, IDs, and details.
+    Use this to find apps by name before launching them.
+    Returns app information including ID, name, description, image, and configuration.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing apps with search filter: {search}")
+        
+        # Call the /api/app/v1 endpoint to get all apps
+        response = via_client.call(
+            method="GET",
+            endpoint="/api/app/v1"
+        )
+        
+        # Extract apps from paginated response
+        if isinstance(response, dict) and 'data' in response:
+            apps = response['data']
+        else:
+            apps = response if isinstance(response, list) else []
+        
+        # If search filter provided, filter apps by name
+        if search and isinstance(apps, list):
+            search_lower = search.lower()
+            filtered_apps = [
+                app for app in apps
+                if search_lower in str(app.get('name', '')).lower()
+            ]
+            result = filtered_apps
+        else:
+            result = apps
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing apps: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def discover_app_endpoints(search: str = None, as_json: bool = False) -> str:
+    """
+    Discover and search for available API endpoints in ViaFoundry.
+    Search by name, description, or endpoint path.
+    Returns endpoint details including path, methods, and descriptions.
+    Use list_apps for finding apps by name instead.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Discovering app endpoints with search: {search}")
+        
+        # Use the SDK's discover method to find endpoints
+        endpoints = via_client.discover(search=search, as_json=as_json)
+        
+        # If as_json is True, endpoints is already a JSON string
+        if as_json:
+            return endpoints
+        else:
+            return json.dumps(endpoints, indent=2)
+    except Exception as e:
+        logger.error(f"Error discovering app endpoints: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = None) -> str:
+    """
+    Launch/run an application or pipeline in ViaFoundry.
+    Executes a specific app with the provided parameters.
+    Use discover_app_endpoints first to find the correct app_id and endpoint.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Launching app {app_id} with type {run_type}")
+        
+        # Build the endpoint
+        endpoint = f"/api/app/v1/call/{app_id}"
+        
+        # Prepare the request data
+        data = {
+            "type": run_type,
+        }
+        if parameters:
+            data.update(parameters)
+        
+        # Make the API call using the generic call method
+        result = via_client.call(
+            method="POST",
+            endpoint=endpoint,
+            data=data
+        )
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error launching app: {e}", exc_info=True)
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Server Entry Point
+# ============================================================================
 
 def main():
-    """Entry point for the MCP server."""
-    import asyncio
-    asyncio.run(async_main())
+    """Entry point for the HTTP MCP server."""
+    parser = argparse.ArgumentParser(
+        description='ViaFoundry MCP HTTP Server',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Credentials are configured in ~/.cursor/mcp.json:
+
+{
+  "mcpServers": {
+    "viafoundry": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
+        "X-ViaFoundry-Token": "your-personal-access-token"
+      }
+    }
+  }
+}
+
+Examples:
+  python -m viafoundry_mcp.server --port 8000
+        """
+    )
+    parser.add_argument('--port', type=int, default=8000, 
+                        help='Port to run the server on (default: 8000)')
+    parser.add_argument('--host', type=str, default='127.0.0.1', 
+                        help='Host to bind to (default: 127.0.0.1)')
+    args = parser.parse_args()
+    
+    logger.info("=" * 60)
+    logger.info("ViaFoundry MCP HTTP Server")
+    logger.info("=" * 60)
+    logger.info(f"Endpoint: http://{args.host}:{args.port}/mcp")
+    logger.info("")
+    logger.info("Configure credentials in mcp.json headers:")
+    logger.info("  X-ViaFoundry-Hostname: https://your-viafoundry.com")
+    logger.info("  X-ViaFoundry-Token: your-personal-access-token")
+    logger.info("=" * 60)
+    
+    # Configure server settings
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    
+    # Wrap the MCP app with credentials middleware
+    from starlette.middleware.cors import CORSMiddleware
+    
+    # Get the streamable HTTP app and wrap it
+    mcp_app = mcp.streamable_http_app()
+    
+    # Add credentials middleware
+    wrapped_app = CredentialsMiddleware(mcp_app)
+    
+    # Add CORS middleware
+    wrapped_app = CORSMiddleware(
+        wrapped_app,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["Mcp-Session-Id"],
+    )
+    
+    # Run with uvicorn
+    import uvicorn
+    uvicorn.run(
+        wrapped_app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
 
 
 if __name__ == "__main__":

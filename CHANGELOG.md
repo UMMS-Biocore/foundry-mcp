@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.0] - 2025-12-08
+
+### Changed
+- **BREAKING: Removed STDIO server** - Simplified to HTTP-only architecture
+  - Deleted `server.py` (STDIO transport)
+  - Renamed `viafoundry-mcp-http` command to `viafoundry-mcp`
+  - HTTP server is now the only transport method
+  
+### Improved
+- **Code consistency** - All tool handlers now use `serialize_response()` utility
+  - Better handling of nested Pydantic models
+  - Protection against circular references
+  - Consistent JSON serialization across all 42 tools
+
+### Migration
+If upgrading from 1.0.x:
+- The `viafoundry-mcp-http` command is now just `viafoundry-mcp`
+- STDIO transport is no longer supported
+- HTTP configuration in `mcp.json` remains the same
+
 ## [1.0.1] - 2025-11-05
 
 ### Added
