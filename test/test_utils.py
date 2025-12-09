@@ -151,7 +151,12 @@ class TestSerializeResponse:
         assert "max depth exceeded" in result_str
 
     def test_serialize_non_circular_repeated_object(self):
-        """Test that non-circular repeated objects are serialized correctly."""
+        """Test that non-circular repeated objects are serialized correctly.
+        
+        The same object appearing at different (non-circular) positions in the tree
+        should serialize correctly each time, because the visited set uses finally
+        blocks to discard object IDs after their subtrees complete.
+        """
         shared = {"shared": True}
         data = {
             "first": shared,
@@ -160,10 +165,9 @@ class TestSerializeResponse:
         
         result = serialize_response(data)
         
-        # Both should be serialized (second might show as circular since same id)
+        # Both should be fully serialized - the finally blocks ensure proper cleanup
         assert result["first"] == {"shared": True}
-        # Note: Due to visited set tracking by id, second reference may show as circular
-        # This is a trade-off for safety against true circular references
+        assert result["second"] == {"shared": True}
 
     def test_serialize_fallback_to_string(self):
         """Test that unhandled types fall back to string conversion."""

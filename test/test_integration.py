@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-MCP HTTP Server Integration Tests
+MCP ViaFoundry Server Integration Tests
 
-This script tests the MCP HTTP server by verifying tool registration
+This script tests the MCP server by verifying tool registration
 and basic server functionality.
 """
 
 import pytest
-import json
-
 
 class TestMCPTools:
     """Test MCP tool registration and availability."""

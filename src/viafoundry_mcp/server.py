@@ -87,6 +87,8 @@ class CredentialsMiddleware:
             detail = "Missing X-ViaFoundry-Token header."
         elif not (hostname.startswith("http://") or hostname.startswith("https://")):
             detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
+        elif not token.startswith(MCP_TOKEN_PREFIX):
+            detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
         else:
             detail = "Invalid credentials."
         
