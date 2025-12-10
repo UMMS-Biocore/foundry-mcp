@@ -1,0 +1,43 @@
+# =============================================================================
+# ViaFoundry MCP Server - Docker Compose
+# =============================================================================
+# 
+# Quick Start:
+#   docker compose up
+#
+# With custom port:
+#   PORT=9000 docker compose up
+#
+# Build and run:
+#   docker compose up --build
+#
+# =============================================================================
+
+services:
+  viafoundry-mcp:
+    build: .
+    image: viafoundry-mcp:latest
+    container_name: viafoundry-mcp
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    environment:
+      - PORT=${PORT:-8000}
+    # Map 'localhost' inside container to host machine (Docker Desktop for Mac)
+    extra_hosts:
+      - "localhost:host-gateway"
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check (TCP port check)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT:-8000})); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+

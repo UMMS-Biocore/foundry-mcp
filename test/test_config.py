@@ -2,71 +2,95 @@
 Tests for configuration management.
 """
 
-import os
 import pytest
-from pathlib import Path
 from src.viafoundry_mcp.config import (
-    get_env_file_paths,
+    get_credentials,
+    set_credentials,
     validate_credentials,
-    save_credentials,
 )
 
 
-def test_get_env_file_paths():
-    """Test that env file paths are returned in correct order."""
-    paths = get_env_file_paths()
+@pytest.fixture(autouse=True)
+def reset_credentials():
+    """Reset credentials before and after each test."""
+    set_credentials(None, None)
+    yield
+    set_credentials(None, None)
 
-    assert len(paths) > 0
-    assert all(isinstance(p, Path) for p in paths)
 
-    # First path should be XDG config
-    assert paths[0] == Path.home() / '.config' / 'viafoundry-mcp' / '.env'
+def test_set_and_get_credentials():
+    """Test setting and getting credentials from context."""
+    set_credentials("https://viafoundry.com", "my-token")
+    hostname, token = get_credentials()
+    
+    assert hostname == "https://viafoundry.com"
+    assert token == "my-token"
+
+
+def test_get_credentials_default_none():
+    """Test that credentials default to None."""
+    hostname, token = get_credentials()
+    
+    assert hostname is None
+    assert token is None
 
 
 def test_validate_credentials_valid():
     """Test validation of valid credentials."""
     assert validate_credentials(
         "https://viafoundry.com",
-        "user",
-        "pass"
+        "valid-token"
+    ) is True
+
+
+def test_validate_credentials_valid_http():
+    """Test validation accepts http:// hostname."""
+    assert validate_credentials(
+        "http://localhost:8080",
+        "valid-token"
     ) is True
 
 
 def test_validate_credentials_missing_hostname():
     """Test validation fails with missing hostname."""
-    assert validate_credentials("", "user", "pass") is False
+    assert validate_credentials("", "token") is False
+    assert validate_credentials(None, "token") is False
 
 
-def test_validate_credentials_missing_username():
-    """Test validation fails with missing username."""
-    assert validate_credentials("https://viafoundry.com", "", "pass") is False
-
-
-def test_validate_credentials_missing_password():
-    """Test validation fails with missing password."""
-    assert validate_credentials("https://viafoundry.com", "user", "") is False
+def test_validate_credentials_missing_token():
+    """Test validation fails with missing token."""
+    assert validate_credentials("https://viafoundry.com", "") is False
+    assert validate_credentials("https://viafoundry.com", None) is False
 
 
 def test_validate_credentials_invalid_hostname():
     """Test validation fails with invalid hostname format."""
-    assert validate_credentials("viafoundry.com", "user", "pass") is False
+    assert validate_credentials("viafoundry.com", "token") is False
+    assert validate_credentials("ftp://viafoundry.com", "token") is False
 
 
-def test_save_credentials(tmp_path):
-    """Test saving credentials to file."""
-    # Use temporary directory
-    os.environ['HOME'] = str(tmp_path)
+def test_credentials_are_context_scoped():
+    """Test that credentials are stored in context variables."""
+    # Set credentials
+    set_credentials("https://test.com", "test-token")
+    
+    # Verify they persist
+    hostname1, token1 = get_credentials()
+    hostname2, token2 = get_credentials()
+    
+    assert hostname1 == hostname2 == "https://test.com"
+    assert token1 == token2 == "test-token"
 
-    env_file = save_credentials(
-        "https://test.com",
-        "testuser",
-        "testpass"
-    )
 
-    assert env_file.exists()
-
-    # Read and verify contents
-    content = env_file.read_text()
-    assert "VIAFOUNDRY_HOSTNAME=https://test.com" in content
-    assert "VIAFOUNDRY_USERNAME=testuser" in content
-    assert "VIAFOUNDRY_PASSWORD=testpass" in content
+def test_credentials_can_be_overwritten():
+    """Test that credentials can be updated."""
+    set_credentials("https://first.com", "first-token")
+    hostname1, token1 = get_credentials()
+    
+    set_credentials("https://second.com", "second-token")
+    hostname2, token2 = get_credentials()
+    
+    assert hostname1 == "https://first.com"
+    assert token1 == "first-token"
+    assert hostname2 == "https://second.com"
+    assert token2 == "second-token"
