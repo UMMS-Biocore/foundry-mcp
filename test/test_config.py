@@ -39,7 +39,7 @@ def test_validate_credentials_valid():
     """Test validation of valid credentials."""
     assert validate_credentials(
         "https://viafoundry.com",
-        "valid-token"
+        "via_mcp_token123"
     ) is True
 
 
@@ -47,14 +47,14 @@ def test_validate_credentials_valid_http():
     """Test validation accepts http:// hostname."""
     assert validate_credentials(
         "http://localhost:8080",
-        "valid-token"
+        "via_mcp_token123"
     ) is True
 
 
 def test_validate_credentials_missing_hostname():
     """Test validation fails with missing hostname."""
-    assert validate_credentials("", "token") is False
-    assert validate_credentials(None, "token") is False
+    assert validate_credentials("", "via_mcp_token123") is False
+    assert validate_credentials(None, "via_mcp_token123") is False
 
 
 def test_validate_credentials_missing_token():
@@ -65,8 +65,8 @@ def test_validate_credentials_missing_token():
 
 def test_validate_credentials_invalid_hostname():
     """Test validation fails with invalid hostname format."""
-    assert validate_credentials("viafoundry.com", "token") is False
-    assert validate_credentials("ftp://viafoundry.com", "token") is False
+    assert validate_credentials("viafoundry.com", "via_mcp_token123") is False
+    assert validate_credentials("ftp://viafoundry.com", "via_mcp_token123") is False
 
 
 def test_credentials_are_context_scoped():
