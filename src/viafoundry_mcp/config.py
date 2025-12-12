@@ -77,10 +77,10 @@ def build_hostname_from_request(scheme: str, host: str, path: str = "") -> str:
           - "/mcp" -> "https://example.com"
           - "/beta/mcp" -> "https://example.com/beta"
     """
-    # Strip '/mcp' suffix from path
+    # Strip '/mcp' or '/mcp/' suffix from path
+    path = path.rstrip("/")
     if path.endswith("/mcp"):
         path = path[:-4]  # Remove '/mcp' (4 chars)
-    
     return f"{scheme}://{host}{path}"
 
 
