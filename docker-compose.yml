@@ -2,6 +2,9 @@
 # ViaFoundry MCP Server - Docker Compose
 # =============================================================================
 # 
+# Localhost access: X-ViaFoundry-Hostname header required (can be any URL)
+# Production access: Hostname locked to request URL (header ignored)
+#
 # Quick Start:
 #   docker compose up
 #
