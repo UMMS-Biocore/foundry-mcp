@@ -1,7 +1,7 @@
 # =============================================================================
 # ViaFoundry MCP Server - Docker Compose
 # =============================================================================
-# 
+#
 # Localhost access: X-ViaFoundry-Hostname header required (can be any URL)
 # Production access: Hostname locked to request URL (header ignored)
 #
@@ -35,12 +35,17 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    
+
     # Health check (TCP port check)
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT:-8000})); s.close()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT:-8000})); s.close()",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-

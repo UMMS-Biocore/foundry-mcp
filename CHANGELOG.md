@@ -3,19 +3,23 @@
 ## [1.1.0] - 2025-12-08
 
 ### Changed
+
 - **BREAKING: Removed STDIO server** - Simplified to HTTP-only architecture
   - Deleted `server.py` (STDIO transport)
   - Renamed `viafoundry-mcp-http` command to `viafoundry-mcp`
   - HTTP server is now the only transport method
-  
+
 ### Improved
+
 - **Code consistency** - All tool handlers now use `serialize_response()` utility
   - Better handling of nested Pydantic models
   - Protection against circular references
   - Consistent JSON serialization across all 42 tools
 
 ### Migration
+
 If upgrading from 1.0.x:
+
 - The `viafoundry-mcp-http` command is now just `viafoundry-mcp`
 - STDIO transport is no longer supported
 - HTTP configuration in `mcp.json` remains the same
@@ -23,6 +27,7 @@ If upgrading from 1.0.x:
 ## [1.0.1] - 2025-11-05
 
 ### Added
+
 - **Major Expansion: 42 New Tools Across 4 Phases** (50 tools total):
 
   **Phase 1 - High-Impact Read Tools** (10 tools):
@@ -72,6 +77,7 @@ If upgrading from 1.0.x:
   - `get_menu_group_by_name` - Get menu group by name
 
 ### Fixed
+
 - **SDK Method Call Corrections**:
   - Fixed menu group methods to use `process` module (not `metadata`)
   - Fixed parameter method names: `filter_parameters`, `create_parameter`, `update_parameter`, `delete_parameter`
@@ -79,12 +85,15 @@ If upgrading from 1.0.x:
   - All 50 tools now verified against ViaFoundry SDK
 
 ### Improved
+
 - **Tool Count**: Expanded from 12 to 50 tools
 - **Test Coverage**: Updated integration tests with 50-tool verification
 - **Code Quality**: All SDK method calls verified and corrected
 
 ### Summary
+
 This major release brings comprehensive ViaFoundry functionality to MCP:
+
 - **CRUD Operations**: Full create, read, update, delete support for processes, metadata, and canvases
 - **Workflow Management**: Tools for duplicating processes, managing parameters, and organizing data
 - **Menu Groups**: Complete menu group management (create, list, update, get by name)
@@ -92,6 +101,7 @@ This major release brings comprehensive ViaFoundry functionality to MCP:
 - **Quality Assurance**: All tools verified against SDK, all tests passing (11/11)
 
 **Tool Breakdown by Module**:
+
 - Reports: 9 tools
 - Process: 19 tools
 - Metadata: 22 tools
@@ -101,6 +111,7 @@ This major release brings comprehensive ViaFoundry functionality to MCP:
 ## [1.0.0] - 2025-11-04
 
 ### Added
+
 - **Process/Pipeline Management Tools** (2 new tools):
   - `list_all_processes` - List all processes/pipelines in ViaFoundry
   - `get_process_details` - Get detailed information about a specific process by ID
@@ -122,6 +133,7 @@ This major release brings comprehensive ViaFoundry functionality to MCP:
   - 11 test cases with pytest
 
 ### Changed
+
 - **Code Reorganization**:
   - Renamed `mcp_server/` to `src/viafoundry_mcp/`
   - Split code into modular files: `server.py`, `client.py`, `config.py`
@@ -139,7 +151,9 @@ This major release brings comprehensive ViaFoundry functionality to MCP:
   - Categorized tools by function (Reports, Processes, Metadata)
 
 ### Summary
+
 This release completes the ViaFoundry MCP implementation with:
+
 - Full ViaFoundry API coverage (12 tools)
 - Interactive credential management
 - Modular, maintainable codebase
@@ -149,6 +163,7 @@ This release completes the ViaFoundry MCP implementation with:
 ## [0.1.0] - 2025-11-03
 
 ### Added
+
 - Initial release of ViaFoundry MCP Server
 - 7 MCP tools for ViaFoundry interaction:
   - fetch_report
@@ -164,6 +179,7 @@ This release completes the ViaFoundry MCP implementation with:
 - Comprehensive documentation (README, QUICKSTART, README-MCP)
 
 ### Changed
+
 - **BREAKING**: Removed bundled viafoundry-sdk folder
   - SDK now installed automatically from PyPI
   - Cleaner package structure
@@ -178,10 +194,12 @@ This release completes the ViaFoundry MCP implementation with:
     3. `~/.viafoundry-mcp.env` (legacy)
 
 ### Fixed
+
 - Environment variable loading from various working directories
 - Package installation compatibility issues
 
 ### Security
+
 - Credentials stored only in .env files (git-ignored)
 - No credentials in configuration files
 - Bearer token authentication with ViaFoundry
@@ -189,16 +207,19 @@ This release completes the ViaFoundry MCP implementation with:
 ## Installation
 
 ### From GitHub
+
 ```bash
 pip install git+https://github.com/viascientific/viafoundry-mcp.git
 ```
 
 ### From PyPI (Coming Soon)
+
 ```bash
 pip install viafoundry-mcp
 ```
 
 ### Development
+
 ```bash
 git clone https://github.com/viascientific/viafoundry-mcp.git
 cd viafoundry-mcp
@@ -212,16 +233,19 @@ pip install -e .
 If you had the bundled SDK version:
 
 1. **Remove old installation**:
+
    ```bash
    pip uninstall viafoundry-mcp viafoundry_sdk
    ```
 
 2. **Install new version**:
+
    ```bash
    pip install git+https://github.com/viascientific/viafoundry-mcp.git
    ```
 
 3. **Update IDE configuration** (simplified):
+
    ```json
    {
      "viafoundry": {
@@ -239,6 +263,7 @@ If you had the bundled SDK version:
 ## What Changed?
 
 ### Before (Complex Configuration)
+
 ```json
 {
   "viafoundry": {
@@ -253,6 +278,7 @@ If you had the bundled SDK version:
 ```
 
 ### After (Simple Configuration)
+
 ```json
 {
   "viafoundry": {

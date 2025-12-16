@@ -44,6 +44,7 @@ docker compose up --build -d
 > **Note:** MCP tokens must start with the `via_mcp_` prefix. If your token doesn't have this prefix, be sure to generate a new MCP token from ViaFoundry.
 
 ### Explore Pipelines
+
 - "What pipelines are available in ViaFoundry?"
 - "Show me details about the RNA-Seq pipeline"
 - "What parameters does process 42 need?"
@@ -51,6 +52,7 @@ docker compose up --build -d
 - "Create a new process based on an existing one"
 
 ### Launch Apps
+
 - "What apps are available?"
 - "Launch CellxGene"
 - "Run the JupyterLab app"
@@ -58,6 +60,7 @@ docker compose up --build -d
 - "Start RStudio in cluster mode"
 
 ### Search Data
+
 - "Find datasets related to 'human genome'"
 - "Search for collections about cancer studies"
 - "Show me details about collection 15"
@@ -65,6 +68,7 @@ docker compose up --build -d
 - "What metadata fields does this collection have?"
 
 ### Manage Metadata
+
 - "Search for metadata records matching 'cancer'"
 - "Show me metadata record 456"
 - "What metadata fields are defined in the system?"
@@ -78,16 +82,16 @@ docker compose up --build -d
 
 Access and manage ViaFoundry reports and files.
 
-| Tool | What It Does |
-|------|-------------|
-| `fetch_report` | Get complete report data with metadata |
-| `list_processes` | List all processes that generated output in a report |
-| `list_files` | List files (all or by specific process) |
-| `download_file` | Download files from reports to local machine |
-| `load_file` | View file contents directly (tabular data formatted) |
-| `upload_file` | Upload files to reports |
-| `get_report_dirs` | Get available directories for file uploads |
-| `get_all_report_paths` | Get all accessible file paths in a report |
+| Tool                   | What It Does                                         |
+| ---------------------- | ---------------------------------------------------- |
+| `fetch_report`         | Get complete report data with metadata               |
+| `list_processes`       | List all processes that generated output in a report |
+| `list_files`           | List files (all or by specific process)              |
+| `download_file`        | Download files from reports to local machine         |
+| `load_file`            | View file contents directly (tabular data formatted) |
+| `upload_file`          | Upload files to reports                              |
+| `get_report_dirs`      | Get available directories for file uploads           |
+| `get_all_report_paths` | Get all accessible file paths in a report            |
 
 ---
 
@@ -95,18 +99,18 @@ Access and manage ViaFoundry reports and files.
 
 Create, explore, and manage bioinformatics pipelines.
 
-| Tool | What It Does |
-|------|-------------|
-| `list_all_processes` | List all processes/pipelines in ViaFoundry |
-| `get_process_details` | Get detailed pipeline configuration and scripts |
-| `get_process_revisions` | Get version history for a pipeline |
-| `duplicate_process` | Clone an existing pipeline for modification |
-| `create_process` | Create a new custom process/pipeline |
-| `create_process_config` | Generate process configuration helper |
-| `list_process_parameters` | List all available parameter definitions |
-| `get_pipeline_parameters` | Get parameters for a specific pipeline |
-| `create_process_parameter` | Create new parameter definition |
-| `filter_process_parameters` | Filter parameters by name, type, or qualifier |
+| Tool                        | What It Does                                    |
+| --------------------------- | ----------------------------------------------- |
+| `list_all_processes`        | List all processes/pipelines in ViaFoundry      |
+| `get_process_details`       | Get detailed pipeline configuration and scripts |
+| `get_process_revisions`     | Get version history for a pipeline              |
+| `duplicate_process`         | Clone an existing pipeline for modification     |
+| `create_process`            | Create a new custom process/pipeline            |
+| `create_process_config`     | Generate process configuration helper           |
+| `list_process_parameters`   | List all available parameter definitions        |
+| `get_pipeline_parameters`   | Get parameters for a specific pipeline          |
+| `create_process_parameter`  | Create new parameter definition                 |
+| `filter_process_parameters` | Filter parameters by name, type, or qualifier   |
 
 ---
 
@@ -114,11 +118,11 @@ Create, explore, and manage bioinformatics pipelines.
 
 Organize processes into logical groups.
 
-| Tool | What It Does |
-|------|-------------|
-| `create_menu_group` | Create new menu group for organizing processes |
-| `list_menu_groups` | List all available menu groups |
-| `get_menu_group_by_name` | Find menu group ID by name |
+| Tool                     | What It Does                                   |
+| ------------------------ | ---------------------------------------------- |
+| `create_menu_group`      | Create new menu group for organizing processes |
+| `list_menu_groups`       | List all available menu groups                 |
+| `get_menu_group_by_name` | Find menu group ID by name                     |
 
 ---
 
@@ -126,11 +130,11 @@ Organize processes into logical groups.
 
 Discover and launch applications in ViaFoundry.
 
-| Tool | What It Does |
-|------|-------------|
-| `list_apps` | List all available applications with names, IDs, and details |
-| `launch_app` | Launch/run an application with specified parameters |
-| `discover_app_endpoints` | Discover available API endpoints (advanced/debugging) |
+| Tool                     | What It Does                                                 |
+| ------------------------ | ------------------------------------------------------------ |
+| `list_apps`              | List all available applications with names, IDs, and details |
+| `launch_app`             | Launch/run an application with specified parameters          |
+| `discover_app_endpoints` | Discover available API endpoints (advanced/debugging)        |
 
 ---
 
@@ -138,14 +142,14 @@ Discover and launch applications in ViaFoundry.
 
 Search and organize datasets and collections.
 
-| Tool | What It Does |
-|------|-------------|
-| `search_datasets` | Search for dataset files by name or criteria |
-| `search_collections` | Search for dataset collections |
-| `get_collection_details` | Get detailed collection information |
-| `get_collection_fields` | Get metadata schema for a collection |
-| `create_collection` | Create new dataset collection |
-| `add_files_to_dataset` | Add files to existing dataset |
+| Tool                     | What It Does                                 |
+| ------------------------ | -------------------------------------------- |
+| `search_datasets`        | Search for dataset files by name or criteria |
+| `search_collections`     | Search for dataset collections               |
+| `get_collection_details` | Get detailed collection information          |
+| `get_collection_fields`  | Get metadata schema for a collection         |
+| `create_collection`      | Create new dataset collection                |
+| `add_files_to_dataset`   | Add files to existing dataset                |
 
 ---
 
@@ -153,12 +157,12 @@ Search and organize datasets and collections.
 
 Create and explore data visualizations and dashboards.
 
-| Tool | What It Does |
-|------|-------------|
-| `search_canvas` | Search for canvas visualizations/dashboards |
-| `get_canvas_details` | Get detailed canvas configuration |
-| `get_canvas_fields` | Get fields/schema for a canvas |
-| `create_canvas` | Create new canvas visualization |
+| Tool                 | What It Does                                |
+| -------------------- | ------------------------------------------- |
+| `search_canvas`      | Search for canvas visualizations/dashboards |
+| `get_canvas_details` | Get detailed canvas configuration           |
+| `get_canvas_fields`  | Get fields/schema for a canvas              |
+| `create_canvas`      | Create new canvas visualization             |
 
 ---
 
@@ -166,11 +170,11 @@ Create and explore data visualizations and dashboards.
 
 Define and explore metadata field schemas.
 
-| Tool | What It Does |
-|------|-------------|
-| `search_metadata_fields` | Search metadata field definitions |
-| `get_field_details` | Get detailed field information |
-| `create_metadata_field` | Create new metadata field definition |
+| Tool                     | What It Does                         |
+| ------------------------ | ------------------------------------ |
+| `search_metadata_fields` | Search metadata field definitions    |
+| `get_field_details`      | Get detailed field information       |
+| `create_metadata_field`  | Create new metadata field definition |
 
 ---
 
@@ -178,11 +182,11 @@ Define and explore metadata field schemas.
 
 Manage metadata data records.
 
-| Tool | What It Does |
-|------|-------------|
-| `search_metadata_records` | Search for metadata data records |
-| `get_metadata_record` | Get specific metadata record by ID |
-| `create_metadata_record` | Create new metadata data record |
+| Tool                      | What It Does                       |
+| ------------------------- | ---------------------------------- |
+| `search_metadata_records` | Search for metadata data records   |
+| `get_metadata_record`     | Get specific metadata record by ID |
+| `create_metadata_record`  | Create new metadata data record    |
 
 ---
 
@@ -213,6 +217,7 @@ AI: Here are the first 5 rows of the VDJ B cell annotations:
 ---
 
 ### Launching Applications
+
 ```
 You: "What apps are available in ViaFoundry?"
 
@@ -251,6 +256,7 @@ AI: Sure! Let me launch RStudio on the cluster.
 ---
 
 ### Creating Custom Pipelines
+
 ```
 You: "I need to create a new process that runs STAR alignment. Can you help?"
 
@@ -277,6 +283,7 @@ AI: I'll create the process configuration with those parameters...
 ---
 
 ### Exploring Research Data
+
 ```
 You: "Find all datasets related to breast cancer from 2024"
 
@@ -310,11 +317,11 @@ AI: The collection has 12 metadata fields:
 
 The server automatically detects whether you're accessing it via localhost or a production URL, and adjusts the hostname behavior accordingly:
 
-| Access URL | `X-ViaFoundry-Hostname` Header |
-|------------|--------------------------------|
-| `http://localhost:8000/mcp` | **Required** - can be any ViaFoundry URL |
-| `http://127.0.0.1:8000/mcp` | **Required** - can be any ViaFoundry URL |
-| `https://mcp.example.com/mcp` | **Ignored** - locked to request URL |
+| Access URL                    | `X-ViaFoundry-Hostname` Header           |
+| ----------------------------- | ---------------------------------------- |
+| `http://localhost:8000/mcp`   | **Required** - can be any ViaFoundry URL |
+| `http://127.0.0.1:8000/mcp`   | **Required** - can be any ViaFoundry URL |
+| `https://mcp.example.com/mcp` | **Ignored** - locked to request URL      |
 
 #### Localhost (Development)
 
@@ -352,6 +359,7 @@ When deployed to production, the hostname is **automatically locked** to the req
 ```
 
 In production mode:
+
 - The `X-ViaFoundry-Hostname` header is **ignored** even if provided
 - The hostname is derived from the URL with `/mcp` suffix trimmed:
   - `https://mcp.viafoundry.com/mcp` → `https://mcp.viafoundry.com`
@@ -366,12 +374,12 @@ PORT=9000 docker compose up
 
 ### Client Config Locations
 
-| Client | Config File |
-|--------|-------------|
-| Cursor | `~/.cursor/mcp.json` |
-| Claude Desktop (Mac) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| VSCode Continue | `~/.continue/config.json` |
+| Client                   | Config File                                                       |
+| ------------------------ | ----------------------------------------------------------------- |
+| Cursor                   | `~/.cursor/mcp.json`                                              |
+| Claude Desktop (Mac)     | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json`                     |
+| VSCode Continue          | `~/.continue/config.json`                                         |
 
 ---
 
@@ -447,14 +455,17 @@ viafoundry-mcp/
 ## Troubleshooting
 
 **Server not responding?**
+
 - Check container is running: `docker ps`
 - Check logs: `docker logs viafoundry-mcp`
 
 **Authentication failed?**
+
 - Verify your token is valid in ViaFoundry web UI
 - Check `X-ViaFoundry-Hostname` includes `https://`
 
 **Tools not showing in IDE?**
+
 - Restart IDE completely (quit and reopen)
 - Verify mcp.json syntax is valid JSON
 
