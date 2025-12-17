@@ -313,59 +313,6 @@ AI: The collection has 12 metadata fields:
 
 ## Configuration
 
-### Localhost vs Production Mode
-
-The server automatically detects whether you're accessing it via localhost or a production URL, and adjusts the hostname behavior accordingly:
-
-| Access URL                    | `X-ViaFoundry-Hostname` Header           |
-| ----------------------------- | ---------------------------------------- |
-| `http://localhost:8000/mcp`   | **Required** - can be any ViaFoundry URL |
-| `http://127.0.0.1:8000/mcp`   | **Required** - can be any ViaFoundry URL |
-| `https://mcp.example.com/mcp` | **Ignored** - locked to request URL      |
-
-#### Localhost (Development)
-
-When accessing the MCP via localhost, you can connect to **any** ViaFoundry instance by specifying it in the header:
-
-```json
-{
-  "mcpServers": {
-    "viafoundry": {
-      "url": "http://127.0.0.1:8000/mcp",
-      "headers": {
-        "X-ViaFoundry-Hostname": "https://your-viafoundry-instance.com",
-        "X-ViaFoundry-Token": "via_mcp_your-token"
-      }
-    }
-  }
-}
-```
-
-#### Production (Non-localhost)
-
-When deployed to production, the hostname is **automatically locked** to the request URL (with path trimmed). This provides security by preventing clients from redirecting requests to arbitrary servers:
-
-```json
-{
-  "mcpServers": {
-    "viafoundry": {
-      "url": "https://mcp.viafoundry.com/mcp",
-      "headers": {
-        "X-ViaFoundry-Token": "via_mcp_your-token"
-      }
-    }
-  }
-}
-```
-
-In production mode:
-
-- The `X-ViaFoundry-Hostname` header is **ignored** even if provided
-- The hostname is derived from the URL with `/mcp` suffix trimmed:
-  - `https://mcp.viafoundry.com/mcp` → `https://mcp.viafoundry.com`
-  - `https://dev-playground.infra.gcp.viafoundry.net/beta/mcp` → `https://dev-playground.infra.gcp.viafoundry.net/beta`
-- Only the token header is needed in client configuration
-
 ### Custom Port
 
 ```bash
@@ -385,8 +332,6 @@ PORT=9000 docker compose up
 
 ## Cloud Deployment (HTTPS)
 
-When deployed to a production URL, the ViaFoundry hostname is automatically locked to the deployment URL. No additional configuration is needed.
-
 ### Google Cloud Run
 
 ```bash
@@ -399,20 +344,19 @@ gcloud run deploy viafoundry-mcp --source . --port 8000
 fly launch
 ```
 
-Then update your client config with the HTTPS URL (hostname is automatically derived):
+Then update your client config with the HTTPS URL:
 
 ```json
 {
   "viafoundry": {
     "url": "https://your-app.fly.dev/mcp",
     "headers": {
+      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
       "X-ViaFoundry-Token": "via_mcp_your-token"
     }
   }
 }
 ```
-
-The `X-ViaFoundry-Hostname` will automatically be `https://your-app.fly.dev` (path is trimmed).
 
 ---
 

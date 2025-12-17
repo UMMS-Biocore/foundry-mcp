@@ -2,15 +2,16 @@
 """
 ViaFoundry MCP HTTP Server
 
-Hostname resolution based on how the MCP server is accessed:
-
-Localhost URL (http://localhost:8000/mcp, http://127.0.0.1:8000/mcp):
-  - X-ViaFoundry-Hostname header can be ANY value (development flexibility)
-  - X-ViaFoundry-Token header is required
-
-Production URL (https://mcp.example.com/mcp):
-  - X-ViaFoundry-Hostname is LOCKED to the request URL (cannot be changed)
-  - X-ViaFoundry-Token header is required
+Credentials are configured in mcp.json via headers:
+{
+  "viafoundry": {
+    "url": "http://127.0.0.1:8000/mcp",
+    "headers": {
+      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
+      "X-ViaFoundry-Token": "your-token-here"
+    }
+  }
+}
 
 Run with: python -m viafoundry_mcp.server --port 8000
 """
@@ -25,10 +26,7 @@ from mcp.server.fastmcp import FastMCP
 
 # Import from our modules
 from .client import get_client
-from .config import (
-    set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN,
-    resolve_hostname
-)
+from .config import set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN
 from .utils import serialize_response, MCP_TOKEN_PREFIX
 
 
@@ -44,10 +42,6 @@ class CredentialsMiddleware:
     """
     Middleware that extracts ViaFoundry credentials from request headers,
     validates them, and stores them in context variables for use by tool handlers.
-    
-    Hostname resolution based on request URL:
-    - Localhost URL: X-ViaFoundry-Hostname header can be any value (dev flexibility)
-    - Production URL: Hostname is locked to the request URL (header ignored)
     
     Returns 401 Unauthorized if credentials are missing or invalid.
     """
@@ -66,73 +60,42 @@ class CredentialsMiddleware:
             # Extract headers (they're stored as list of tuples)
             headers = dict(scope.get("headers", []))
             
-            # Get request info for hostname resolution
-            request_scheme = scope.get("scheme", "http")
-            request_host = headers.get(b"host", b"").decode()
-            request_path = scope.get("path", "")
-            
             # Get credentials from headers (header names are lowercase bytes)
-            header_hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+            hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
             token = headers.get(HEADER_TOKEN.encode(), b"").decode()
-            
-            # Resolve hostname based on request URL
-            # - Localhost: uses header (required, can be any value)
-            # - Production: locked to request URL with '/mcp' suffix trimmed
-            hostname, is_localhost = resolve_hostname(
-                header_hostname, request_scheme, request_host, request_path
-            )
             
             # Validate credentials
             if not validate_credentials(hostname, token):
                 # Return 401 Unauthorized response
                 logger.warning(f"Invalid or missing credentials from {scope.get('client', ('unknown',))[0]}")
-                await self._send_unauthorized_response(send, hostname, token, is_localhost)
+                await self._send_unauthorized_response(send, hostname, token)
                 return
             
             # Set validated credentials in context for this request
             set_credentials(hostname, token)
-            logger.debug(f"Credentials validated and set: {hostname} (localhost={is_localhost})")
+            logger.debug(f"Credentials validated and set from headers: {hostname}")
         
         await self.app(scope, receive, send)
     
-    async def _send_unauthorized_response(
-        self, send: Send, hostname: str, token: str, is_localhost: bool
-    ) -> None:
+    async def _send_unauthorized_response(self, send: Send, hostname: str, token: str) -> None:
         """Send a 401 Unauthorized response with details about what's missing."""
-        if not token:
-            detail = "Missing X-ViaFoundry-Token header."
-        elif not token.startswith(MCP_TOKEN_PREFIX):
-            detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+        if not hostname and not token:
+            detail = "Missing credentials. Provide X-ViaFoundry-Hostname and X-ViaFoundry-Token headers."
         elif not hostname:
-            if is_localhost:
-                detail = (
-                    "Missing X-ViaFoundry-Hostname header. "
-                    "When accessing via localhost, this header is required."
-                )
-            else:
-                detail = "Could not determine hostname from request."
+            detail = "Missing X-ViaFoundry-Hostname header."
+        elif not token:
+            detail = "Missing X-ViaFoundry-Token header."
         elif not (hostname.startswith("http://") or hostname.startswith("https://")):
             detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
+        elif not token.startswith(MCP_TOKEN_PREFIX):
+            detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
         else:
             detail = "Invalid credentials."
-        
-        # Build help message based on mode
-        if is_localhost:
-            help_msg = (
-                "Localhost access: X-ViaFoundry-Hostname header is required and can be any ViaFoundry URL. "
-                "X-ViaFoundry-Token header is always required."
-            )
-        else:
-            help_msg = (
-                "Production access: X-ViaFoundry-Hostname is locked to the request URL. "
-                "X-ViaFoundry-Token header is required."
-            )
         
         body = json.dumps({
             "error": "Unauthorized",
             "detail": detail,
-            "mode": "localhost" if is_localhost else "production",
-            "help": help_msg
+            "help": "Configure credentials in mcp.json headers: X-ViaFoundry-Hostname and X-ViaFoundry-Token"
         }).encode("utf-8")
         
         await send({
@@ -1268,11 +1231,8 @@ def main():
         description='ViaFoundry MCP HTTP Server',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Hostname Resolution:
-  - Localhost URL (127.0.0.1, localhost): X-ViaFoundry-Hostname header required
-  - Production URL: Hostname locked to request URL (header ignored)
+Credentials are configured in ~/.cursor/mcp.json:
 
-Example mcp.json for localhost:
 {
   "mcpServers": {
     "viafoundry": {
@@ -1285,17 +1245,8 @@ Example mcp.json for localhost:
   }
 }
 
-Example mcp.json for production:
-{
-  "mcpServers": {
-    "viafoundry": {
-      "url": "https://mcp.viafoundry.com/mcp",
-      "headers": {
-        "X-ViaFoundry-Token": "your-personal-access-token"
-      }
-    }
-  }
-}
+Examples:
+  python -m viafoundry_mcp.server --port 8000
         """
     )
     parser.add_argument('--port', type=int, default=8000, 
@@ -1309,11 +1260,9 @@ Example mcp.json for production:
     logger.info("=" * 60)
     logger.info(f"Endpoint: http://{args.host}:{args.port}/mcp")
     logger.info("")
-    logger.info("Hostname Resolution:")
-    logger.info("  - Localhost access: X-ViaFoundry-Hostname header required")
-    logger.info("  - Production access: Hostname locked to request URL")
-    logger.info("")
-    logger.info("X-ViaFoundry-Token header is always required")
+    logger.info("Configure credentials in mcp.json headers:")
+    logger.info("  X-ViaFoundry-Hostname: https://your-viafoundry.com")
+    logger.info("  X-ViaFoundry-Token: your-personal-access-token")
     logger.info("=" * 60)
     
     # Configure server settings
