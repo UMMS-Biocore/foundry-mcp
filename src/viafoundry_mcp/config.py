@@ -18,13 +18,13 @@ Configure in ~/.cursor/mcp.json:
 }
 """
 
-import logging
 from contextvars import ContextVar
 from typing import Optional, Tuple
 
 from .utils import is_valid_mcp_token, MCP_TOKEN_PREFIX
+from .log import get_logger
 
-logger = logging.getLogger('viafoundry-mcp')
+logger = get_logger(__name__)
 
 # Context variables for request-scoped credentials
 _hostname_var: ContextVar[Optional[str]] = ContextVar('viafoundry_hostname', default=None)

@@ -16,7 +16,6 @@ Credentials are configured in mcp.json via headers:
 Run with: python -m viafoundry_mcp.server --port 8000
 """
 
-import os
 import json
 import logging
 import argparse
@@ -28,14 +27,11 @@ from mcp.server.fastmcp import FastMCP
 from .client import get_client
 from .config import set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN
 from .utils import serialize_response, MCP_TOKEN_PREFIX
+from .log import get_logger, get_uvicorn_log_config, mask_token
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('viafoundry-mcp')
+# Get logger for this module
+logger = get_logger(__name__)
 
 
 class CredentialsMiddleware:
@@ -48,6 +44,36 @@ class CredentialsMiddleware:
     
     def __init__(self, app: ASGIApp):
         self.app = app
+    
+    def _get_client_ip(self, scope: Scope) -> str:
+        """Extract client IP from scope, checking proxy headers first."""
+        headers = dict(scope.get("headers", []))
+        
+        # Check X-Real-IP first (set by nginx)
+        real_ip = headers.get(b"x-real-ip", b"").decode()
+        if real_ip:
+            return real_ip
+        
+        # Check X-Forwarded-For (first IP in chain is the client)
+        forwarded_for = headers.get(b"x-forwarded-for", b"").decode()
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+        
+        # Fall back to direct client connection
+        client = scope.get("client")
+        return client[0] if client else "unknown"
+    
+    def _log_with_context(self, level: int, message: str, scope: Scope, 
+                          hostname: str = None, token: str = None):
+        """Log message with request context (client IP, hostname, masked token)."""
+        extra = {
+            "client_ip": self._get_client_ip(scope),
+        }
+        if hostname:
+            extra["hostname"] = hostname
+        if token:
+            extra["token"] = mask_token(token)
+        logger.log(level, message, extra=extra)
     
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] == "http":
@@ -67,13 +93,28 @@ class CredentialsMiddleware:
             # Validate credentials
             if not validate_credentials(hostname, token):
                 # Return 401 Unauthorized response
-                logger.warning(f"Invalid or missing credentials from {scope.get('client', ('unknown',))[0]}")
+                client_ip = self._get_client_ip(scope)
+                masked = mask_token(token)
+                self._log_with_context(
+                    logging.WARNING,
+                    f"Invalid or missing credentials from {client_ip} (token: {masked})",
+                    scope,
+                    hostname or "none",
+                    token
+                )
                 await self._send_unauthorized_response(send, hostname, token)
                 return
             
             # Set validated credentials in context for this request
             set_credentials(hostname, token)
-            logger.debug(f"Credentials validated and set from headers: {hostname}")
+            masked = mask_token(token)
+            self._log_with_context(
+                logging.DEBUG,
+                f"Credentials validated for {hostname} (token: {masked})",
+                scope,
+                hostname,
+                token
+            )
         
         await self.app(scope, receive, send)
     
@@ -126,8 +167,8 @@ def create_mcp_server(stateless: bool = False) -> FastMCP:
     )
 
 
-# Initialize the FastMCP server (stateful by default)
-mcp = create_mcp_server(stateless=False)
+# Initialize the FastMCP server (stateless mode for proxy/tunnel compatibility)
+mcp = create_mcp_server(stateless=True)
 
 
 # ============================================================================
@@ -148,7 +189,7 @@ def fetch_report(report_id: str) -> str:
         result = serialize_response(report_data)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error fetching report: {e}", exc_info=True)
+        logger.error(f"Error fetching report: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -166,7 +207,7 @@ def list_processes(report_id: str) -> str:
         processes = via_client.reports.get_process_names(report_data)
         return json.dumps({"processes": processes}, indent=2)
     except Exception as e:
-        logger.error(f"Error listing processes: {e}", exc_info=True)
+        logger.error(f"Error listing processes: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -193,7 +234,7 @@ def list_files(report_id: str, process_name: str = None) -> str:
         files_dict = files_df.to_dict(orient='records')
         return json.dumps({"files": files_dict}, indent=2)
     except Exception as e:
-        logger.error(f"Error listing files: {e}", exc_info=True)
+        logger.error(f"Error listing files: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -220,7 +261,7 @@ def download_file(report_id: str, file_path: str, download_dir: str = None) -> s
             "message": f"File downloaded successfully to {local_path}"
         }, indent=2)
     except Exception as e:
-        logger.error(f"Error downloading file: {e}", exc_info=True)
+        logger.error(f"Error downloading file: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -253,7 +294,7 @@ def load_file(report_id: str, file_path: str, separator: str = "\t") -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error loading file: {e}", exc_info=True)
+        logger.error(f"Error loading file: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -276,7 +317,7 @@ def upload_file(report_id: str, local_file_path: str, remote_dir: str = None) ->
         result = serialize_response(response)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error uploading file: {e}", exc_info=True)
+        logger.error(f"Error uploading file: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -292,7 +333,7 @@ def get_report_dirs(report_id: str) -> str:
         directories = via_client.reports.get_report_dirs(report_id)
         return json.dumps({"directories": directories}, indent=2)
     except Exception as e:
-        logger.error(f"Error getting report directories: {e}", exc_info=True)
+        logger.error(f"Error getting report directories: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -311,7 +352,7 @@ def get_all_report_paths(report_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting report paths: {e}", exc_info=True)
+        logger.error(f"Error getting report paths: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -351,7 +392,7 @@ def list_runs(
         
         return json.dumps(response, indent=2)
     except Exception as e:
-        logger.error(f"Error listing runs: {e}", exc_info=True)
+        logger.error(f"Error listing runs: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -444,7 +485,7 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting run: {e}", exc_info=True)
+        logger.error(f"Error getting run: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -465,7 +506,7 @@ def list_all_processes() -> str:
         result = serialize_response(processes)
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
-        logger.error(f"Error listing all processes: {e}", exc_info=True)
+        logger.error(f"Error listing all processes: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -482,7 +523,7 @@ def get_process_details(process_id: str) -> str:
         result = serialize_response(process)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting process details: {e}", exc_info=True)
+        logger.error(f"Error getting process details: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -501,7 +542,7 @@ def get_process_revisions(process_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting process revisions: {e}", exc_info=True)
+        logger.error(f"Error getting process revisions: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -520,7 +561,7 @@ def list_process_parameters() -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error listing process parameters: {e}", exc_info=True)
+        logger.error(f"Error listing process parameters: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -539,7 +580,7 @@ def get_pipeline_parameters(pipeline_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting pipeline parameters: {e}", exc_info=True)
+        logger.error(f"Error getting pipeline parameters: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -558,7 +599,7 @@ def duplicate_process(process_id: str, new_name: str = None) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error duplicating process: {e}", exc_info=True)
+        logger.error(f"Error duplicating process: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -592,7 +633,7 @@ def filter_process_parameters(
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error filtering process parameters: {e}", exc_info=True)
+        logger.error(f"Error filtering process parameters: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -648,7 +689,7 @@ def create_process_config(
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating process config: {e}", exc_info=True)
+        logger.error(f"Error creating process config: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -701,11 +742,11 @@ def create_process(process_data: dict) -> str:
                 error_details["api_response"] = e.response.text
             if hasattr(e, 'status_code'):
                 error_details["status_code"] = e.status_code
-            logger.error(f"Error creating process: {error_details}", exc_info=True)
+            logger.error(f"Error creating process: {error_details}")
             return json.dumps(error_details, indent=2)
             
     except Exception as e:
-        logger.error(f"Error creating process: {e}", exc_info=True)
+        logger.error(f"Error creating process: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -724,7 +765,7 @@ def create_process_parameter(parameter_data: dict) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating process parameter: {e}", exc_info=True)
+        logger.error(f"Error creating process parameter: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -747,7 +788,7 @@ def create_menu_group(menu_name: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating menu group: {e}", exc_info=True)
+        logger.error(f"Error creating menu group: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -766,7 +807,7 @@ def list_menu_groups() -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error listing menu groups: {e}", exc_info=True)
+        logger.error(f"Error listing menu groups: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -785,7 +826,7 @@ def get_menu_group_by_name(group_name: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting menu group by name: {e}", exc_info=True)
+        logger.error(f"Error getting menu group by name: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -813,7 +854,7 @@ def search_datasets(query: str, collection_id: str = None) -> str:
         result = serialize_response(datasets)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error searching datasets: {e}", exc_info=True)
+        logger.error(f"Error searching datasets: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -831,7 +872,7 @@ def search_collections(query: str) -> str:
         result = serialize_response(collections)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error searching collections: {e}", exc_info=True)
+        logger.error(f"Error searching collections: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -848,7 +889,7 @@ def get_collection_details(collection_id: str) -> str:
         result = serialize_response(collection)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting collection details: {e}", exc_info=True)
+        logger.error(f"Error getting collection details: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -869,7 +910,7 @@ def create_collection(collection_data: dict) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating collection: {e}", exc_info=True)
+        logger.error(f"Error creating collection: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -888,7 +929,7 @@ def add_files_to_dataset(dataset_id: str, file_ids: list) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error adding files to dataset: {e}", exc_info=True)
+        logger.error(f"Error adding files to dataset: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -907,7 +948,7 @@ def get_collection_fields(collection_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting collection fields: {e}", exc_info=True)
+        logger.error(f"Error getting collection fields: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -931,7 +972,7 @@ def search_canvas(query: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error searching canvas: {e}", exc_info=True)
+        logger.error(f"Error searching canvas: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -950,7 +991,7 @@ def get_canvas_details(canvas_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting canvas details: {e}", exc_info=True)
+        logger.error(f"Error getting canvas details: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -969,7 +1010,7 @@ def get_canvas_fields(canvas_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting canvas fields: {e}", exc_info=True)
+        logger.error(f"Error getting canvas fields: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -988,7 +1029,7 @@ def create_canvas(canvas_data: dict) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating canvas: {e}", exc_info=True)
+        logger.error(f"Error creating canvas: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1012,7 +1053,7 @@ def search_metadata_fields(query: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error searching metadata fields: {e}", exc_info=True)
+        logger.error(f"Error searching metadata fields: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1031,7 +1072,7 @@ def get_field_details(field_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting field details: {e}", exc_info=True)
+        logger.error(f"Error getting field details: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1050,7 +1091,7 @@ def create_metadata_field(field_data: dict) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating metadata field: {e}", exc_info=True)
+        logger.error(f"Error creating metadata field: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1074,7 +1115,7 @@ def search_metadata_records(query: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error searching metadata records: {e}", exc_info=True)
+        logger.error(f"Error searching metadata records: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1093,7 +1134,7 @@ def get_metadata_record(data_id: str) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error getting metadata record: {e}", exc_info=True)
+        logger.error(f"Error getting metadata record: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1114,7 +1155,7 @@ def create_metadata_record(data_record: dict) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error creating metadata record: {e}", exc_info=True)
+        logger.error(f"Error creating metadata record: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1158,7 +1199,7 @@ def list_apps(search: str = None) -> str:
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error listing apps: {e}", exc_info=True)
+        logger.error(f"Error listing apps: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1183,7 +1224,7 @@ def discover_app_endpoints(search: str = None, as_json: bool = False) -> str:
         else:
             return json.dumps(endpoints, indent=2)
     except Exception as e:
-        logger.error(f"Error discovering app endpoints: {e}", exc_info=True)
+        logger.error(f"Error discovering app endpoints: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1217,7 +1258,7 @@ def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = Non
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error launching app: {e}", exc_info=True)
+        logger.error(f"Error launching app: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -1287,13 +1328,13 @@ Examples:
         expose_headers=["Mcp-Session-Id"],
     )
     
-    # Run with uvicorn
+    # Run with uvicorn using matching log config
     import uvicorn
     uvicorn.run(
         wrapped_app,
         host=args.host,
         port=args.port,
-        log_level="info",
+        log_config=get_uvicorn_log_config(),
     )
 
 
