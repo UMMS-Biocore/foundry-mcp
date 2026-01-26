@@ -25,7 +25,10 @@ from mcp.server.fastmcp import FastMCP
 
 # Import from our modules
 from .client import get_client
-from .config import set_credentials, validate_credentials, HEADER_HOSTNAME, HEADER_TOKEN
+from .config import (
+    set_credentials, validate_credentials, get_fixed_hostname,
+    HEADER_HOSTNAME, HEADER_TOKEN
+)
 from .utils import serialize_response, MCP_TOKEN_PREFIX
 from .log import get_logger, get_uvicorn_log_config, mask_token
 
@@ -39,11 +42,21 @@ class CredentialsMiddleware:
     Middleware that extracts ViaFoundry credentials from request headers,
     validates them, and stores them in context variables for use by tool handlers.
     
+    Security Modes:
+      - Fixed Hostname Mode (production): When fixed_hostname is set, the server
+        uses that hostname for all requests, ignoring client X-ViaFoundry-Hostname
+        headers. This prevents the server from being used as an open proxy.
+      
+      - Open Mode (development): When fixed_hostname is None, the server accepts
+        X-ViaFoundry-Hostname from clients, allowing connection to any ViaFoundry
+        instance. Only safe for localhost deployments.
+    
     Returns 401 Unauthorized if credentials are missing or invalid.
     """
     
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp, fixed_hostname: str = None):
         self.app = app
+        self.fixed_hostname = fixed_hostname
     
     def _get_client_ip(self, scope: Scope) -> str:
         """Extract client IP from scope, checking proxy headers first."""
@@ -86,9 +99,25 @@ class CredentialsMiddleware:
             # Extract headers (they're stored as list of tuples)
             headers = dict(scope.get("headers", []))
             
-            # Get credentials from headers (header names are lowercase bytes)
-            hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+            # Get token from headers (always required from client)
             token = headers.get(HEADER_TOKEN.encode(), b"").decode()
+            
+            # Determine hostname based on security mode
+            if self.fixed_hostname:
+                # Fixed hostname mode (production): ignore client header
+                hostname = self.fixed_hostname
+                client_hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+                if client_hostname and client_hostname != self.fixed_hostname:
+                    self._log_with_context(
+                        logging.DEBUG,
+                        f"Ignoring client hostname '{client_hostname}', using fixed: {hostname}",
+                        scope,
+                        hostname,
+                        token
+                    )
+            else:
+                # Open mode (development): use client-provided header
+                hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
             
             # Validate credentials
             if not validate_credentials(hostname, token):
@@ -120,23 +149,35 @@ class CredentialsMiddleware:
     
     async def _send_unauthorized_response(self, send: Send, hostname: str, token: str) -> None:
         """Send a 401 Unauthorized response with details about what's missing."""
-        if not hostname and not token:
-            detail = "Missing credentials. Provide X-ViaFoundry-Hostname and X-ViaFoundry-Token headers."
-        elif not hostname:
-            detail = "Missing X-ViaFoundry-Hostname header."
-        elif not token:
-            detail = "Missing X-ViaFoundry-Token header."
-        elif not (hostname.startswith("http://") or hostname.startswith("https://")):
-            detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
-        elif not token.startswith(MCP_TOKEN_PREFIX):
-            detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+        # In fixed hostname mode, we only need the token from client
+        if self.fixed_hostname:
+            if not token:
+                detail = "Missing X-ViaFoundry-Token header."
+            elif not token.startswith(MCP_TOKEN_PREFIX):
+                detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+            else:
+                detail = "Invalid credentials."
+            help_msg = "Configure X-ViaFoundry-Token in mcp.json headers."
         else:
-            detail = "Invalid credentials."
+            # Open mode - need both hostname and token from client
+            if not hostname and not token:
+                detail = "Missing credentials. Provide X-ViaFoundry-Hostname and X-ViaFoundry-Token headers."
+            elif not hostname:
+                detail = "Missing X-ViaFoundry-Hostname header."
+            elif not token:
+                detail = "Missing X-ViaFoundry-Token header."
+            elif not (hostname.startswith("http://") or hostname.startswith("https://")):
+                detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
+            elif not token.startswith(MCP_TOKEN_PREFIX):
+                detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+            else:
+                detail = "Invalid credentials."
+            help_msg = "Configure credentials in mcp.json headers: X-ViaFoundry-Hostname and X-ViaFoundry-Token"
         
         body = json.dumps({
             "error": "Unauthorized",
             "detail": detail,
-            "help": "Configure credentials in mcp.json headers: X-ViaFoundry-Hostname and X-ViaFoundry-Token"
+            "help": help_msg
         }).encode("utf-8")
         
         await send({
@@ -1286,8 +1327,16 @@ Credentials are configured in ~/.cursor/mcp.json:
   }
 }
 
+Security Modes:
+  - Fixed Hostname: Set FRONTEND_HOSTNAME (and optionally FRONTEND_PROTOCOL,
+    FRONTEND_PATH_PREFIX) to lock the server to a specific ViaFoundry instance.
+    Used for production deployments.
+  - Open Mode: Without FRONTEND_HOSTNAME, clients can specify any target via
+    X-ViaFoundry-Hostname header (development mode, only safe for localhost).
+
 Examples:
   python -m viafoundry_mcp.server --port 8000
+  FRONTEND_HOSTNAME=prod.viafoundry.com python -m viafoundry_mcp.server
         """
     )
     parser.add_argument('--port', type=int, default=8000, 
@@ -1296,14 +1345,43 @@ Examples:
                         help='Host to bind to (default: 127.0.0.1)')
     args = parser.parse_args()
     
+    # Determine security mode based on fixed hostname configuration
+    fixed_hostname = get_fixed_hostname()
+    
+    # Log startup banner with security mode information
     logger.info("=" * 60)
     logger.info("ViaFoundry MCP HTTP Server")
     logger.info("=" * 60)
     logger.info(f"Endpoint: http://{args.host}:{args.port}/mcp")
     logger.info("")
-    logger.info("Configure credentials in mcp.json headers:")
-    logger.info("  X-ViaFoundry-Hostname: https://your-viafoundry.com")
-    logger.info("  X-ViaFoundry-Token: your-personal-access-token")
+    
+    if fixed_hostname:
+        # Fixed hostname mode (production)
+        logger.info("Security Mode: FIXED HOSTNAME (production)")
+        logger.info(f"  Target: {fixed_hostname}")
+        logger.info("  Client X-ViaFoundry-Hostname headers will be ignored")
+        logger.info("")
+        logger.info("Configure in mcp.json headers:")
+        logger.info("  X-ViaFoundry-Token: your-personal-access-token")
+    else:
+        # Open mode (development)
+        logger.info("Security Mode: OPEN (development)")
+        logger.info("  Clients can specify any ViaFoundry instance via header")
+        if args.host != "127.0.0.1" and args.host != "localhost":
+            logger.warning(
+                "WARNING: Server bound to non-localhost without fixed hostname!"
+            )
+            logger.warning(
+                "  This allows the server to be used as an open proxy."
+            )
+            logger.warning(
+                "  Set FRONTEND_HOSTNAME for production deployments."
+            )
+        logger.info("")
+        logger.info("Configure in mcp.json headers:")
+        logger.info("  X-ViaFoundry-Hostname: https://your-viafoundry.com")
+        logger.info("  X-ViaFoundry-Token: your-personal-access-token")
+    
     logger.info("=" * 60)
     
     # Configure server settings
@@ -1316,8 +1394,8 @@ Examples:
     # Get the streamable HTTP app and wrap it
     mcp_app = mcp.streamable_http_app()
     
-    # Add credentials middleware
-    wrapped_app = CredentialsMiddleware(mcp_app)
+    # Add credentials middleware with fixed hostname for production mode
+    wrapped_app = CredentialsMiddleware(mcp_app, fixed_hostname=fixed_hostname)
     
     # Add CORS middleware
     wrapped_app = CORSMiddleware(

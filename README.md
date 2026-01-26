@@ -330,18 +330,93 @@ PORT=9000 docker compose up
 
 ---
 
+## Security
+
+The MCP server has two security modes to prevent misuse as an open proxy:
+
+### Open Mode (Development/Localhost)
+
+In open mode, clients can specify any ViaFoundry instance via the `X-ViaFoundry-Hostname` header. This is the default when:
+
+- Running standalone with `docker compose up` in the `mcp/` directory
+- `FRONTEND_HOSTNAME` environment variable is not set
+- `FRONTEND_HOSTNAME` is a localhost address (`localhost`, `127.0.0.1`, `0.0.0.0`, etc.)
+
+**Client configuration (open mode):**
+
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
+        "X-ViaFoundry-Token": "via_mcp_your-token"
+      }
+    }
+  }
+}
+```
+
+### Fixed Hostname Mode (Production)
+
+In production deployments, the server locks to a specific ViaFoundry instance, ignoring client-provided `X-ViaFoundry-Hostname` headers. This prevents the server from being used as an open proxy.
+
+**Enabled when** `FRONTEND_HOSTNAME` is set to a non-localhost value (typically from ViaFoundry's `.env` file):
+
+```bash
+FRONTEND_PROTOCOL=https
+FRONTEND_HOSTNAME="prod.viafoundry.com"
+FRONTEND_PATH_PREFIX="/beta"
+```
+
+This constructs the fixed hostname: `https://prod.viafoundry.com/beta`
+
+**Client configuration (fixed hostname mode):**
+
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "url": "https://your-mcp-server.com/mcp",
+      "headers": {
+        "X-ViaFoundry-Token": "via_mcp_your-token"
+      }
+    }
+  }
+}
+```
+
+> **Note:** In fixed hostname mode, clients only need to provide `X-ViaFoundry-Token`. The `X-ViaFoundry-Hostname` header is ignored.
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FRONTEND_HOSTNAME` | Target ViaFoundry hostname. If set (non-localhost), enables fixed hostname mode | None (open mode) |
+| `FRONTEND_PROTOCOL` | Protocol for fixed hostname | `https` |
+| `FRONTEND_PATH_PREFIX` | Path prefix for fixed hostname (e.g., `/beta`) | None |
+
+---
+
 ## Cloud Deployment (HTTPS)
+
+> **Security Note:** When deploying to cloud platforms, use fixed hostname mode to prevent the MCP server from being used as an open proxy. Set `FRONTEND_HOSTNAME` to your ViaFoundry instance.
 
 ### Google Cloud Run
 
 ```bash
-gcloud run deploy viafoundry-mcp --source . --port 8000
+gcloud run deploy viafoundry-mcp \
+  --source . \
+  --port 8000 \
+  --set-env-vars="FRONTEND_HOSTNAME=your-viafoundry.com,FRONTEND_PROTOCOL=https"
 ```
 
 ### Fly.io
 
 ```bash
 fly launch
+fly secrets set FRONTEND_HOSTNAME=your-viafoundry.com FRONTEND_PROTOCOL=https
 ```
 
 Then update your client config with the HTTPS URL:
@@ -351,7 +426,6 @@ Then update your client config with the HTTPS URL:
   "viafoundry": {
     "url": "https://your-app.fly.dev/mcp",
     "headers": {
-      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
       "X-ViaFoundry-Token": "via_mcp_your-token"
     }
   }
