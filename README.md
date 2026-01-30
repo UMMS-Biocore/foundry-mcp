@@ -76,7 +76,7 @@ docker compose up --build -d
 
 ---
 
-## Available Tools (40 Total)
+## Available Tools (41 Total)
 
 ### 📊 Report Management (8 tools)
 
@@ -95,22 +95,32 @@ Access and manage ViaFoundry reports and files.
 
 ---
 
-### 🔬 Process & Pipeline Management (10 tools)
+### 🏃 Run Management (2 tools)
+
+Search and retrieve pipeline run information.
+
+| Tool        | What It Does                                              |
+| ----------- | --------------------------------------------------------- |
+| `list_runs` | List and search for runs/pipeline executions              |
+| `get_run`   | Get detailed run info by ID or name (supports fuzzy match)|
+
+---
+
+### 🔬 Process & Pipeline Management (9 tools)
 
 Create, explore, and manage bioinformatics pipelines.
 
-| Tool                        | What It Does                                    |
-| --------------------------- | ----------------------------------------------- |
-| `list_all_processes`        | List all processes/pipelines in ViaFoundry      |
-| `get_process_details`       | Get detailed pipeline configuration and scripts |
-| `get_process_revisions`     | Get version history for a pipeline              |
-| `duplicate_process`         | Clone an existing pipeline for modification     |
-| `create_process`            | Create a new custom process/pipeline            |
-| `create_process_config`     | Generate process configuration helper           |
-| `list_process_parameters`   | List all available parameter definitions        |
-| `get_pipeline_parameters`   | Get parameters for a specific pipeline          |
-| `create_process_parameter`  | Create new parameter definition                 |
-| `filter_process_parameters` | Filter parameters by name, type, or qualifier   |
+| Tool                        | What It Does                                        |
+| --------------------------- | --------------------------------------------------- |
+| `list_all_processes`        | List all processes/pipelines in ViaFoundry          |
+| `get_process_details`       | Get detailed pipeline configuration and scripts     |
+| `get_process_revisions`     | Get version history for a pipeline                  |
+| `duplicate_process`         | Clone an existing pipeline for modification         |
+| `create_process`            | Create a new custom process/pipeline                |
+| `create_process_config`     | Generate process configuration helper               |
+| `list_process_parameters`   | List all available parameter definitions            |
+| `get_process_parameters`    | Get parameters filtered by name, type, or qualifier |
+| `create_process_parameter`  | Create new parameter definition                     |
 
 ---
 
