@@ -606,23 +606,6 @@ def list_process_parameters() -> str:
         return json.dumps({"error": str(e)})
 
 
-@mcp.tool()
-def get_pipeline_parameters(pipeline_id: str) -> str:
-    """
-    Get parameters for a specific pipeline by ID.
-    Returns the parameter configuration for the pipeline.
-    """
-    try:
-        via_client = get_client()
-        logger.info(f"Getting parameters for pipeline {pipeline_id}")
-        
-        parameters = via_client.process.get_pipeline_parameters(pipeline_id)
-        result = serialize_response(parameters)
-        
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting pipeline parameters: {e}")
-        return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
@@ -645,36 +628,31 @@ def duplicate_process(process_id: str, new_name: str = None) -> str:
 
 
 @mcp.tool()
-def filter_process_parameters(
+def get_process_parameters(
     name: str = None,
     qualifier: str = None,
     file_type: str = None,
     id: str = None
 ) -> str:
     """
-    Filter parameters by name, qualifier, file type, or ID.
+    Get parameters filtered by name, qualifier, file type, or ID.
     Returns parameters matching the specified criteria.
     """
     try:
         via_client = get_client()
-        logger.info(f"Filtering process parameters")
+        logger.info(f"Getting process parameters")
         
-        filters = {}
-        if name:
-            filters["name"] = name
-        if qualifier:
-            filters["qualifier"] = qualifier
-        if file_type:
-            filters["file_type"] = file_type
-        if id:
-            filters["id"] = id
-        
-        filtered = via_client.process.filter_parameters({}, filters)
+        filtered = via_client.process.get_parameters(
+            name=name,
+            qualifier=qualifier,
+            fileType=file_type,
+            id_=id
+        )
         result = serialize_response(filtered)
         
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error filtering process parameters: {e}")
+        logger.error(f"Error getting process parameters: {e}")
         return json.dumps({"error": str(e)})
 
 

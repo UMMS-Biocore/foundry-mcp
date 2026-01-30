@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.1] - 2026-01-30
+
+### Changed
+
+- **BREAKING: Renamed `filter_process_parameters` to `get_process_parameters`**
+  - Aligns with SDK method rename from `filter_parameters` to `get_parameters`
+  - Now calls `process.get_parameters(name=, qualifier=, fileType=, id_=)` directly
+
+### Removed
+
+- **Removed `get_pipeline_parameters` tool** - This tool was removed from the ViaFoundry SDK
+
+### Fixed
+
+- **Documentation: Added missing Run Management tools to README**
+  - Added `list_runs` and `get_run` tools that were missing from documentation
+  - Updated total tool count from 42 to 41
+
 ## [1.1.0] - 2025-12-08
 
 ### Changed
