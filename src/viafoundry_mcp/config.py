@@ -18,7 +18,7 @@ Security Modes:
 Configure in ~/.cursor/mcp.json:
 {
   "viafoundry": {
-    "url": "http://127.0.0.1:8000/mcp",
+    "url": "http://127.0.0.1:8705/mcp",
     "headers": {
       "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
       "X-ViaFoundry-Token": "via_mcp_your-token-here"

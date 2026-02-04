@@ -5,7 +5,7 @@ ViaFoundry MCP HTTP Server
 Credentials are configured in mcp.json via headers:
 {
   "viafoundry": {
-    "url": "http://127.0.0.1:8000/mcp",
+    "url": "http://127.0.0.1:8705/mcp",
     "headers": {
       "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
       "X-ViaFoundry-Token": "your-token-here"
@@ -13,7 +13,7 @@ Credentials are configured in mcp.json via headers:
   }
 }
 
-Run with: python -m viafoundry_mcp.server --port 8000
+Run with: python -m viafoundry_mcp.server --port 8705
 """
 
 import json
@@ -1296,7 +1296,7 @@ Credentials are configured in ~/.cursor/mcp.json:
 {
   "mcpServers": {
     "viafoundry": {
-      "url": "http://127.0.0.1:8000/mcp",
+      "url": "http://127.0.0.1:8705/mcp",
       "headers": {
         "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
         "X-ViaFoundry-Token": "your-personal-access-token"
@@ -1313,12 +1313,12 @@ Security Modes:
     X-ViaFoundry-Hostname header (development mode, only safe for localhost).
 
 Examples:
-  python -m viafoundry_mcp.server --port 8000
+  python -m viafoundry_mcp.server --port 8705
   FRONTEND_HOSTNAME=prod.viafoundry.com python -m viafoundry_mcp.server
         """
     )
-    parser.add_argument('--port', type=int, default=8000, 
-                        help='Port to run the server on (default: 8000)')
+    parser.add_argument('--port', type=int, default=8705, 
+                        help='Port to run the server on (default: 8705)')
     parser.add_argument('--host', type=str, default='127.0.0.1', 
                         help='Host to bind to (default: 127.0.0.1)')
     args = parser.parse_args()

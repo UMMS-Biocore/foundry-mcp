@@ -57,7 +57,7 @@ def get_client() -> ViaFoundryClient:
             "Missing credentials. Configure in mcp.json:\n"
             '{\n'
             '  "viafoundry": {\n'
-            '    "url": "http://127.0.0.1:8000/mcp",\n'
+            '    "url": "http://127.0.0.1:8705/mcp",\n'
             '    "headers": {\n'
             '      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",\n'
             '      "X-ViaFoundry-Token": "your-token-here"\n'

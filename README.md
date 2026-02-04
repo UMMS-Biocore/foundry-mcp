@@ -21,7 +21,7 @@ docker compose up --build -d
 {
   "mcpServers": {
     "viafoundry": {
-      "url": "http://127.0.0.1:8000/mcp",
+      "url": "http://127.0.0.1:8705/mcp",
       "headers": {
         "X-ViaFoundry-Hostname": "https://your-viafoundry-instance.com",
         "X-ViaFoundry-Token": "your-personal-access-token"
@@ -358,7 +358,7 @@ In open mode, clients can specify any ViaFoundry instance via the `X-ViaFoundry-
 {
   "mcpServers": {
     "viafoundry": {
-      "url": "http://127.0.0.1:8000/mcp",
+      "url": "http://127.0.0.1:8705/mcp",
       "headers": {
         "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
         "X-ViaFoundry-Token": "via_mcp_your-token"
@@ -418,7 +418,7 @@ This constructs the fixed hostname: `https://prod.viafoundry.com/beta`
 ```bash
 gcloud run deploy viafoundry-mcp \
   --source . \
-  --port 8000 \
+  --port 8705 \
   --set-env-vars="FRONTEND_HOSTNAME=your-viafoundry.com,FRONTEND_PROTOCOL=https"
 ```
 
@@ -451,7 +451,7 @@ Then update your client config with the HTTPS URL:
 pip install git+https://github.com/viascientific/viafoundry-mcp.git
 
 # Run server
-viafoundry-mcp --port 8000
+viafoundry-mcp --port 8705
 ```
 
 ---

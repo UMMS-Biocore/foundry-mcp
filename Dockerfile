@@ -4,7 +4,7 @@
 # Multi-stage build for smaller, secure images
 # 
 # Build:  docker build -t viafoundry-mcp .
-# Run:    docker run -p 8000:8000 viafoundry-mcp
+# Run:    docker run -p 8705:8705 viafoundry-mcp
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -48,8 +48,8 @@ RUN chown -R mcp:mcp /app && \
 USER mcp
 
 # Default port
-ENV PORT=8000
-EXPOSE 8000
+ENV PORT=8705
+EXPOSE 8705
 
 # Health check (TCP port check - MCP endpoint requires special headers)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

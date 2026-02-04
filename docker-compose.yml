@@ -19,9 +19,9 @@ services:
     image: viafoundry-mcp:latest
     container_name: viafoundry-mcp
     ports:
-      - "${PORT:-8000}:${PORT:-8000}"
+      - "${PORT:-8705}:${PORT:-8705}"
     environment:
-      - PORT=${PORT:-8000}
+      - PORT=${PORT:-8705}
     # Map 'localhost' inside container to host machine (Docker Desktop for Mac)
     extra_hosts:
       - "localhost:host-gateway"
@@ -40,7 +40,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT:-8000})); s.close()",
+          "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT:-8705})); s.close()",
         ]
       interval: 30s
       timeout: 10s
