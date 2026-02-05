@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.2.0] - 2026-02-05
+
+### Fixed
+
+- **`duplicate_process`** - Removed unsupported `new_name` parameter to match SDK
+- **`search_datasets`** - Changed to `dataset_id` and `filter_data` parameters (was `query`/`collection_id`)
+- **`search_collections`** - Changed to `filter_data` parameter (was `query`)
+- **`search_canvas`** - Changed to `filter_data` parameter (was `query`)
+- **`search_metadata_fields`** - Changed to `filter_data` parameter (was `query`)
+- **`search_metadata_records`** - Added required `canvas_id` and `collection_name` parameters
+- **`create_collection`** - Now passes `collection_data` dict directly to SDK
+- **`add_files_to_dataset`** - Changed to `file_data` dict (was `file_ids` list)
+- **`create_metadata_record`** - Added `canvas_id`, `collection_name`, `data_entry` parameters
+- **`get_metadata_record`** - Added `canvas_id`, `collection_name`, `data_id` parameters
+
+### Changed
+
+- **`upload_file`** - Now accepts base64-encoded content instead of local file path; `remote_dir` is now required
+- **`download_file`** - Now returns base64-encoded content instead of saving to local filesystem
+
+These changes enable file upload/download to work correctly when MCP server runs in Docker or remotely.
+
+### Added
+
+- **File size limit** - 200MB limit for upload/download with informative error messages
+- **Request timeout** - 20s connect, 300s read timeout to prevent hanging
+- **Path traversal protection** - Security validation with logging for upload file names
+- **Enhanced error responses** - Detailed diagnostics including status code, reason, and response text
+- **Route path validation** - Check for missing/empty routePath before download attempts
+
 ## [1.1.1] - 2026-01-30
 
 ### Changed
