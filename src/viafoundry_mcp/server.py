@@ -40,6 +40,10 @@ from .log import get_logger, get_uvicorn_log_config, mask_token
 # Get logger for this module
 logger = get_logger(__name__)
 
+# Maximum file size for upload/download via base64 (200MB)
+# Base64 encoding increases size by ~33%, so 200MB file becomes ~267MB in transport
+MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
+
 
 class CredentialsMiddleware:
     """
@@ -325,22 +329,53 @@ def download_file(report_id: str, file_path: str) -> str:
                 "hint": "Use list_files(report_id) to see available files"
             }, indent=2)
         
-        # Build the file URL
+        # Validate routePath exists and is not empty
+        if "routePath" not in file_details.columns:
+            return json.dumps({
+                "error": "File metadata missing routePath field",
+                "hint": "The report data may be incomplete or corrupted"
+            }, indent=2)
+        
         route_path = file_details["routePath"].iloc[0]
+        if not route_path:
+            return json.dumps({
+                "error": f"File '{file_path}' has no download path available",
+                "hint": "The file may not be accessible for download"
+            }, indent=2)
+        
+        # Build the file URL
         file_url = via_client.auth.hostname + route_path
         file_name = os.path.basename(file_path)
         
         # Download the file content
-        response = requests.get(file_url, headers=via_client.auth.get_headers())
+        # Timeout: (connect_timeout, read_timeout) in seconds
+        response = requests.get(file_url, headers=via_client.auth.get_headers(), timeout=(20, 300))
         if response.status_code != 200:
+            # Include detailed error info for debugging
+            reason = getattr(response, 'reason', 'Unknown')
+            text = getattr(response, 'text', '')
+            error_detail = text[:500] if text else reason
             return json.dumps({
-                "error": f"Failed to download file: HTTP {response.status_code}"
+                "error": f"Failed to download file: HTTP {response.status_code} {reason}",
+                "status_code": response.status_code,
+                "detail": error_detail,
+                "url": file_url
+            }, indent=2)
+        
+        # Check file size before base64 encoding
+        content_size = len(response.content)
+        if content_size > MAX_FILE_SIZE_BYTES:
+            size_mb = content_size / (1024 * 1024)
+            max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+            return json.dumps({
+                "error": f"File too large for download: {size_mb:.1f}MB exceeds {max_mb:.0f}MB limit",
+                "hint": "Use the SDK directly for large file downloads"
             }, indent=2)
         
         # Encode content as base64
         file_content_base64 = base64.b64encode(response.content).decode('utf-8')
         
-        logger.info(f"Downloaded file '{file_name}' ({len(response.content)} bytes)")
+        logger.info(f"Downloaded file '{file_name}' ({content_size} bytes)")
         
         return json.dumps({
             "success": True,
@@ -436,6 +471,10 @@ def upload_file(report_id: str, file_name: str, file_content_base64: str, remote
             "hint": "File name cannot be empty or contain path traversal characters"
         }, indent=2)
     
+    # Warn if path components were stripped (potential path traversal attempt)
+    if file_name != safe_file_name:
+        logger.warning(f"Path traversal detected in file_name: '{file_name}' -> using '{safe_file_name}'")
+    
     # Decode base64 content first (before creating temp resources)
     try:
         file_bytes = base64.b64decode(file_content_base64)
@@ -443,6 +482,24 @@ def upload_file(report_id: str, file_name: str, file_content_base64: str, remote
         return json.dumps({
             "error": f"Invalid base64 content: {e}",
             "hint": "Ensure file content is properly base64 encoded"
+        }, indent=2)
+    
+    # Check file size limit
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        size_mb = len(file_bytes) / (1024 * 1024)
+        max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+        return json.dumps({
+            "error": f"File too large for upload: {size_mb:.1f}MB exceeds {max_mb:.0f}MB limit",
+            "hint": "Use the SDK directly for large file uploads"
+        }, indent=2)
+    
+    # Get client early to fail fast before allocating temp resources
+    try:
+        via_client = get_client()
+    except Exception as e:
+        return json.dumps({
+            "error": f"Failed to initialize client: {e}",
+            "hint": "Check your ViaFoundry credentials"
         }, indent=2)
     
     # Use TemporaryDirectory context manager for automatic cleanup
@@ -457,8 +514,6 @@ def upload_file(report_id: str, file_name: str, file_content_base64: str, remote
             
             logger.info(f"Uploading file '{safe_file_name}' ({len(file_bytes)} bytes) to report {report_id}, dir '{remote_dir}'")
             
-            via_client = get_client()
-            
             # Upload using SDK
             response = via_client.reports.upload_report_file(
                 report_id,
@@ -468,7 +523,6 @@ def upload_file(report_id: str, file_name: str, file_content_base64: str, remote
             
             result = serialize_response(response)
             return json.dumps(result, indent=2)
-            # TemporaryDirectory automatically cleans up here
             
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
