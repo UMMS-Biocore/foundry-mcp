@@ -303,11 +303,12 @@ def download_file(report_id: str, file_path: str) -> str:
         The client should decode the base64 content and save to disk.
     
     Example:
-        # Get the file content
-        result = download_file(report_id="12524", file_path="fastqc/control_rep1.R1_fastqc.html")
+        # Get the file content (returns JSON string)
+        result_json = download_file(report_id="12524", file_path="fastqc/control_rep1.R1_fastqc.html")
         
-        # Client-side: decode and save
-        # import base64
+        # Client-side: parse JSON, decode base64, and save
+        # import json, base64
+        # result = json.loads(result_json)
         # content = base64.b64decode(result["file_content_base64"])
         # with open(result["file_name"], "wb") as f:
         #     f.write(content)
@@ -337,7 +338,8 @@ def download_file(report_id: str, file_path: str) -> str:
             }, indent=2)
         
         route_path = file_details["routePath"].iloc[0]
-        if not route_path:
+        # Check for None, empty string, or NaN (NaN != NaN is True)
+        if not route_path or route_path != route_path:
             return json.dumps({
                 "error": f"File '{file_path}' has no download path available",
                 "hint": "The file may not be accessible for download"

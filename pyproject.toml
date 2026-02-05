@@ -31,6 +31,7 @@ dependencies = [
     "viafoundry_sdk>=1.0.0",
     "uvicorn>=0.30.0",
     "starlette>=0.37.0",
+    "requests>=2.25.0",
 ]
 
 [project.optional-dependencies]
