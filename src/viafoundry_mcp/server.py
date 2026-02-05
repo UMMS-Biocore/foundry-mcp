@@ -19,6 +19,10 @@ Run with: python -m viafoundry_mcp.server --port 8705
 import json
 import logging
 import argparse
+import base64
+import tempfile
+import os
+import requests
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp.server.fastmcp import FastMCP
@@ -280,27 +284,72 @@ def list_files(report_id: str, process_name: str = None) -> str:
 
 
 @mcp.tool()
-def download_file(report_id: str, file_path: str, download_dir: str = None) -> str:
+def download_file(report_id: str, file_path: str) -> str:
     """
-    Download a specific file from a report. Saves the file to the specified
-    download directory (defaults to current directory). Returns the local path
-    where the file was saved.
+    Download a file from a report and return its content as base64.
+    This allows downloading files regardless of server filesystem access.
+    The client can then decode and save the file locally.
+    
+    Args:
+        report_id: The ID of the report containing the file.
+        file_path: The path of the file within the report (from list_files output).
+    
+    Returns:
+        JSON with file_name, file_content_base64, and file_size.
+        The client should decode the base64 content and save to disk.
+    
+    Example:
+        # Get the file content
+        result = download_file(report_id="12524", file_path="fastqc/control_rep1.R1_fastqc.html")
+        
+        # Client-side: decode and save
+        # import base64
+        # content = base64.b64decode(result["file_content_base64"])
+        # with open(result["file_name"], "wb") as f:
+        #     f.write(content)
     """
     try:
         via_client = get_client()
-        if download_dir is None:
-            download_dir = os.getcwd()
-        
         logger.info(f"Downloading file {file_path} from report {report_id}")
         
+        # Get report data to find the file URL
         report_data = via_client.reports.fetch_report_data(report_id)
-        local_path = via_client.reports.download_file(report_data, file_path, download_dir)
+        
+        # Get all files and find the matching one
+        files_df = via_client.reports.get_all_files(report_data)
+        file_details = files_df[files_df["file_path"] == file_path]
+        
+        if file_details.empty:
+            return json.dumps({
+                "error": f"File '{file_path}' not found in report",
+                "hint": "Use list_files(report_id) to see available files"
+            }, indent=2)
+        
+        # Build the file URL
+        route_path = file_details["routePath"].iloc[0]
+        file_url = via_client.auth.hostname + route_path
+        file_name = os.path.basename(file_path)
+        
+        # Download the file content
+        response = requests.get(file_url, headers=via_client.auth.get_headers())
+        if response.status_code != 200:
+            return json.dumps({
+                "error": f"Failed to download file: HTTP {response.status_code}"
+            }, indent=2)
+        
+        # Encode content as base64
+        file_content_base64 = base64.b64encode(response.content).decode('utf-8')
+        
+        logger.info(f"Downloaded file '{file_name}' ({len(response.content)} bytes)")
         
         return json.dumps({
             "success": True,
-            "local_path": local_path,
-            "message": f"File downloaded successfully to {local_path}"
+            "file_name": file_name,
+            "file_size": len(response.content),
+            "file_content_base64": file_content_base64,
+            "message": f"File downloaded successfully. Decode base64 content and save to disk."
         }, indent=2)
+        
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         return json.dumps({"error": str(e)})
@@ -340,23 +389,87 @@ def load_file(report_id: str, file_path: str, separator: str = "\t") -> str:
 
 
 @mcp.tool()
-def upload_file(report_id: str, local_file_path: str, remote_dir: str = None) -> str:
+def upload_file(report_id: str, file_name: str, file_content_base64: str, remote_dir: str) -> str:
     """
-    Upload a file to a report. The file will be organized in the specified
-    directory within the report. Returns upload status and file information.
-    """
-    try:
-        via_client = get_client()
-        logger.info(f"Uploading file {local_file_path} to report {report_id}")
-        
-        response = via_client.reports.upload_report_file(
-            report_id,
-            local_file_path,
-            dir=remote_dir
+    Upload a file to a report. The file content is provided as base64-encoded string.
+    This allows uploading files from any client regardless of server filesystem access.
+    
+    Thread-safe: Each upload uses a unique temporary directory that is automatically
+    cleaned up after the upload completes (success or failure).
+    
+    Args:
+        report_id: The ID of the report to upload to.
+        file_name: The name for the uploaded file (e.g., "data.tsv", "results.csv").
+        file_content_base64: The file content encoded as a base64 string.
+            To encode a file: base64.b64encode(file_bytes).decode('utf-8')
+        remote_dir: Directory within the report to place the file. This should be
+            a process name from the report (use get_report_dirs or list_processes
+            to find available directories).
+    
+    Returns:
+        Upload status and file information.
+    
+    Example:
+        # First, get available directories:
+        # get_report_dirs(report_id="12690")  # Returns: {"directories": ["FastQC", "STAR", ...]}
+        #
+        # Then upload to a specific process directory:
+        upload_file(
+            report_id="12690",
+            file_name="data.tsv",
+            file_content_base64="<base64 content>",
+            remote_dir="FastQC"
         )
-        
-        result = serialize_response(response)
-        return json.dumps(result, indent=2)
+    """
+    # Validate remote_dir is provided
+    if not remote_dir or not remote_dir.strip():
+        return json.dumps({
+            "error": "remote_dir is required",
+            "hint": "Use get_report_dirs(report_id) or list_processes(report_id) to find available directories"
+        }, indent=2)
+    
+    # Validate file_name to prevent path traversal attacks
+    safe_file_name = os.path.basename(file_name)
+    if not safe_file_name or safe_file_name in (".", ".."):
+        return json.dumps({
+            "error": "Invalid file name",
+            "hint": "File name cannot be empty or contain path traversal characters"
+        }, indent=2)
+    
+    # Decode base64 content first (before creating temp resources)
+    try:
+        file_bytes = base64.b64decode(file_content_base64)
+    except Exception as e:
+        return json.dumps({
+            "error": f"Invalid base64 content: {e}",
+            "hint": "Ensure file content is properly base64 encoded"
+        }, indent=2)
+    
+    # Use TemporaryDirectory context manager for automatic cleanup
+    # Each call gets a unique directory - safe for concurrent access
+    try:
+        with tempfile.TemporaryDirectory(prefix="viafoundry_upload_") as temp_dir:
+            temp_file_path = os.path.join(temp_dir, safe_file_name)
+            
+            # Write decoded content to temp file
+            with open(temp_file_path, "wb") as f:
+                f.write(file_bytes)
+            
+            logger.info(f"Uploading file '{safe_file_name}' ({len(file_bytes)} bytes) to report {report_id}, dir '{remote_dir}'")
+            
+            via_client = get_client()
+            
+            # Upload using SDK
+            response = via_client.reports.upload_report_file(
+                report_id,
+                temp_file_path,
+                dir=remote_dir
+            )
+            
+            result = serialize_response(response)
+            return json.dumps(result, indent=2)
+            # TemporaryDirectory automatically cleans up here
+            
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
         return json.dumps({"error": str(e)})
@@ -609,7 +722,7 @@ def list_process_parameters() -> str:
 
 
 @mcp.tool()
-def duplicate_process(process_id: str, new_name: str = None) -> str:
+def duplicate_process(process_id: str) -> str:
     """
     Duplicate/clone an existing process/pipeline.
     Creates a copy of the specified process that can be modified independently.
@@ -618,7 +731,7 @@ def duplicate_process(process_id: str, new_name: str = None) -> str:
         via_client = get_client()
         logger.info(f"Duplicating process {process_id}")
         
-        duplicated = via_client.process.duplicate_process(process_id, new_name)
+        duplicated = via_client.process.duplicate_process(process_id)
         result = serialize_response(duplicated)
         
         return json.dumps(result, indent=2)
@@ -854,40 +967,111 @@ def get_menu_group_by_name(group_name: str) -> str:
 # ============================================================================
 
 @mcp.tool()
-def search_datasets(query: str, collection_id: str = None) -> str:
+def search_datasets(dataset_id: str, filter_data: dict = None) -> str:
     """
-    Search for dataset files in ViaFoundry metadata system.
-    Search by filename, collection, or other criteria.
-    Returns matching dataset files with their metadata.
+    Search for files in a vmeta dataset with filtering, sorting, and pagination.
+    
+    Args:
+        dataset_id: ID of the vmeta dataset to search files in.
+        filter_data: Search options dict with the following keys:
+            - filter: Filter criteria dict. Examples:
+                - {"name": "README"} - exact match
+                - {"name": {"regex": "README"}} - regex/partial match (case-insensitive)
+                - {"owner.username": "admin@example.com"} - nested field match
+                - {"createdAt": {"gte": "2024-01-01"}} - date comparison (gt, gte, lt, lte)
+                - {"status": {"in": ["active", "pending"]}} - match any value in list
+                - {"status": {"ne": "deleted"}} - not equal
+            - sort: Field name to sort by (e.g., "name", "createdAt")
+            - order: Sort order - "asc" or "desc"
+            - fields: Comma-separated field names to return (e.g., "name,file1,createdAt")
+            - take: Max number of results to return (pagination)
+            - skip: Number of results to skip (pagination)
+    
+    Returns:
+        Matching files with their metadata and field type information.
+    
+    Examples:
+        # Search by exact name
+        search_datasets(dataset_id="abc123", filter_data={"filter": {"name": "README"}})
+        
+        # Search with regex and pagination
+        search_datasets(
+            dataset_id="abc123",
+            filter_data={
+                "filter": {"name": {"regex": "sample"}},
+                "sort": "createdAt",
+                "order": "desc",
+                "take": 10,
+                "skip": 0
+            }
+        )
+        
+        # Search with date filter
+        search_datasets(
+            dataset_id="abc123",
+            filter_data={"filter": {"createdAt": {"gte": "2024-01-01"}}}
+        )
     """
     try:
         via_client = get_client()
-        logger.info(f"Searching datasets with query: {query}" +
-                   (f", collection_id: {collection_id}" if collection_id else ""))
+        logger.info(f"Searching files in dataset {dataset_id}" +
+                   (f" with options: {filter_data}" if filter_data else ""))
         
         datasets = via_client.metadata.search_dataset_files(
-            query=query,
-            collection_id=collection_id
+            dataset_id=dataset_id,
+            filter_data=filter_data
         )
         
         result = serialize_response(datasets)
         return json.dumps(result, indent=2)
     except Exception as e:
-        logger.error(f"Error searching datasets: {e}")
+        logger.error(f"Error searching dataset files: {e}")
         return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
-def search_collections(query: str) -> str:
+def search_collections(filter_data: dict = None) -> str:
     """
-    Search for collections in ViaFoundry metadata system.
-    Collections are groups of related datasets.
-    Returns matching collections with their metadata.
+    Search for collections in ViaFoundry metadata system with filtering, sorting, and pagination.
+    Collections are groups of related datasets (e.g., "Files", "Samples").
+    
+    Args:
+        filter_data: Search options dict with the following keys:
+            - filter: Filter criteria dict. Examples:
+                - {"name": "file"} - exact match
+                - {"name": {"regex": "file"}} - regex/partial match (case-insensitive)
+                - {"label": "Files"} - filter by label
+                - {"active": true} - filter by active status
+            - sort: Field name to sort by (e.g., "name", "createdAt")
+            - order: Sort order - "asc" or "desc"
+            - fields: Comma-separated field names to return (e.g., "name,label,canvasID")
+            - take: Max number of results to return (pagination)
+            - skip: Number of results to skip (pagination)
+    
+    Returns:
+        Matching collections with their metadata.
+    
+    Examples:
+        # List all collections (no filter)
+        search_collections()
+        
+        # Search by exact name
+        search_collections(filter_data={"filter": {"name": "file"}})
+        
+        # Search with regex and pagination
+        search_collections(filter_data={
+            "filter": {"name": {"regex": "sample"}},
+            "sort": "createdAt",
+            "order": "desc",
+            "take": 10
+        })
     """
     try:
         via_client = get_client()
-        logger.info(f"Searching collections with query: {query}")
-        collections = via_client.metadata.search_collections(query)
+        logger.info(f"Searching collections" +
+                   (f" with options: {filter_data}" if filter_data else ""))
+        
+        collections = via_client.metadata.search_collections(filter_data)
         result = serialize_response(collections)
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -917,14 +1101,33 @@ def create_collection(collection_data: dict) -> str:
     """
     Create a new dataset collection.
     Collections group related datasets together for organization.
+    
+    Args:
+        collection_data: Dict containing collection properties:
+            - name (str, required): Name of the collection.
+            - label (str, required): Display label for easy identification.
+            - canvasID (str, required): The canvas ID that the collection belongs to.
+            - _id (str, optional): Custom unique identifier for the collection.
+            - version (int, optional): Version number of the collection.
+            - dataPerms (list, optional): Data-level permission settings.
+            - perms (list, optional): Collection-level permission settings.
+            - dataDeleteProtected (bool, optional): Whether to protect data from deletion.
+    
+    Returns:
+        The created collection data.
+    
+    Example:
+        create_collection(collection_data={
+            "name": "samples",
+            "label": "Sample Collection",
+            "canvasID": "65c21d6a593f32e0103daf25"
+        })
     """
     try:
         via_client = get_client()
-        name = collection_data.get("name", "")
-        description = collection_data.get("description")
-        logger.info(f"Creating collection: {name}")
+        logger.info(f"Creating collection: {collection_data.get('name', 'unnamed')}")
         
-        collection = via_client.metadata.create_collection(name, description)
+        collection = via_client.metadata.create_collection(collection_data)
         result = serialize_response(collection)
         
         return json.dumps(result, indent=2)
@@ -934,16 +1137,34 @@ def create_collection(collection_data: dict) -> str:
 
 
 @mcp.tool()
-def add_files_to_dataset(dataset_id: str, file_ids: list) -> str:
+def add_files_to_dataset(dataset_id: str, file_data: dict) -> str:
     """
-    Add files to an existing dataset.
-    Associates specified files with a dataset collection.
+    Add a file to an existing dataset.
+    Associates a file with a dataset.
+    
+    Args:
+        dataset_id: ID of the dataset to add the file to.
+        file_data: Dict containing file information:
+            - canvasId (str, required): The ID of the study tracker canvas.
+            - file (dict, required): File object with file metadata/properties.
+    
+    Returns:
+        Confirmation of file addition.
+    
+    Example:
+        add_files_to_dataset(
+            dataset_id="6984ba1e8518d10eb6fe636d",
+            file_data={
+                "canvasId": "66269972dc000cff1c8a54b0",
+                "file": {"name": "sample.fastq", "path": "/data/sample.fastq"}
+            }
+        )
     """
     try:
         via_client = get_client()
-        logger.info(f"Adding {len(file_ids)} files to dataset {dataset_id}")
+        logger.info(f"Adding file to dataset {dataset_id}: {file_data}")
         
-        result_obj = via_client.metadata.add_files_to_dataset(dataset_id, file_ids)
+        result_obj = via_client.metadata.add_files_to_dataset(dataset_id, file_data)
         result = serialize_response(result_obj)
         
         return json.dumps(result, indent=2)
@@ -976,17 +1197,48 @@ def get_collection_fields(collection_id: str) -> str:
 # ============================================================================
 
 @mcp.tool()
-def search_canvas(query: str) -> str:
+def search_canvas(filter_data: dict = None) -> str:
     """
-    Search for canvas visualizations in ViaFoundry.
+    Search for canvas visualizations in ViaFoundry with filtering, sorting, and pagination.
     Canvas objects represent data visualizations and dashboards.
-    Returns matching canvas items with their metadata.
+    
+    Args:
+        filter_data: Search options dict with the following keys:
+            - filter: Filter criteria dict. Examples:
+                - {"name": "dashboard"} - exact match
+                - {"name": {"regex": "dash"}} - regex/partial match (case-insensitive)
+                - {"label": "My Dashboard"} - filter by label
+                - {"active": true} - filter by active status
+            - sort: Field name to sort by (e.g., "name", "createdAt")
+            - order: Sort order - "asc" or "desc"
+            - fields: Comma-separated field names to return
+            - take: Max number of results to return (pagination)
+            - skip: Number of results to skip (pagination)
+    
+    Returns:
+        Matching canvas items with their metadata.
+    
+    Examples:
+        # List all canvas items (no filter)
+        search_canvas()
+        
+        # Search by exact name
+        search_canvas(filter_data={"filter": {"name": "dashboard"}})
+        
+        # Search with regex and pagination
+        search_canvas(filter_data={
+            "filter": {"name": {"regex": "sample"}},
+            "sort": "createdAt",
+            "order": "desc",
+            "take": 10
+        })
     """
     try:
         via_client = get_client()
-        logger.info(f"Searching canvas with query: {query}")
+        logger.info(f"Searching canvas" +
+                   (f" with options: {filter_data}" if filter_data else ""))
         
-        canvas_results = via_client.metadata.search_canvas(query=query)
+        canvas_results = via_client.metadata.search_canvas(filter_data)
         result = serialize_response(canvas_results)
         
         return json.dumps(result, indent=2)
@@ -1057,17 +1309,39 @@ def create_canvas(canvas_data: dict) -> str:
 # ============================================================================
 
 @mcp.tool()
-def search_metadata_fields(query: str) -> str:
+def search_metadata_fields(filter_data: dict = None) -> str:
     """
-    Search for metadata field definitions in ViaFoundry.
+    Search for metadata field definitions in ViaFoundry with filtering, sorting, and pagination.
     Fields define the schema for metadata records.
-    Returns matching field definitions with their types and constraints.
+    
+    Args:
+        filter_data: Search options dict with the following keys:
+            - filter: Filter criteria dict. Examples:
+                - {"name": "field_name"} - exact match
+                - {"name": {"regex": "field"}} - regex/partial match (case-insensitive)
+                - {"type": "String"} - filter by field type
+            - sort: Field name to sort by (e.g., "name", "createdAt")
+            - order: Sort order - "asc" or "desc"
+            - fields: Comma-separated field names to return
+            - take: Max number of results to return (pagination)
+            - skip: Number of results to skip (pagination)
+    
+    Returns:
+        Matching field definitions with their types and constraints.
+    
+    Examples:
+        # List all fields (no filter)
+        search_metadata_fields()
+        
+        # Search by name
+        search_metadata_fields(filter_data={"filter": {"name": "sample_id"}})
     """
     try:
         via_client = get_client()
-        logger.info(f"Searching metadata fields with query: {query}")
+        logger.info(f"Searching metadata fields" +
+                   (f" with options: {filter_data}" if filter_data else ""))
         
-        fields = via_client.metadata.search_fields(query=query)
+        fields = via_client.metadata.search_fields(filter_data)
         result = serialize_response(fields)
         
         return json.dumps(result, indent=2)
@@ -1119,17 +1393,41 @@ def create_metadata_field(field_data: dict) -> str:
 # ============================================================================
 
 @mcp.tool()
-def search_metadata_records(query: str) -> str:
+def search_metadata_records(canvas_id: str, collection_name: str, filter_data: dict = None) -> str:
     """
-    Search for metadata records (data entries) in ViaFoundry.
+    Search for metadata records (data entries) in a ViaFoundry canvas collection.
     Metadata records contain actual data values for defined fields.
-    Returns matching records with their field values.
+    
+    Args:
+        canvas_id: The canvas ID to search in.
+        collection_name: Name of the collection to search in (e.g., "file", "sample").
+        filter_data: Optional search options dict with the following keys:
+            - filter: Filter criteria dict. Examples:
+                - {"name": "record_name"} - exact match
+                - {"name": {"regex": "sample"}} - regex/partial match (case-insensitive)
+                - {"status": "active"} - filter by status
+            - sort: Field name to sort by (e.g., "name", "createdAt")
+            - order: Sort order - "asc" or "desc"
+            - fields: Comma-separated field names to return
+            - take: Max number of results to return (pagination)
+            - skip: Number of results to skip (pagination)
+    
+    Returns:
+        Matching records with their field values.
+    
+    Examples:
+        # List all records in "file" collection
+        search_metadata_records(canvas_id="abc123", collection_name="file")
+        
+        # Search by name in "sample" collection
+        search_metadata_records(canvas_id="abc123", collection_name="sample", filter_data={"filter": {"name": "sample_001"}})
     """
     try:
         via_client = get_client()
-        logger.info(f"Searching metadata records with query: {query}")
+        logger.info(f"Searching metadata records in canvas '{canvas_id}', collection '{collection_name}'" +
+                   (f" with options: {filter_data}" if filter_data else ""))
         
-        records = via_client.metadata.search_data(query=query)
+        records = via_client.metadata.search_data(canvas_id, collection_name, filter_data)
         result = serialize_response(records)
         
         return json.dumps(result, indent=2)
@@ -1139,16 +1437,31 @@ def search_metadata_records(query: str) -> str:
 
 
 @mcp.tool()
-def get_metadata_record(data_id: str) -> str:
+def get_metadata_record(canvas_id: str, collection_name: str, data_id: str) -> str:
     """
     Get a specific metadata record by ID.
     Returns the complete metadata record with all field values.
+    
+    Args:
+        canvas_id: The canvas ID where the collection exists.
+        collection_name: Name of the collection containing the record.
+        data_id: The unique ID of the data record to retrieve.
+    
+    Returns:
+        The data record with all field values.
+    
+    Example:
+        get_metadata_record(
+            canvas_id="65c21d6a593f32e0103daf25",
+            collection_name="samples",
+            data_id="66269972dc000cff1c8a54b0"
+        )
     """
     try:
         via_client = get_client()
-        logger.info(f"Getting metadata record {data_id}")
+        logger.info(f"Getting metadata record {data_id} from canvas '{canvas_id}', collection '{collection_name}'")
         
-        record = via_client.metadata.get_data(data_id)
+        record = via_client.metadata.get_data(canvas_id, collection_name, data_id)
         result = serialize_response(record)
         
         return json.dumps(result, indent=2)
@@ -1158,18 +1471,32 @@ def get_metadata_record(data_id: str) -> str:
 
 
 @mcp.tool()
-def create_metadata_record(data_record: dict) -> str:
+def create_metadata_record(canvas_id: str, collection_name: str, data_entry: dict) -> str:
     """
-    Create a new metadata data record.
+    Create a new metadata data record in a collection.
     Adds a new entry with field values to the metadata system.
+    
+    Args:
+        canvas_id: The canvas ID where the collection exists.
+        collection_name: Name of the collection to add the record to.
+        data_entry: Dict containing the record data. Can include any fields
+            except reserved keys. Optional 'perms' field for permissions.
+    
+    Returns:
+        The created data entry.
+    
+    Example:
+        create_metadata_record(
+            canvas_id="65c21d6a593f32e0103daf25",
+            collection_name="samples",
+            data_entry={"name": "Sample001", "status": "active"}
+        )
     """
     try:
         via_client = get_client()
-        collection_id = data_record.get("collection_id")
-        data = data_record.get("data", {})
-        logger.info(f"Creating metadata record in collection {collection_id}")
+        logger.info(f"Creating metadata record in canvas '{canvas_id}', collection '{collection_name}': {data_entry}")
         
-        record = via_client.metadata.create_data(collection_id, data)
+        record = via_client.metadata.create_data(canvas_id, collection_name, data_entry)
         result = serialize_response(record)
         
         return json.dumps(result, indent=2)
