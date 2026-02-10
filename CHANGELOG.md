@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1] - 2026-02-10
+
+### Fixed
+
+- **421 "Invalid Host header" behind reverse proxy** - Disabled MCP SDK DNS rebinding protection (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`) which rejected non-localhost `Host` headers forwarded by Apache (`ProxyPreserveHost On`) and nginx. Auth is already handled by `CredentialsMiddleware`. See [python-sdk#1798](https://github.com/modelcontextprotocol/python-sdk/issues/1798).
+
 ## [1.2.0] - 2026-02-05
 
 ### Fixed

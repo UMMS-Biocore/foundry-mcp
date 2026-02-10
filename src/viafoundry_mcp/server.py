@@ -26,6 +26,7 @@ import requests
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Import from our modules
 from .client import get_client
@@ -210,9 +211,18 @@ def create_mcp_server(stateless: bool = False) -> FastMCP:
         stateless: If True, run in stateless mode (no session persistence).
                    Better for serverless/Lambda deployments.
     """
+    # DNS rebinding protection is disabled because this server runs behind a
+    # reverse proxy (nginx/Apache) and handles its own authentication via
+    # CredentialsMiddleware (X-ViaFoundry-Token). The proxy may forward any
+    # external Host header (e.g. mcp.viafoundry.com, *.infra.viafoundry.net),
+    # which would be rejected by the SDK's default allowed_hosts list.
+    # See: https://github.com/modelcontextprotocol/python-sdk/issues/1798
     return FastMCP(
         "viafoundry-mcp",
         stateless_http=stateless,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        ),
     )
 
 
