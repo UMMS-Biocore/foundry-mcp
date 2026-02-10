@@ -93,15 +93,33 @@ class CredentialsFilter(logging.Filter):
 # Formatters
 # ============================================================================
 
+class AccessLogFormatter(logging.Formatter):
+    """Formatter for uvicorn access logs that strips the phantom ':0' port.
+
+    When proxy_headers is enabled, uvicorn resolves the client IP from
+    X-Forwarded-For but sets port to 0 (since the header has no port info),
+    producing lines like '203.0.113.42:0 - "POST ..."'. This formatter
+    strips the ':0' for cleaner output.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        result = super().format(record)
+        return result.replace(":0 - \"", " - \"", 1)
+
+
 class JsonFormatter(logging.Formatter):
     """JSON log formatter for structured logging in production/containers."""
     
     def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        # Strip phantom ':0' port from uvicorn access logs (see AccessLogFormatter)
+        if record.name == "uvicorn.access":
+            message = message.replace(":0 - \"", " - \"", 1)
         log_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
         
         # Add extra fields if present (e.g., hostname, client_ip, token)
@@ -216,8 +234,6 @@ def get_uvicorn_log_config() -> dict:
             },
         }
     else:
-        # Simple format for uvicorn (no credentials context available)
-        uvicorn_format = "%(asctime)s - %(levelname)s - %(message)s"
         return {
             "version": 1,
             "disable_existing_loggers": False,
@@ -226,7 +242,8 @@ def get_uvicorn_log_config() -> dict:
                     "format": f"%(asctime)s - uvicorn.server - %(levelname)s - %(message)s",
                 },
                 "uvicorn_access": {
-                    "format": f"%(asctime)s - uvicorn.access - %(levelname)s - %(message)s",
+                    "()": AccessLogFormatter,
+                    "fmt": "%(asctime)s - uvicorn.access - %(levelname)s - %(message)s",
                 },
             },
             "handlers": {
