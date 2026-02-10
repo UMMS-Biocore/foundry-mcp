@@ -5,6 +5,7 @@
 ### Fixed
 
 - **421 "Invalid Host header" behind reverse proxy** - Disabled MCP SDK DNS rebinding protection (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`) which rejected non-localhost `Host` headers forwarded by Apache (`ProxyPreserveHost On`) and nginx. Auth is already handled by `CredentialsMiddleware`. See [python-sdk#1798](https://github.com/modelcontextprotocol/python-sdk/issues/1798).
+- **Uvicorn access log showing proxy IP instead of real client IP** - Enabled `proxy_headers=True` and `forwarded_allow_ips="*"` in uvicorn so access logs resolve the real client IP from `X-Forwarded-For` instead of the Docker-internal proxy address (e.g. `10.99.0.1`).
 
 ## [1.2.0] - 2026-02-05
 

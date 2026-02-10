@@ -1784,6 +1784,11 @@ Examples:
         host=args.host,
         port=args.port,
         log_config=get_uvicorn_log_config(),
+        # Trust X-Forwarded-For / X-Forwarded-Proto from reverse proxies so
+        # uvicorn's access log shows the real client IP instead of the proxy's
+        # Docker-internal address (e.g. 10.99.0.1).
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
 
 
