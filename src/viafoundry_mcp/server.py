@@ -850,11 +850,24 @@ def create_process_config(
     """
     Generate a full process configuration using menu group and parameters.
     Creates a complete process definition ready for creation.
-    
-    input_params and output_params: Array of objects to reference existing parameters.
-    Use 'id' field to reference by parameter ID (e.g., [{"id": 41}]),
-    or provide name/qualifier/fileType to match/create parameters.
-    Use list_process_parameters to find available parameter IDs.
+
+    input_params and output_params: Array of parameter dicts to reference existing parameters.
+    Each dict should contain the following fields:
+        - name (str, required): Name of an existing parameter to match (e.g., "reads", "FastQCout").
+          Use list_process_parameters or get_process_parameters to find available parameter names.
+        - qualifier (str, required): Parameter qualifier - "file", "set", "val", "each", or "env".
+        - fileType (str, required): File type of the parameter (e.g., "fastq", "html", "bam", "csv").
+        - displayName (str, optional): Display label for this parameter within the process context.
+          If omitted, defaults to the matched parameter's name.
+        - optional (bool, optional): Whether the parameter is optional. Defaults to false.
+        - test (str, optional): Test value for the parameter (e.g., "testfile.csv").
+
+    Parameters are matched by name + qualifier + fileType against existing server parameters.
+    If no match is found, a new parameter is automatically created.
+
+    Example:
+        input_params=[{"name": "reads", "displayName": "input_reads", "qualifier": "set", "fileType": "fastq"}]
+        output_params=[{"name": "FastQCout", "displayName": "fastqc_report", "qualifier": "file", "fileType": "html"}]
     """
     try:
         via_client = get_client()
@@ -945,6 +958,110 @@ def create_process(process_data: dict) -> str:
             
     except Exception as e:
         logger.error(f"Error creating process: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def update_process(process_id: str, process_data: dict) -> str:
+    """
+    Update an existing process/pipeline.
+    Modifies process configuration, scripts, or parameters.
+
+    WARNING: This modifies a persistent resource on the ViaFoundry server.
+    Changes affect all users who reference this process and cannot be undone
+    automatically. The tool performs an ownership check before updating —
+    if the process is owned by a different user, the update will be rejected.
+    Use duplicate_process to create your own copy instead.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Updating process {process_id}")
+
+        # --- Ownership guard: fetch process and verify before updating ---
+        try:
+            existing = via_client.process.get_process(process_id)
+            existing_data = serialize_response(existing)
+            process_owner_id = existing_data.get("owner_id")
+            process_name = existing_data.get("name", "unknown")
+            last_modified_by = existing_data.get("last_modified_user", "unknown")
+            logger.info(f"Process '{process_name}' (id={process_id}) owned by user_id={process_owner_id}, last modified by {last_modified_by}")
+        except Exception as e:
+            logger.error(f"Failed to fetch process {process_id} for ownership check: {e}")
+            return json.dumps({
+                "error": f"Cannot verify process ownership: {str(e)}",
+                "hint": "Ensure the process_id is valid and you have read access."
+            }, indent=2)
+
+        # Resolve current user identity
+        current_user_id = None
+        try:
+            user_info = via_client.call("GET", "/api/v1/users/me")
+            if isinstance(user_info, dict):
+                current_user_id = user_info.get("id")
+        except Exception:
+            pass  # Endpoint may not exist; fall through to token-based check
+
+        if current_user_id is None:
+            try:
+                user_info = via_client.call("GET", "/api/v1/user/profile")
+                if isinstance(user_info, dict):
+                    current_user_id = user_info.get("id")
+            except Exception:
+                pass
+
+        # Enforce ownership
+        if current_user_id is not None and process_owner_id is not None:
+            if int(current_user_id) != int(process_owner_id):
+                logger.warning(f"Ownership mismatch: current user {current_user_id} != process owner {process_owner_id}")
+                return json.dumps({
+                    "error": "Ownership check failed",
+                    "detail": f"Process '{process_name}' (id={process_id}) is owned by user_id={process_owner_id}. "
+                              f"Your user_id is {current_user_id}. You cannot update another user's process.",
+                    "hint": "Use duplicate_process to create your own copy, then modify that."
+                }, indent=2)
+        elif current_user_id is None and process_owner_id is not None:
+            logger.info(f"Could not resolve current user identity; ownership check skipped. Process owner_id={process_owner_id}")
+
+        # --- Validate and clean process_data ---
+        def remove_none(obj):
+            if isinstance(obj, dict):
+                return {k: remove_none(v) for k, v in obj.items() if v is not None}
+            elif isinstance(obj, list):
+                return [remove_none(item) for item in obj]
+            return obj
+
+        cleaned_data = remove_none(process_data)
+
+        from viafoundry.models.domain.process import ProcessConfig
+
+        try:
+            process_config = ProcessConfig.model_validate(cleaned_data)
+        except Exception as e:
+            logger.error(f"Failed to validate ProcessConfig for update: {e}")
+            return json.dumps({
+                "error": f"Invalid process configuration: {str(e)}",
+                "details": "The process_data must be a valid process configuration dict."
+            }, indent=2)
+
+        # --- Perform the update ---
+        try:
+            updated = via_client.process.update_process(process_id, process_config)
+            result = serialize_response(updated)
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            error_details = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+            }
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                error_details["api_response"] = e.response.text
+            if hasattr(e, 'status_code'):
+                error_details["status_code"] = e.status_code
+            logger.error(f"Error updating process: {error_details}")
+            return json.dumps(error_details, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error updating process: {e}")
         return json.dumps({"error": str(e)})
 
 
