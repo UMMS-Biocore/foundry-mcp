@@ -34,7 +34,7 @@ from .config import (
     set_credentials, validate_credentials, get_fixed_hostname,
     HEADER_HOSTNAME, HEADER_TOKEN
 )
-from .utils import serialize_response, MCP_TOKEN_PREFIX
+from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
 from .log import get_logger, get_uvicorn_log_config, mask_token
 
 
@@ -915,16 +915,8 @@ def create_process(process_data: dict) -> str:
         via_client = get_client()
         logger.info(f"Creating process: {process_data.get('name', 'unnamed')}")
         
-        # Remove None values from nested dicts
-        def remove_none(obj):
-            if isinstance(obj, dict):
-                return {k: remove_none(v) for k, v in obj.items() if v is not None}
-            elif isinstance(obj, list):
-                return [remove_none(item) for item in obj]
-            return obj
-        
         cleaned_data = remove_none(process_data)
-        
+
         # Import ProcessConfig model from SDK
         from viafoundry.models.domain.process import ProcessConfig
         
@@ -995,41 +987,28 @@ def update_process(process_id: str, process_data: dict) -> str:
         # Resolve current user identity
         current_user_id = None
         try:
-            user_info = via_client.call("GET", "/api/v1/users/me")
+            user_info = via_client.call(method="GET", endpoint="/api/auth/v1/user")
             if isinstance(user_info, dict):
                 current_user_id = user_info.get("id")
-        except Exception:
-            pass  # Endpoint may not exist; fall through to token-based check
-
-        if current_user_id is None:
-            try:
-                user_info = via_client.call("GET", "/api/v1/user/profile")
-                if isinstance(user_info, dict):
-                    current_user_id = user_info.get("id")
-            except Exception:
-                pass
+        except Exception as e:
+            logger.error(f"Failed to resolve current user identity: {e}")
+            return json.dumps({
+                "error": "Ownership check failed",
+                "detail": "Could not resolve current user identity. Update refused.",
+                "hint": "Ensure your ViaFoundry authentication is configured correctly."
+            }, indent=2)
 
         # Enforce ownership
-        if current_user_id is not None and process_owner_id is not None:
-            if int(current_user_id) != int(process_owner_id):
-                logger.warning(f"Ownership mismatch: current user {current_user_id} != process owner {process_owner_id}")
-                return json.dumps({
-                    "error": "Ownership check failed",
-                    "detail": f"Process '{process_name}' (id={process_id}) is owned by user_id={process_owner_id}. "
-                              f"Your user_id is {current_user_id}. You cannot update another user's process.",
-                    "hint": "Use duplicate_process to create your own copy, then modify that."
-                }, indent=2)
-        elif current_user_id is None and process_owner_id is not None:
-            logger.info(f"Could not resolve current user identity; ownership check skipped. Process owner_id={process_owner_id}")
+        if process_owner_id is not None and int(current_user_id) != int(process_owner_id):
+            logger.warning(f"Ownership mismatch: current user {current_user_id} != process owner {process_owner_id}")
+            return json.dumps({
+                "error": "Ownership check failed",
+                "detail": f"Process '{process_name}' (id={process_id}) is owned by user_id={process_owner_id}. "
+                          f"Your user_id is {current_user_id}. You cannot update another user's process.",
+                "hint": "Use duplicate_process to create your own copy, then modify that."
+            }, indent=2)
 
         # --- Validate and clean process_data ---
-        def remove_none(obj):
-            if isinstance(obj, dict):
-                return {k: remove_none(v) for k, v in obj.items() if v is not None}
-            elif isinstance(obj, list):
-                return [remove_none(item) for item in obj]
-            return obj
-
         cleaned_data = remove_none(process_data)
 
         from viafoundry.models.domain.process import ProcessConfig
