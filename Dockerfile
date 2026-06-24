@@ -2,7 +2,7 @@
 # ViaFoundry MCP Server - Docker Image
 # =============================================================================
 # Multi-stage build for smaller, secure images
-# 
+#
 # Build:  docker build -t viafoundry-mcp .
 # Run:    docker run -p 8705:8705 viafoundry-mcp
 # =============================================================================
@@ -14,6 +14,9 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
+# git is required to fetch the private viafoundry_sdk from GitHub
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 # Install build dependencies
 RUN pip install --no-cache-dir build wheel
 
@@ -23,6 +26,16 @@ COPY src/ ./src/
 
 # Build the wheel
 RUN python -m build --wheel
+
+# Build the private viafoundry_sdk dependency into a wheel.
+# The token is used ONLY in this builder stage (which is discarded in the final
+# image) and is never copied into the runtime layer. Pinned for reproducibility.
+ARG SDK_GIT_TOKEN
+ARG SDK_GIT_REF=e5baa08546ea
+RUN git config --global url."https://x-access-token:${SDK_GIT_TOKEN}@github.com/".insteadOf "https://github.com/" \
+    && pip wheel --no-deps --wheel-dir /build/dist \
+         "git+https://github.com/UMMS-Biocore/viafoundry-sdk.git@${SDK_GIT_REF}" \
+    && git config --global --unset url."https://x-access-token:${SDK_GIT_TOKEN}@github.com/".insteadOf
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
@@ -35,7 +48,7 @@ RUN groupadd --gid 1000 mcp && \
 
 WORKDIR /app
 
-# Install the wheel from builder stage
+# Install the mcp + viafoundry_sdk wheels from the builder stage
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 
@@ -57,4 +70,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Run the HTTP server (bind to 0.0.0.0 for Docker)
 CMD ["sh", "-c", "viafoundry-mcp --host 0.0.0.0 --port ${PORT}"]
-
