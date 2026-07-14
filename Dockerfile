@@ -14,8 +14,13 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# git is required to fetch the private viafoundry_sdk from GitHub
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# git is required to fetch the private viafoundry_sdk from GitHub.
+# Use HTTPS Debian mirrors first: some networks (e.g. proxied build hosts) filter
+# cleartext apt over HTTP:80 while allowing HTTPS; ca-certificates ship in the base.
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
+        [ -f "$f" ] && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' "$f"; \
+    done; \
+    apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 # Install build dependencies
 RUN pip install --no-cache-dir build wheel
