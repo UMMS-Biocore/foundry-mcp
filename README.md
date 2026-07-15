@@ -76,7 +76,7 @@ docker compose up --build -d
 
 ---
 
-## Available Tools (41 Total)
+## Available Tools (46 Total)
 
 ### 📊 Report Management (8 tools)
 
@@ -95,7 +95,7 @@ Access and manage ViaFoundry reports and files.
 
 ---
 
-### 🏃 Run Management (2 tools)
+### 🏃 Run Management (7 tools)
 
 Search and retrieve pipeline run information.
 
@@ -103,6 +103,11 @@ Search and retrieve pipeline run information.
 | ----------- | --------------------------------------------------------- |
 | `list_runs` | List and search for runs/pipeline executions              |
 | `get_run`   | Get detailed run info by ID or name (supports fuzzy match)|
+| `get_run_details`     | Full editable run: inputs, processOptions, permission, groupId |
+| `create_vmeta_dataset`| Create an empty vmeta dataset (returns _id for run inputs)      |
+| `duplicate_run`       | Duplicate a run; returns the new runId                          |
+| `update_run`          | Patch a run's inputs + processOptions (requires permission+groupId) |
+| `initiate_run`        | Launch a prepared run (newrun/resumerun/rerun)                 |
 
 ---
 
