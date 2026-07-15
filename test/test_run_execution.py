@@ -52,3 +52,14 @@ class TestCreateVmetaDataset:
             result = server.create_vmeta_dataset("   ")
         assert "error" in json.loads(result)
         client.call.assert_not_called()
+
+
+class TestDuplicateRun:
+    def test_posts_duplicate_endpoint(self):
+        client = _patched_client({"runId": 999})
+        with patch.object(server, "get_client", return_value=client):
+            result = server.duplicate_run("123")
+        client.call.assert_called_once_with(
+            method="POST", endpoint="/api/v1/run/123/duplicate", data={}
+        )
+        assert json.loads(result)["runId"] == 999

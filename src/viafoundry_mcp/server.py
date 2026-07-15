@@ -756,6 +756,26 @@ def create_vmeta_dataset(name: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def duplicate_run(run_id: str) -> str:
+    """
+    Duplicate an existing run and return the new runId. NOTE: the duplicate may
+    DROP the vmetaCollection input (e.g. `reads`) and copy processOptions with
+    empty arrays — re-add/patch them with update_run before initiate_run. Path
+    inputs (references, genomes) are copied verbatim and may point at the source
+    project's paths.
+    """
+    try:
+        via_client = get_client()
+        duplicated = via_client.call(
+            method="POST", endpoint=f"/api/v1/run/{run_id}/duplicate", data={}
+        )
+        return json.dumps(duplicated, indent=2)
+    except Exception as e:
+        logger.error(f"Error duplicating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
