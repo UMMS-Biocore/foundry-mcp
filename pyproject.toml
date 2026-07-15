@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "ViaScientific", email = "ayush.praveen@viascientific.com"}
+    {name = "UMMS Biocore"}
 ]
 keywords = ["mcp", "viafoundry", "bioinformatics", "workflow", "model-context-protocol"]
 classifiers = [
