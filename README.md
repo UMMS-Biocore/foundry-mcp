@@ -105,8 +105,8 @@ Search and retrieve pipeline run information.
 | `get_run`   | Get detailed run info by ID or name (supports fuzzy match)|
 | `get_run_details`     | Full editable run: inputs, processOptions, permission, groupId |
 | `create_vmeta_dataset`| Create an empty vmeta dataset (returns _id for run inputs)      |
-| `duplicate_run`       | Duplicate a run; returns the new runId                          |
-| `update_run`          | Patch a run's inputs + processOptions (requires permission+groupId) |
+| `duplicate_run`       | Duplicate a run into a project/pipeline; returns `duplicatedRunId` |
+| `update_run`          | Patch a run's inputs + processOptions (requires permission; groupId required only if permission=15) |
 | `initiate_run`        | Launch a prepared run (newrun/resumerun/rerun)                 |
 
 ---

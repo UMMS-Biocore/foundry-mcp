@@ -748,7 +748,7 @@ def create_vmeta_dataset(name: str) -> str:
         created = via_client.call(
             method="POST",
             endpoint="/api/v1/vmeta/dataset/create",
-            data={"name": name},
+            data={"name": name.strip()},
         )
         return json.dumps(created, indent=2)
     except Exception as e:
@@ -757,18 +757,23 @@ def create_vmeta_dataset(name: str) -> str:
 
 
 @mcp.tool()
-def duplicate_run(run_id: str) -> str:
+def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
     """
-    Duplicate an existing run and return the new runId. NOTE: the duplicate may
-    DROP the vmetaCollection input (e.g. `reads`) and copy processOptions with
-    empty arrays — re-add/patch them with update_run before initiate_run. Path
-    inputs (references, genomes) are copied verbatim and may point at the source
-    project's paths.
+    Duplicate an existing run into a target project/pipeline and return the
+    new run's `duplicatedRunId`. `project_id` and `pipeline_id` come from
+    get_run_details on the source run (its `projectId` and `mainPipeline.id`).
+    Use `duplicatedRunId` from the response when wiring into update_run or
+    initiate_run. NOTE: the duplicate may DROP the vmetaCollection input (e.g.
+    `reads`) and copy processOptions with empty arrays — re-add/patch them
+    with update_run before initiate_run. Path inputs (references, genomes) are
+    copied verbatim and may point at the source project's paths.
     """
     try:
         via_client = get_client()
         duplicated = via_client.call(
-            method="POST", endpoint=f"/api/v1/run/{run_id}/duplicate", data={}
+            method="POST",
+            endpoint=f"/api/v1/run/{run_id}/duplicate",
+            data={"projectId": project_id, "pipelineId": pipeline_id},
         )
         return json.dumps(duplicated, indent=2)
     except Exception as e:
@@ -780,9 +785,11 @@ def _validate_update_run(inputs, process_options, permission, group_id):
     """Raise ValueError if the update_run body would be rejected by the server."""
     if permission is None:
         raise ValueError("'permission' is required")
-    if group_id is None:
-        raise ValueError("'groupId' is required")
+    if permission == 15 and group_id is None:
+        raise ValueError("'groupId' is required when permission is GroupShared (15)")
     for i, inp in enumerate(inputs or []):
+        if not isinstance(inp, dict):
+            raise ValueError(f"inputs[{i}] must be an object")
         if inp.get("value") == "":
             raise ValueError(
                 f"inputs[{i}].value is not allowed to be empty; "
@@ -807,14 +814,15 @@ def update_run(
     inputs: list,
     process_options: dict,
     permission: int,
-    group_id: int,
+    group_id: int = None,
 ) -> str:
     """
-    Patch a run's inputs and processOptions (PATCH /save). BOTH `permission` and
-    `group_id` are REQUIRED (echo them from get_run_details). No input `value`
-    may be an empty string — use "NA" or omit the input. Within one
-    processOptions entry, all spreadsheet (list) columns must be equal length.
-    This mutates the run; confirm with the user before calling.
+    Patch a run's inputs and processOptions (PATCH /save). `permission` is
+    REQUIRED (echo it from get_run_details); `group_id` is REQUIRED only when
+    `permission` is 15 (GroupShared) — otherwise it may be omitted/None. No
+    input `value` may be an empty string — use "NA" or omit the input. Within
+    one processOptions entry, all spreadsheet (list) columns must be equal
+    length. This mutates the run; confirm with the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id)
@@ -849,7 +857,8 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
     try:
         if run_type not in _VALID_RUN_TYPES:
             raise ValueError(
-                f"runType must be one of {_VALID_RUN_TYPES}, got '{run_type}'"
+                f"runType must be one of {', '.join(_VALID_RUN_TYPES)}, "
+                f"got '{run_type}'"
             )
         via_client = get_client()
         started = via_client.call(

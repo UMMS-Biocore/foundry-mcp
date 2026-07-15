@@ -46,6 +46,16 @@ class TestCreateVmetaDataset:
         )
         assert json.loads(result)["_id"] == "6984ba1e8518d10eb6fe636d"
 
+    def test_strips_whitespace_from_name(self):
+        client = _patched_client({"_id": "6984ba1e8518d10eb6fe636d", "name": "run42"})
+        with patch.object(server, "get_client", return_value=client):
+            server.create_vmeta_dataset("  run42  ")
+        client.call.assert_called_once_with(
+            method="POST",
+            endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": "run42"},
+        )
+
     def test_rejects_empty_name(self):
         client = MagicMock()
         with patch.object(server, "get_client", return_value=client):
@@ -56,13 +66,15 @@ class TestCreateVmetaDataset:
 
 class TestDuplicateRun:
     def test_posts_duplicate_endpoint(self):
-        client = _patched_client({"runId": 999})
+        client = _patched_client({"duplicatedRunId": 999})
         with patch.object(server, "get_client", return_value=client):
-            result = server.duplicate_run("123")
+            result = server.duplicate_run("123", project_id=7, pipeline_id=1408)
         client.call.assert_called_once_with(
-            method="POST", endpoint="/api/v1/run/123/duplicate", data={}
+            method="POST",
+            endpoint="/api/v1/run/123/duplicate",
+            data={"projectId": 7, "pipelineId": 1408},
         )
-        assert json.loads(result)["runId"] == 999
+        assert json.loads(result)["duplicatedRunId"] == 999
 
 
 class TestUpdateRun:
@@ -71,7 +83,7 @@ class TestUpdateRun:
             run_id="999",
             inputs=[{"id": 1, "type": "input", "name": "genome", "value": "hg38"}],
             process_options={"5": {"sample_id": ["a", "b"], "group": ["g", "g"]}},
-            permission=2,
+            permission=3,
             group_id=5,
         )
 
@@ -86,7 +98,7 @@ class TestUpdateRun:
             data={
                 "inputs": args["inputs"],
                 "processOptions": args["process_options"],
-                "permission": 2,
+                "permission": 3,
                 "groupId": 5,
             },
         )
@@ -104,11 +116,31 @@ class TestUpdateRun:
     def test_rejects_missing_group_id(self):
         client = MagicMock()
         args = self._valid_args()
+        args["permission"] = 15  # GroupShared: groupId is required
         args["group_id"] = None
         with patch.object(server, "get_client", return_value=client):
             result = server.update_run(**args)
         assert "groupId" in json.loads(result)["error"]
         client.call.assert_not_called()
+
+    def test_allows_missing_group_id_when_not_group_shared(self):
+        client = _patched_client({"ok": True})
+        args = self._valid_args()
+        args["permission"] = 3  # UserOwned: groupId is optional
+        args["group_id"] = None
+        with patch.object(server, "get_client", return_value=client):
+            result = server.update_run(**args)
+        client.call.assert_called_once_with(
+            method="PATCH",
+            endpoint="/api/v1/run/999/save",
+            data={
+                "inputs": args["inputs"],
+                "processOptions": args["process_options"],
+                "permission": 3,
+                "groupId": None,
+            },
+        )
+        assert json.loads(result) == {"ok": True}
 
     def test_rejects_mismatched_spreadsheet_arrays(self):
         client = MagicMock()
@@ -117,6 +149,15 @@ class TestUpdateRun:
         with patch.object(server, "get_client", return_value=client):
             result = server.update_run(**args)
         assert "length" in json.loads(result)["error"].lower()
+        client.call.assert_not_called()
+
+    def test_rejects_non_dict_input_item(self):
+        client = MagicMock()
+        args = self._valid_args()
+        args["inputs"] = ["not-a-dict"]
+        with patch.object(server, "get_client", return_value=client):
+            result = server.update_run(**args)
+        assert "inputs[0]" in json.loads(result)["error"]
         client.call.assert_not_called()
 
 
