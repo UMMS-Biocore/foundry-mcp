@@ -733,6 +733,29 @@ def get_run_details(run_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def create_vmeta_dataset(name: str) -> str:
+    """
+    Create an empty vmeta dataset (study-tracker dataset). Returns its `_id`,
+    which is used as the `vmetaCollectionId` of a run's file input. Add file
+    rows afterward with add_files_to_dataset. Name must be non-empty and unique
+    in the project (lowercase letters, digits, '-' and '_' recommended).
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        via_client = get_client()
+        created = via_client.call(
+            method="POST",
+            endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name},
+        )
+        return json.dumps(created, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating vmeta dataset '{name}': {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================

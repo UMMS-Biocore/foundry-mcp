@@ -32,3 +32,23 @@ class TestGetRunDetails:
         with patch.object(server, "get_client", return_value=client):
             result = server.get_run_details("123")
         assert json.loads(result) == {"error": "boom"}
+
+
+class TestCreateVmetaDataset:
+    def test_posts_dataset_create_with_name(self):
+        client = _patched_client({"_id": "6984ba1e8518d10eb6fe636d", "name": "run42"})
+        with patch.object(server, "get_client", return_value=client):
+            result = server.create_vmeta_dataset("run42")
+        client.call.assert_called_once_with(
+            method="POST",
+            endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": "run42"},
+        )
+        assert json.loads(result)["_id"] == "6984ba1e8518d10eb6fe636d"
+
+    def test_rejects_empty_name(self):
+        client = MagicMock()
+        with patch.object(server, "get_client", return_value=client):
+            result = server.create_vmeta_dataset("   ")
+        assert "error" in json.loads(result)
+        client.call.assert_not_called()
