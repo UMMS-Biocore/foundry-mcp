@@ -710,6 +710,169 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
 
 
 # ============================================================================
+# Run Execution Tools
+# ============================================================================
+
+
+@mcp.tool()
+def get_run_details(run_id: str) -> str:
+    """
+    Get the full execution details of a run: inputs[], processOptions{},
+    permission, groupId, and mainPipeline. Use this before duplicating or
+    updating a run — it returns the shape needed to build an update_run body.
+    (get_run returns summary/search info only; this returns the editable run.)
+    """
+    try:
+        via_client = get_client()
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details"
+        )
+        return json.dumps(details, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting run details for {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_vmeta_dataset(name: str) -> str:
+    """
+    Create an empty vmeta dataset (study-tracker dataset). Returns its `_id`,
+    which is used as the `vmetaCollectionId` of a run's file input. Add file
+    rows afterward with add_files_to_dataset. Name must be non-empty and unique
+    in the project (lowercase letters, digits, '-' and '_' recommended).
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        via_client = get_client()
+        created = via_client.call(
+            method="POST",
+            endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name.strip()},
+        )
+        return json.dumps(created, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating vmeta dataset '{name}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
+    """
+    Duplicate an existing run into a target project/pipeline and return the
+    new run's `duplicatedRunId`. `project_id` and `pipeline_id` come from
+    get_run_details on the source run (its `projectId` and `mainPipeline.id`).
+    Use `duplicatedRunId` from the response when wiring into update_run or
+    initiate_run. NOTE: the duplicate may DROP the vmetaCollection input (e.g.
+    `reads`) and copy processOptions with empty arrays — re-add/patch them
+    with update_run before initiate_run. Path inputs (references, genomes) are
+    copied verbatim and may point at the source project's paths.
+    """
+    try:
+        via_client = get_client()
+        duplicated = via_client.call(
+            method="POST",
+            endpoint=f"/api/v1/run/{run_id}/duplicate",
+            data={"projectId": project_id, "pipelineId": pipeline_id},
+        )
+        return json.dumps(duplicated, indent=2)
+    except Exception as e:
+        logger.error(f"Error duplicating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+def _validate_update_run(inputs, process_options, permission, group_id):
+    """Raise ValueError if the update_run body would be rejected by the server."""
+    if permission is None:
+        raise ValueError("'permission' is required")
+    if permission == 15 and group_id is None:
+        raise ValueError("'groupId' is required when permission is GroupShared (15)")
+    for i, inp in enumerate(inputs or []):
+        if not isinstance(inp, dict):
+            raise ValueError(f"inputs[{i}] must be an object")
+        if inp.get("value") == "":
+            raise ValueError(
+                f"inputs[{i}].value is not allowed to be empty; "
+                f"use 'NA' or omit the input"
+            )
+    for key, entry in (process_options or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        lengths = {
+            k: len(v) for k, v in entry.items() if isinstance(v, list)
+        }
+        if len(set(lengths.values())) > 1:
+            raise ValueError(
+                f"processOptions['{key}'] spreadsheet arrays must all have the "
+                f"same length; got {lengths}"
+            )
+
+
+@mcp.tool()
+def update_run(
+    run_id: str,
+    inputs: list,
+    process_options: dict,
+    permission: int,
+    group_id: int = None,
+) -> str:
+    """
+    Patch a run's inputs and processOptions (PATCH /save). `permission` is
+    REQUIRED (echo it from get_run_details); `group_id` is REQUIRED only when
+    `permission` is 15 (GroupShared) — otherwise it may be omitted/None. No
+    input `value` may be an empty string — use "NA" or omit the input. Within
+    one processOptions entry, all spreadsheet (list) columns must be equal
+    length. This mutates the run; confirm with the user before calling.
+    """
+    try:
+        _validate_update_run(inputs, process_options, permission, group_id)
+        via_client = get_client()
+        saved = via_client.call(
+            method="PATCH",
+            endpoint=f"/api/v1/run/{run_id}/save",
+            data={
+                "inputs": inputs,
+                "processOptions": process_options,
+                "permission": permission,
+                "groupId": group_id,
+            },
+        )
+        return json.dumps(saved, indent=2)
+    except Exception as e:
+        logger.error(f"Error updating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+_VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")
+
+
+@mcp.tool()
+def initiate_run(run_id: str, run_type: str = "newrun") -> str:
+    """
+    Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
+    (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
+    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
+    confirm with the user before calling.
+    """
+    try:
+        if run_type not in _VALID_RUN_TYPES:
+            raise ValueError(
+                f"runType must be one of {', '.join(_VALID_RUN_TYPES)}, "
+                f"got '{run_type}'"
+            )
+        via_client = get_client()
+        started = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/initiate-run",
+            data={"runId": int(run_id), "runType": run_type},
+        )
+        return json.dumps(started, indent=2)
+    except Exception as e:
+        logger.error(f"Error initiating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Run-execution tools: `get_run_details`, `create_vmeta_dataset`, `duplicate_run`,
+  `update_run`, `initiate_run` — enables duplicating and launching runs via MCP
+  (previously runs were read-only). `update_run` enforces the `permission`+`groupId`
+  requirement, rejects empty-string input values, and checks equal-length
+  spreadsheet arrays.
+
 ## [1.2.2] - 2026-03-06
 
 ### Added
