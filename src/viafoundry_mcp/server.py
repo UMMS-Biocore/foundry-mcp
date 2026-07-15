@@ -710,6 +710,30 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
 
 
 # ============================================================================
+# Run Execution Tools
+# ============================================================================
+
+
+@mcp.tool()
+def get_run_details(run_id: str) -> str:
+    """
+    Get the full execution details of a run: inputs[], processOptions{},
+    permission, groupId, and mainPipeline. Use this before duplicating or
+    updating a run — it returns the shape needed to build an update_run body.
+    (get_run returns summary/search info only; this returns the editable run.)
+    """
+    try:
+        via_client = get_client()
+        details = via_client.call(
+            method="GET", endpoint=f"/api/run/v1/{run_id}/details"
+        )
+        return json.dumps(details, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting run details for {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
 
