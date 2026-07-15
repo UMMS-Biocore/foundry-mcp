@@ -776,6 +776,65 @@ def duplicate_run(run_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _validate_update_run(inputs, process_options, permission, group_id):
+    """Raise ValueError if the update_run body would be rejected by the server."""
+    if permission is None:
+        raise ValueError("'permission' is required")
+    if group_id is None:
+        raise ValueError("'groupId' is required")
+    for i, inp in enumerate(inputs or []):
+        if inp.get("value") == "":
+            raise ValueError(
+                f"inputs[{i}].value is not allowed to be empty; "
+                f"use 'NA' or omit the input"
+            )
+    for key, entry in (process_options or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        lengths = {
+            k: len(v) for k, v in entry.items() if isinstance(v, list)
+        }
+        if len(set(lengths.values())) > 1:
+            raise ValueError(
+                f"processOptions['{key}'] spreadsheet arrays must all have the "
+                f"same length; got {lengths}"
+            )
+
+
+@mcp.tool()
+def update_run(
+    run_id: str,
+    inputs: list,
+    process_options: dict,
+    permission: int,
+    group_id: int,
+) -> str:
+    """
+    Patch a run's inputs and processOptions (PATCH /save). BOTH `permission` and
+    `group_id` are REQUIRED (echo them from get_run_details). No input `value`
+    may be an empty string — use "NA" or omit the input. Within one
+    processOptions entry, all spreadsheet (list) columns must be equal length.
+    This mutates the run; confirm with the user before calling.
+    """
+    try:
+        _validate_update_run(inputs, process_options, permission, group_id)
+        via_client = get_client()
+        saved = via_client.call(
+            method="PATCH",
+            endpoint=f"/api/v1/run/{run_id}/save",
+            data={
+                "inputs": inputs,
+                "processOptions": process_options,
+                "permission": permission,
+                "groupId": group_id,
+            },
+        )
+        return json.dumps(saved, indent=2)
+    except Exception as e:
+        logger.error(f"Error updating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
