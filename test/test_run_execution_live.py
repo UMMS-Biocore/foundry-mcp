@@ -56,12 +56,11 @@ def test_get_run_details_roundtrip():
 def test_duplicate_then_update_run_chain():
     """duplicate_run -> update_run against a live instance (no initiate_run).
 
-    Verified end-to-end on staging 2026-07-15: RNA-seq run 11116 -> duplicate
-    12193 in project 1841. Note: update_run (PATCH /save) triggers the backend's
-    stale-input cleanup, so the duplicate's input count may DROP after the patch
-    (inputs whose names are not in the pipeline's current variable set are
-    removed). That is expected; we assert the run stays coherent, not that the
-    input count is preserved.
+    Note: update_run (PATCH /save) triggers the backend's stale-input cleanup,
+    so the duplicate's input count may DROP after the patch (inputs whose names
+    are not in the pipeline's current variable set are removed). That is
+    expected; we assert the run stays coherent, not that the input count is
+    preserved.
     """
     config.set_credentials(
         os.environ["VIAFOUNDRY_LIVE_HOST"], os.environ["VIAFOUNDRY_LIVE_TOKEN"]
