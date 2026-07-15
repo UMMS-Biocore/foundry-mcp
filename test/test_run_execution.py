@@ -22,7 +22,7 @@ class TestGetRunDetails:
         with patch.object(server, "get_client", return_value=client):
             result = server.get_run_details("123")
         client.call.assert_called_once_with(
-            method="GET", endpoint="/api/run/v1/123/details"
+            method="GET", endpoint="/api/v1/run/123/details"
         )
         assert json.loads(result)["groupId"] == 5
 

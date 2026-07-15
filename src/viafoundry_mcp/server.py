@@ -725,7 +725,7 @@ def get_run_details(run_id: str) -> str:
     try:
         via_client = get_client()
         details = via_client.call(
-            method="GET", endpoint=f"/api/run/v1/{run_id}/details"
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details"
         )
         return json.dumps(details, indent=2)
     except Exception as e:
