@@ -77,6 +77,7 @@ class TestMCPTools:
             'create_process_config',
             'create_process',
             'create_process_parameter',
+            'update_process',
         ]
         
         for tool in expected_process_tools:

@@ -87,3 +87,12 @@ def serialize_response(obj, _visited=None, _depth: int = 0):
             _visited.discard(obj_id)
     
     return str(obj)
+
+
+def remove_none(obj):
+    """Recursively remove None values from nested dicts and lists."""
+    if isinstance(obj, dict):
+        return {k: remove_none(v) for k, v in obj.items() if v is not None}
+    elif isinstance(obj, list):
+        return [remove_none(item) for item in obj]
+    return obj

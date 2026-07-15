@@ -9,6 +9,17 @@
   requirement, rejects empty-string input values, and checks equal-length
   spreadsheet arrays.
 
+## [1.2.2] - 2026-03-06
+
+### Added
+
+- **`update_process`** - New tool to update an existing process with ownership guardrails to prevent cross-user modifications
+
+### Changed
+
+- **`remove_none` utility** - Extracted shared `remove_none` helper from `create_process` and `update_process` into `utils.py`
+- **User identity endpoint** - Use correct `api/auth/v1/user` endpoint for resolving current user identity
+
 ## [1.2.1] - 2026-02-10
 
 ### Fixed
