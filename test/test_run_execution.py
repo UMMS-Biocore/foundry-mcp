@@ -118,3 +118,29 @@ class TestUpdateRun:
             result = server.update_run(**args)
         assert "length" in json.loads(result)["error"].lower()
         client.call.assert_not_called()
+
+
+class TestInitiateRun:
+    def test_posts_initiate_run_with_int_run_id(self):
+        client = _patched_client({"status": "ok", "runUUID": "abc-123"})
+        with patch.object(server, "get_client", return_value=client):
+            result = server.initiate_run("999", "newrun")
+        client.call.assert_called_once_with(
+            method="POST",
+            endpoint="/api/v1/run/initiate-run",
+            data={"runId": 999, "runType": "newrun"},
+        )
+        assert json.loads(result)["runUUID"] == "abc-123"
+
+    def test_defaults_to_newrun(self):
+        client = _patched_client({"status": "ok"})
+        with patch.object(server, "get_client", return_value=client):
+            server.initiate_run("999")
+        assert client.call.call_args.kwargs["data"]["runType"] == "newrun"
+
+    def test_rejects_invalid_run_type(self):
+        client = MagicMock()
+        with patch.object(server, "get_client", return_value=client):
+            result = server.initiate_run("999", "bogus")
+        assert "runType" in json.loads(result)["error"]
+        client.call.assert_not_called()

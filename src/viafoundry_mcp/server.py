@@ -835,6 +835,34 @@ def update_run(
         return json.dumps({"error": str(e)})
 
 
+_VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")
+
+
+@mcp.tool()
+def initiate_run(run_id: str, run_type: str = "newrun") -> str:
+    """
+    Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
+    (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
+    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
+    confirm with the user before calling.
+    """
+    try:
+        if run_type not in _VALID_RUN_TYPES:
+            raise ValueError(
+                f"runType must be one of {_VALID_RUN_TYPES}, got '{run_type}'"
+            )
+        via_client = get_client()
+        started = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/initiate-run",
+            data={"runId": int(run_id), "runType": run_type},
+        )
+        return json.dumps(started, indent=2)
+    except Exception as e:
+        logger.error(f"Error initiating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
