@@ -35,13 +35,21 @@ docker compose up --build -d
 
 ---
 
-## Getting Your Token
+## Getting Your Personal Access Token
 
-1. Log in to your ViaFoundry instance
-2. Go to **Profile** → **Personal Access Tokens**
-3. Create a new token and copy it
+To connect any AI assistant to ViaFoundry, you need a Personal Access Token (PAT) configured for MCP usage.
 
-> **Note:** MCP tokens must start with the `via_mcp_` prefix. If your token doesn't have this prefix, be sure to generate a new MCP token from ViaFoundry.
+**1.** Log in to your ViaFoundry instance and click your **Profile** icon in the top-left corner. Select **Personal Access Tokens**.
+
+**2.** Click **Create New Token**. Fill in the following:
+
+- **Token Name** — A descriptive label (e.g., "Claude Code MCP", "Cursor MCP").
+- **Expiration Date** — Choose when the token expires. Default is 30 days; maximum is 1 year.
+- **Token Usage** — Select **MCP (Model Context Protocol)**. This generates a token with the required `via_mcp_` prefix for use with AI assistants.
+
+**3.** Click **Create Token**. Your token will be displayed once — copy it immediately and store it securely. You will not be able to view it again.
+
+**4.** After creation, ViaFoundry provides a ready-to-use MCP configuration snippet under **Usage Examples**. Use the **MCP** tab and select your client (Cursor or VS Code) from the dropdown to get a config block you can copy directly into your editor. For Claude Code and Claude Desktop, see the configuration sections below.
 
 ### Explore Pipelines
 
@@ -76,7 +84,7 @@ docker compose up --build -d
 
 ---
 
-## Available Tools (41 Total)
+## Available Tools (47 Total)
 
 ### 📊 Report Management (8 tools)
 
@@ -95,7 +103,7 @@ Access and manage ViaFoundry reports and files.
 
 ---
 
-### 🏃 Run Management (2 tools)
+### 🏃 Run Management (7 tools)
 
 Search and retrieve pipeline run information.
 
@@ -103,10 +111,15 @@ Search and retrieve pipeline run information.
 | ----------- | --------------------------------------------------------- |
 | `list_runs` | List and search for runs/pipeline executions              |
 | `get_run`   | Get detailed run info by ID or name (supports fuzzy match)|
+| `get_run_details`     | Full editable run: inputs, processOptions, permission, groupId |
+| `create_vmeta_dataset`| Create an empty vmeta dataset (returns _id for run inputs)      |
+| `duplicate_run`       | Duplicate a run into a project/pipeline; returns `duplicatedRunId` |
+| `update_run`          | Patch a run's inputs + processOptions (requires permission; groupId required only if permission=15) |
+| `initiate_run`        | Launch a prepared run (newrun/resumerun/rerun)                 |
 
 ---
 
-### 🔬 Process & Pipeline Management (9 tools)
+### 🔬 Process & Pipeline Management (10 tools)
 
 Create, explore, and manage bioinformatics pipelines.
 
@@ -117,6 +130,7 @@ Create, explore, and manage bioinformatics pipelines.
 | `get_process_revisions`     | Get version history for a pipeline                  |
 | `duplicate_process`         | Clone an existing pipeline for modification         |
 | `create_process`            | Create a new custom process/pipeline                |
+| `update_process`            | Update an existing process (with ownership guard)   |
 | `create_process_config`     | Generate process configuration helper               |
 | `list_process_parameters`   | List all available parameter definitions            |
 | `get_process_parameters`    | Get parameters filtered by name, type, or qualifier |
@@ -323,19 +337,104 @@ AI: The collection has 12 metadata fields:
 
 ## Configuration
 
+### Claude Code
+
+Claude Code supports MCP servers at two levels — project-scoped (shared with your team) and global (available across all your projects).
+
+**Option A: CLI command** — The fastest way to add the ViaFoundry MCP server:
+
+```bash
+# Add globally (available in all projects)
+claude mcp add --transport http --scope user viafoundry \
+  --header "X-ViaFoundry-Token: via_mcp_your-personal-access-token" \
+  https://mcp.viafoundry.com/mcp
+
+# Or add to the current project only
+claude mcp add --transport http --scope project viafoundry \
+  --header "X-ViaFoundry-Token: via_mcp_your-personal-access-token" \
+  https://mcp.viafoundry.com/mcp
+```
+
+**Option B: Manual configuration** — Add the config JSON directly to the appropriate file:
+
+*Project-level* — Create a `.mcp.json` file in your project root. This makes ViaFoundry tools available to anyone who opens this project in Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "type": "http",
+      "url": "https://mcp.viafoundry.com/mcp",
+      "headers": {
+        "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+*Global* — Add the same configuration to `~/.claude.json` to make ViaFoundry tools available across all your projects:
+
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "type": "http",
+      "url": "https://mcp.viafoundry.com/mcp",
+      "headers": {
+        "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+> **Note:** The MCP server URL depends on your ViaFoundry deployment. For GCP-hosted instances, use `https://mcp.gcp.viafoundry.com/mcp` instead. Check with your ViaFoundry administrator for the correct URL.
+
+### Claude Desktop
+
+Edit the Claude Desktop configuration file:
+
+- **Mac:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "viafoundry": {
+      "url": "https://mcp.viafoundry.com/mcp",
+      "headers": {
+        "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving for the changes to take effect.
+
+### Cursor / VS Code
+
+ViaFoundry generates a ready-to-use config snippet when you create your token — select **Cursor** or **VS Code** from the dropdown and click **Copy Code**. Paste it into:
+
+- **Cursor:** `~/.cursor/mcp.json`
+- **VS Code:** Your MCP extension config file
+
 ### Custom Port
 
 ```bash
 PORT=9000 docker compose up
 ```
 
-### Client Config Locations
+### All Client Config Locations
 
 | Client                   | Config File                                                       |
 | ------------------------ | ----------------------------------------------------------------- |
-| Cursor                   | `~/.cursor/mcp.json`                                              |
+| Claude Code (project)    | `.mcp.json` (project root)                                        |
+| Claude Code (global)     | `~/.claude.json`                                                   |
 | Claude Desktop (Mac)     | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json`                     |
+| Cursor                   | `~/.cursor/mcp.json`                                              |
 | VSCode Continue          | `~/.continue/config.json`                                         |
 
 ---

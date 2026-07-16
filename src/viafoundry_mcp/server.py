@@ -34,7 +34,7 @@ from .config import (
     set_credentials, validate_credentials, get_fixed_hostname,
     HEADER_HOSTNAME, HEADER_TOKEN
 )
-from .utils import serialize_response, MCP_TOKEN_PREFIX
+from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
 from .log import get_logger, get_uvicorn_log_config, mask_token
 
 
@@ -739,6 +739,169 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
 
 
 # ============================================================================
+# Run Execution Tools
+# ============================================================================
+
+
+@mcp.tool()
+def get_run_details(run_id: str) -> str:
+    """
+    Get the full execution details of a run: inputs[], processOptions{},
+    permission, groupId, and mainPipeline. Use this before duplicating or
+    updating a run — it returns the shape needed to build an update_run body.
+    (get_run returns summary/search info only; this returns the editable run.)
+    """
+    try:
+        via_client = get_client()
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details"
+        )
+        return json.dumps(details, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting run details for {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_vmeta_dataset(name: str) -> str:
+    """
+    Create an empty vmeta dataset (study-tracker dataset). Returns its `_id`,
+    which is used as the `vmetaCollectionId` of a run's file input. Add file
+    rows afterward with add_files_to_dataset. Name must be non-empty and unique
+    in the project (lowercase letters, digits, '-' and '_' recommended).
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        via_client = get_client()
+        created = via_client.call(
+            method="POST",
+            endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name.strip()},
+        )
+        return json.dumps(created, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating vmeta dataset '{name}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
+    """
+    Duplicate an existing run into a target project/pipeline and return the
+    new run's `duplicatedRunId`. `project_id` and `pipeline_id` come from
+    get_run_details on the source run (its `projectId` and `mainPipeline.id`).
+    Use `duplicatedRunId` from the response when wiring into update_run or
+    initiate_run. NOTE: the duplicate may DROP the vmetaCollection input (e.g.
+    `reads`) and copy processOptions with empty arrays — re-add/patch them
+    with update_run before initiate_run. Path inputs (references, genomes) are
+    copied verbatim and may point at the source project's paths.
+    """
+    try:
+        via_client = get_client()
+        duplicated = via_client.call(
+            method="POST",
+            endpoint=f"/api/v1/run/{run_id}/duplicate",
+            data={"projectId": project_id, "pipelineId": pipeline_id},
+        )
+        return json.dumps(duplicated, indent=2)
+    except Exception as e:
+        logger.error(f"Error duplicating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+def _validate_update_run(inputs, process_options, permission, group_id):
+    """Raise ValueError if the update_run body would be rejected by the server."""
+    if permission is None:
+        raise ValueError("'permission' is required")
+    if permission == 15 and group_id is None:
+        raise ValueError("'groupId' is required when permission is GroupShared (15)")
+    for i, inp in enumerate(inputs or []):
+        if not isinstance(inp, dict):
+            raise ValueError(f"inputs[{i}] must be an object")
+        if inp.get("value") == "":
+            raise ValueError(
+                f"inputs[{i}].value is not allowed to be empty; "
+                f"use 'NA' or omit the input"
+            )
+    for key, entry in (process_options or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        lengths = {
+            k: len(v) for k, v in entry.items() if isinstance(v, list)
+        }
+        if len(set(lengths.values())) > 1:
+            raise ValueError(
+                f"processOptions['{key}'] spreadsheet arrays must all have the "
+                f"same length; got {lengths}"
+            )
+
+
+@mcp.tool()
+def update_run(
+    run_id: str,
+    inputs: list,
+    process_options: dict,
+    permission: int,
+    group_id: int = None,
+) -> str:
+    """
+    Patch a run's inputs and processOptions (PATCH /save). `permission` is
+    REQUIRED (echo it from get_run_details); `group_id` is REQUIRED only when
+    `permission` is 15 (GroupShared) — otherwise it may be omitted/None. No
+    input `value` may be an empty string — use "NA" or omit the input. Within
+    one processOptions entry, all spreadsheet (list) columns must be equal
+    length. This mutates the run; confirm with the user before calling.
+    """
+    try:
+        _validate_update_run(inputs, process_options, permission, group_id)
+        via_client = get_client()
+        saved = via_client.call(
+            method="PATCH",
+            endpoint=f"/api/v1/run/{run_id}/save",
+            data={
+                "inputs": inputs,
+                "processOptions": process_options,
+                "permission": permission,
+                "groupId": group_id,
+            },
+        )
+        return json.dumps(saved, indent=2)
+    except Exception as e:
+        logger.error(f"Error updating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+_VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")
+
+
+@mcp.tool()
+def initiate_run(run_id: str, run_type: str = "newrun") -> str:
+    """
+    Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
+    (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
+    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
+    confirm with the user before calling.
+    """
+    try:
+        if run_type not in _VALID_RUN_TYPES:
+            raise ValueError(
+                f"runType must be one of {', '.join(_VALID_RUN_TYPES)}, "
+                f"got '{run_type}'"
+            )
+        via_client = get_client()
+        started = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/initiate-run",
+            data={"runId": int(run_id), "runType": run_type},
+        )
+        return json.dumps(started, indent=2)
+    except Exception as e:
+        logger.error(f"Error initiating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
 
@@ -879,11 +1042,24 @@ def create_process_config(
     """
     Generate a full process configuration using menu group and parameters.
     Creates a complete process definition ready for creation.
-    
-    input_params and output_params: Array of objects to reference existing parameters.
-    Use 'id' field to reference by parameter ID (e.g., [{"id": 41}]),
-    or provide name/qualifier/fileType to match/create parameters.
-    Use list_process_parameters to find available parameter IDs.
+
+    input_params and output_params: Array of parameter dicts to reference existing parameters.
+    Each dict should contain the following fields:
+        - name (str, required): Name of an existing parameter to match (e.g., "reads", "FastQCout").
+          Use list_process_parameters or get_process_parameters to find available parameter names.
+        - qualifier (str, required): Parameter qualifier - "file", "set", "val", "each", or "env".
+        - fileType (str, required): File type of the parameter (e.g., "fastq", "html", "bam", "csv").
+        - displayName (str, optional): Display label for this parameter within the process context.
+          If omitted, defaults to the matched parameter's name.
+        - optional (bool, optional): Whether the parameter is optional. Defaults to false.
+        - test (str, optional): Test value for the parameter (e.g., "testfile.csv").
+
+    Parameters are matched by name + qualifier + fileType against existing server parameters.
+    If no match is found, a new parameter is automatically created.
+
+    Example:
+        input_params=[{"name": "reads", "displayName": "input_reads", "qualifier": "set", "fileType": "fastq"}]
+        output_params=[{"name": "FastQCout", "displayName": "fastqc_report", "qualifier": "file", "fileType": "html"}]
     """
     try:
         via_client = get_client()
@@ -931,16 +1107,8 @@ def create_process(process_data: dict) -> str:
         via_client = get_client()
         logger.info(f"Creating process: {process_data.get('name', 'unnamed')}")
         
-        # Remove None values from nested dicts
-        def remove_none(obj):
-            if isinstance(obj, dict):
-                return {k: remove_none(v) for k, v in obj.items() if v is not None}
-            elif isinstance(obj, list):
-                return [remove_none(item) for item in obj]
-            return obj
-        
         cleaned_data = remove_none(process_data)
-        
+
         # Import ProcessConfig model from SDK
         from viafoundry.models.domain.process import ProcessConfig
         
@@ -974,6 +1142,97 @@ def create_process(process_data: dict) -> str:
             
     except Exception as e:
         logger.error(f"Error creating process: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def update_process(process_id: str, process_data: dict) -> str:
+    """
+    Update an existing process/pipeline.
+    Modifies process configuration, scripts, or parameters.
+
+    WARNING: This modifies a persistent resource on the ViaFoundry server.
+    Changes affect all users who reference this process and cannot be undone
+    automatically. The tool performs an ownership check before updating —
+    if the process is owned by a different user, the update will be rejected.
+    Use duplicate_process to create your own copy instead.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Updating process {process_id}")
+
+        # --- Ownership guard: fetch process and verify before updating ---
+        try:
+            existing = via_client.process.get_process(process_id)
+            existing_data = serialize_response(existing)
+            process_owner_id = existing_data.get("owner_id")
+            process_name = existing_data.get("name", "unknown")
+            last_modified_by = existing_data.get("last_modified_user", "unknown")
+            logger.info(f"Process '{process_name}' (id={process_id}) owned by user_id={process_owner_id}, last modified by {last_modified_by}")
+        except Exception as e:
+            logger.error(f"Failed to fetch process {process_id} for ownership check: {e}")
+            return json.dumps({
+                "error": f"Cannot verify process ownership: {str(e)}",
+                "hint": "Ensure the process_id is valid and you have read access."
+            }, indent=2)
+
+        # Resolve current user identity
+        current_user_id = None
+        try:
+            user_info = via_client.call(method="GET", endpoint="/api/auth/v1/user")
+            if isinstance(user_info, dict):
+                current_user_id = user_info.get("id")
+        except Exception as e:
+            logger.error(f"Failed to resolve current user identity: {e}")
+            return json.dumps({
+                "error": "Ownership check failed",
+                "detail": "Could not resolve current user identity. Update refused.",
+                "hint": "Ensure your ViaFoundry authentication is configured correctly."
+            }, indent=2)
+
+        # Enforce ownership
+        if process_owner_id is not None and int(current_user_id) != int(process_owner_id):
+            logger.warning(f"Ownership mismatch: current user {current_user_id} != process owner {process_owner_id}")
+            return json.dumps({
+                "error": "Ownership check failed",
+                "detail": f"Process '{process_name}' (id={process_id}) is owned by user_id={process_owner_id}. "
+                          f"Your user_id is {current_user_id}. You cannot update another user's process.",
+                "hint": "Use duplicate_process to create your own copy, then modify that."
+            }, indent=2)
+
+        # --- Validate and clean process_data ---
+        cleaned_data = remove_none(process_data)
+
+        from viafoundry.models.domain.process import ProcessConfig
+
+        try:
+            process_config = ProcessConfig.model_validate(cleaned_data)
+        except Exception as e:
+            logger.error(f"Failed to validate ProcessConfig for update: {e}")
+            return json.dumps({
+                "error": f"Invalid process configuration: {str(e)}",
+                "details": "The process_data must be a valid process configuration dict."
+            }, indent=2)
+
+        # --- Perform the update ---
+        try:
+            updated = via_client.process.update_process(process_id, process_config)
+            result = serialize_response(updated)
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            error_details = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+            }
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                error_details["api_response"] = e.response.text
+            if hasattr(e, 'status_code'):
+                error_details["status_code"] = e.status_code
+            logger.error(f"Error updating process: {error_details}")
+            return json.dumps(error_details, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error updating process: {e}")
         return json.dumps({"error": str(e)})
 
 

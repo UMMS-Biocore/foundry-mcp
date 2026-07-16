@@ -1,10 +1,25 @@
 # Changelog
 
-## [1.3.0] - 2026-07-15
+## [Unreleased]
+
+### Added
+- Run-execution tools: `get_run_details`, `create_vmeta_dataset`, `duplicate_run`,
+  `update_run`, `initiate_run` — enables duplicating and launching runs via MCP
+  (previously runs were read-only). `update_run` enforces the `permission`+`groupId`
+  requirement, rejects empty-string input values, and checks equal-length
+  spreadsheet arrays.
+- **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
+
+## [1.2.2] - 2026-03-06
 
 ### Added
 
-- **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
+- **`update_process`** - New tool to update an existing process with ownership guardrails to prevent cross-user modifications
+
+### Changed
+
+- **`remove_none` utility** - Extracted shared `remove_none` helper from `create_process` and `update_process` into `utils.py`
+- **User identity endpoint** - Use correct `api/auth/v1/user` endpoint for resolving current user identity
 
 ## [1.2.1] - 2026-02-10
 
