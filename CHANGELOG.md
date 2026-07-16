@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.0] - 2026-07-15
+
+### Added
+
+- **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
+
 ## [1.2.1] - 2026-02-10
 
 ### Fixed
