@@ -84,7 +84,12 @@ class CredentialsMiddleware:
         # Fall back to direct client connection
         client = scope.get("client")
         return client[0] if client else "unknown"
-    
+
+    def _get_host(self, scope: Scope) -> str:
+        """Extract the request Host header from scope (used for OAuth discovery hints)."""
+        headers = dict(scope.get("headers", []))
+        return headers.get(b"host", b"").decode()
+
     def _log_with_context(self, level: int, message: str, scope: Scope, 
                           hostname: str = None, token: str = None):
         """Log message with request context (client IP, hostname, masked token)."""
@@ -107,10 +112,17 @@ class CredentialsMiddleware:
             
             # Extract headers (they're stored as list of tuples)
             headers = dict(scope.get("headers", []))
-            
-            # Get token from headers (always required from client)
+
+            # Get token from headers (always required from client).
+            # Prefer the explicit X-ViaFoundry-Token header (IDE/manual setup);
+            # fall back to an OAuth-style "Authorization: Bearer <token>" header
+            # so clients that discovered credentials via the OAuth flow work too.
             token = headers.get(HEADER_TOKEN.encode(), b"").decode()
-            
+            if not token:
+                auth_header = headers.get(b"authorization", b"").decode()
+                if auth_header.lower().startswith("bearer "):
+                    token = auth_header[len("bearer "):].strip()
+
             # Determine hostname based on security mode
             if self.fixed_hostname:
                 # Fixed hostname mode (production): ignore client header
@@ -125,8 +137,15 @@ class CredentialsMiddleware:
                         token
                     )
             else:
-                # Open mode (development): use client-provided header
+                # Open mode (development): use client-provided header, falling
+                # back to a hostname derived from the request Host (+ X-Forwarded-Proto)
+                # so OAuth clients that only send Authorization: Bearer still work.
                 hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+                if not hostname:
+                    host = headers.get(b"host", b"").decode()
+                    if host:
+                        proto = headers.get(b"x-forwarded-proto", b"https").decode()
+                        hostname = f"{proto}://{host}"
             
             # Validate credentials
             if not validate_credentials(hostname, token):
@@ -140,7 +159,7 @@ class CredentialsMiddleware:
                     hostname or "none",
                     token
                 )
-                await self._send_unauthorized_response(send, hostname, token)
+                await self._send_unauthorized_response(send, hostname, token, scope)
                 return
             
             # Set validated credentials in context for this request
@@ -156,7 +175,7 @@ class CredentialsMiddleware:
         
         await self.app(scope, receive, send)
     
-    async def _send_unauthorized_response(self, send: Send, hostname: str, token: str) -> None:
+    async def _send_unauthorized_response(self, send: Send, hostname: str, token: str, scope: Scope) -> None:
         """Send a 401 Unauthorized response with details about what's missing."""
         # In fixed hostname mode, we only need the token from client
         if self.fixed_hostname:
@@ -188,14 +207,24 @@ class CredentialsMiddleware:
             "detail": detail,
             "help": help_msg
         }).encode("utf-8")
-        
+
+        response_headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ]
+
+        # Advertise the OAuth protected-resource metadata so clients (e.g. Claude)
+        # can auto-discover the authorization flow. Best-effort: derived from the
+        # request Host, and omitted gracefully if Host is unavailable.
+        host = self._get_host(scope)
+        if host:
+            resource_metadata = f'Bearer resource_metadata="https://{host}/.well-known/oauth-protected-resource"'
+            response_headers.append((b"www-authenticate", resource_metadata.encode()))
+
         await send({
             "type": "http.response.start",
             "status": 401,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-            ],
+            "headers": response_headers,
         })
         await send({
             "type": "http.response.body",
