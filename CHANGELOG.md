@@ -8,6 +8,7 @@
   (previously runs were read-only). `update_run` enforces the `permission`+`groupId`
   requirement, rejects empty-string input values, and checks equal-length
   spreadsheet arrays.
+- **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
 
 ## [1.2.2] - 2026-03-06
 

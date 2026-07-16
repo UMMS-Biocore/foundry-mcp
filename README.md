@@ -498,6 +498,16 @@ This constructs the fixed hostname: `https://prod.viafoundry.com/beta`
 
 > **Note:** In fixed hostname mode, clients only need to provide `X-ViaFoundry-Token`. The `X-ViaFoundry-Hostname` header is ignored.
 
+### OAuth Connect
+
+In addition to the `X-ViaFoundry-Token` / `X-ViaFoundry-Hostname` headers above, the server also accepts an OAuth bearer credential:
+
+```
+Authorization: Bearer via_mcp_your-token
+```
+
+When a request uses `Authorization: Bearer`, the server derives the ViaFoundry hostname from the request's `Host` header instead of `X-ViaFoundry-Hostname`. If a request is unauthenticated, the server responds `401` with a `WWW-Authenticate` header pointing MCP clients at the ViaFoundry backend's `/.well-known/oauth-protected-resource` metadata, so OAuth-capable clients (like Claude) can discover and complete the authorization flow automatically instead of requiring a token to be pasted in by hand.
+
 ### Environment Variables
 
 | Variable | Description | Default |

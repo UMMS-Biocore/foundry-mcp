@@ -195,9 +195,182 @@ class TestCredentialsMiddleware:
             (b"x-viafoundry-hostname", b""),
             (b"x-viafoundry-token", b""),
         ])
-        
+
         await middleware(scope, mock_receive, mock_send)
-        
+
         middleware.app.assert_not_called()
         start_call = mock_send.call_args_list[0][0][0]
         assert start_call["status"] == 401
+
+
+class TestOAuthBearerSupport:
+    """Tests for OAuth `Authorization: Bearer` fallback + WWW-Authenticate on 401."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Reset credentials before and after each test."""
+        from src.viafoundry_mcp.config import set_credentials
+        set_credentials(None, None)
+        yield
+        set_credentials(None, None)
+
+    @pytest.fixture
+    def middleware(self):
+        """Create middleware instance with mock app (open mode, no fixed hostname)."""
+        from src.viafoundry_mcp.server import CredentialsMiddleware
+        mock_app = AsyncMock()
+        return CredentialsMiddleware(mock_app)
+
+    @pytest.fixture
+    def fixed_middleware(self):
+        """Create middleware instance in fixed-hostname (production) mode."""
+        from src.viafoundry_mcp.server import CredentialsMiddleware
+        mock_app = AsyncMock()
+        return CredentialsMiddleware(mock_app, fixed_hostname="https://prod.viafoundry.com")
+
+    @pytest.fixture
+    def mock_send(self):
+        """Create mock send function."""
+        return AsyncMock()
+
+    @pytest.fixture
+    def mock_receive(self):
+        """Create mock receive function."""
+        return AsyncMock()
+
+    def _create_scope(self, method: str = "POST", headers: list = None):
+        """Helper to create HTTP scope."""
+        return {
+            "type": "http",
+            "method": method,
+            "headers": headers or [],
+            "client": ("127.0.0.1", 12345),
+        }
+
+    @pytest.mark.asyncio
+    async def test_bearer_header_populates_credentials(self, middleware, mock_receive, mock_send):
+        """Authorization: Bearer <token> should be used when X-ViaFoundry-Token is
+        absent, and hostname should be derived from Host + X-Forwarded-Proto."""
+        from src.viafoundry_mcp.config import get_credentials
+
+        scope = self._create_scope(headers=[
+            (b"authorization", b"Bearer via_mcp_abc123"),
+            (b"host", b"viafoundry.example.com"),
+            (b"x-forwarded-proto", b"https"),
+        ])
+
+        await middleware(scope, mock_receive, mock_send)
+
+        middleware.app.assert_called_once()
+        hostname, token = get_credentials()
+        assert token == "via_mcp_abc123"
+        assert hostname == "https://viafoundry.example.com"
+
+    @pytest.mark.asyncio
+    async def test_bearer_header_case_insensitive_prefix_and_default_proto(
+        self, middleware, mock_receive, mock_send
+    ):
+        """The 'Bearer' prefix match is case-insensitive; proto defaults to https
+        when X-Forwarded-Proto is absent."""
+        from src.viafoundry_mcp.config import get_credentials
+
+        scope = self._create_scope(headers=[
+            (b"authorization", b"bearer via_mcp_xyz789"),
+            (b"host", b"viafoundry.example.com"),
+        ])
+
+        await middleware(scope, mock_receive, mock_send)
+
+        middleware.app.assert_called_once()
+        hostname, token = get_credentials()
+        assert token == "via_mcp_xyz789"
+        assert hostname == "https://viafoundry.example.com"
+
+    @pytest.mark.asyncio
+    async def test_explicit_headers_take_priority_over_bearer(self, middleware, mock_receive, mock_send):
+        """Explicit X-ViaFoundry-Token/Hostname headers must win over Authorization: Bearer."""
+        from src.viafoundry_mcp.config import get_credentials
+
+        scope = self._create_scope(headers=[
+            (b"x-viafoundry-hostname", b"https://explicit.example.com"),
+            (b"x-viafoundry-token", b"via_mcp_explicit-token"),
+            (b"authorization", b"Bearer via_mcp_should-be-ignored"),
+            (b"host", b"viafoundry.example.com"),
+        ])
+
+        await middleware(scope, mock_receive, mock_send)
+
+        middleware.app.assert_called_once()
+        hostname, token = get_credentials()
+        assert token == "via_mcp_explicit-token"
+        assert hostname == "https://explicit.example.com"
+
+    @pytest.mark.asyncio
+    async def test_bearer_header_works_in_fixed_hostname_mode(self, fixed_middleware, mock_receive, mock_send):
+        """Bearer fallback should also work in fixed-hostname (production) mode; the
+        fixed hostname still wins over any Host-derived value."""
+        from src.viafoundry_mcp.config import get_credentials
+
+        scope = self._create_scope(headers=[
+            (b"authorization", b"Bearer via_mcp_prod-token"),
+            (b"host", b"anything.example.com"),
+        ])
+
+        await fixed_middleware(scope, mock_receive, mock_send)
+
+        fixed_middleware.app.assert_called_once()
+        hostname, token = get_credentials()
+        assert token == "via_mcp_prod-token"
+        assert hostname == "https://prod.viafoundry.com"
+
+    @pytest.mark.asyncio
+    async def test_missing_creds_returns_www_authenticate(self, middleware, mock_receive, mock_send):
+        """401 response should include WWW-Authenticate pointing at the OAuth discovery doc."""
+        scope = self._create_scope(headers=[
+            (b"host", b"viafoundry.example.com"),
+            (b"x-forwarded-proto", b"https"),
+        ])
+
+        await middleware(scope, mock_receive, mock_send)
+
+        middleware.app.assert_not_called()
+        start_call = mock_send.call_args_list[0][0][0]
+        assert start_call["status"] == 401
+        header_map = dict(start_call["headers"])
+        assert header_map[b"www-authenticate"] == (
+            b'Bearer resource_metadata="https://viafoundry.example.com/.well-known/oauth-protected-resource"'
+        )
+
+    @pytest.mark.asyncio
+    async def test_www_authenticate_present_in_fixed_hostname_mode(
+        self, fixed_middleware, mock_receive, mock_send
+    ):
+        """401 in fixed-hostname mode should also carry WWW-Authenticate, built from
+        the request Host (not the fixed hostname)."""
+        scope = self._create_scope(headers=[
+            (b"host", b"prod.viafoundry.com"),
+        ])
+
+        await fixed_middleware(scope, mock_receive, mock_send)
+
+        fixed_middleware.app.assert_not_called()
+        start_call = mock_send.call_args_list[0][0][0]
+        assert start_call["status"] == 401
+        header_map = dict(start_call["headers"])
+        assert header_map[b"www-authenticate"] == (
+            b'Bearer resource_metadata="https://prod.viafoundry.com/.well-known/oauth-protected-resource"'
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_host_header_omits_www_authenticate(self, middleware, mock_receive, mock_send):
+        """When Host is unavailable, the 401 response should omit WWW-Authenticate
+        rather than crash."""
+        scope = self._create_scope(headers=[])
+
+        await middleware(scope, mock_receive, mock_send)
+
+        middleware.app.assert_not_called()
+        start_call = mock_send.call_args_list[0][0][0]
+        assert start_call["status"] == 401
+        header_map = dict(start_call["headers"])
+        assert b"www-authenticate" not in header_map
