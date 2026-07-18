@@ -14,7 +14,7 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# git is required to fetch the private viafoundry_sdk from GitHub.
+# git is required to fetch foundry-sdk from GitHub.
 # Use HTTPS Debian mirrors first: some networks (e.g. proxied build hosts) filter
 # cleartext apt over HTTP:80 while allowing HTTPS; ca-certificates ship in the base.
 RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
@@ -32,15 +32,11 @@ COPY src/ ./src/
 # Build the wheel
 RUN python -m build --wheel
 
-# Build the private viafoundry_sdk dependency into a wheel.
-# The token is used ONLY in this builder stage (which is discarded in the final
-# image) and is never copied into the runtime layer. Pinned for reproducibility.
-ARG SDK_GIT_TOKEN
+# Build the foundry-sdk dependency into a wheel. The repo is public, so no
+# token or auth is required. Pinned for reproducibility.
 ARG SDK_GIT_REF=e5baa08546ea
-RUN git config --global url."https://x-access-token:${SDK_GIT_TOKEN}@github.com/".insteadOf "https://github.com/" \
-    && pip wheel --no-deps --wheel-dir /build/dist \
-         "git+https://github.com/UMMS-Biocore/viafoundry-sdk.git@${SDK_GIT_REF}" \
-    && git config --global --unset url."https://x-access-token:${SDK_GIT_TOKEN}@github.com/".insteadOf
+RUN pip wheel --no-deps --wheel-dir /build/dist \
+         "git+https://github.com/UMMS-Biocore/foundry-sdk.git@${SDK_GIT_REF}"
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
