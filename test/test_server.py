@@ -203,6 +203,42 @@ class TestCredentialsMiddleware:
         assert start_call["status"] == 401
 
 
+    @pytest.mark.asyncio
+    async def test_accepts_new_foundry_connect_headers(self, middleware, mock_receive, mock_send):
+        """New X-Foundry-Connect-* headers are accepted (dual-accept during the rebrand)."""
+        scope = self._create_scope(headers=[
+            (b"x-foundry-connect-hostname", b"https://foundry.example.com"),
+            (b"x-foundry-connect-token", b"via_mcp_valid-token"),
+        ])
+        await middleware(scope, mock_receive, mock_send)
+        middleware.app.assert_called_once()
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_legacy_viafoundry_headers_still_accepted(self, middleware, mock_receive, mock_send):
+        """Legacy X-ViaFoundry-* headers still work (backward compatibility)."""
+        scope = self._create_scope(headers=[
+            (b"x-viafoundry-hostname", b"https://legacy.example.com"),
+            (b"x-viafoundry-token", b"via_mcp_valid-token"),
+        ])
+        await middleware(scope, mock_receive, mock_send)
+        middleware.app.assert_called_once()
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_new_headers_take_precedence_when_both_present(self, middleware, mock_receive, mock_send):
+        """Both header families present and valid -> request is accepted."""
+        scope = self._create_scope(headers=[
+            (b"x-viafoundry-hostname", b"https://legacy.example.com"),
+            (b"x-viafoundry-token", b"via_mcp_legacy"),
+            (b"x-foundry-connect-hostname", b"https://foundry.example.com"),
+            (b"x-foundry-connect-token", b"via_mcp_new"),
+        ])
+        await middleware(scope, mock_receive, mock_send)
+        middleware.app.assert_called_once()
+        mock_send.assert_not_called()
+
+
 class TestOAuthBearerSupport:
     """Tests for OAuth `Authorization: Bearer` fallback + WWW-Authenticate on 401."""
 

@@ -43,6 +43,10 @@ _token_var: ContextVar[Optional[str]] = ContextVar('viafoundry_token', default=N
 # Header names
 HEADER_HOSTNAME = "x-viafoundry-hostname"
 HEADER_TOKEN = "x-viafoundry-token"
+# Foundry Connect header names. The server dual-accepts both the legacy
+# X-ViaFoundry-* and the new X-Foundry-Connect-* headers during the rebrand.
+HEADER_HOSTNAME_NEW = "x-foundry-connect-hostname"
+HEADER_TOKEN_NEW = "x-foundry-connect-token"
 
 
 def set_credentials(hostname: Optional[str], token: Optional[str]) -> None:

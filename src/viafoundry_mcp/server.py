@@ -32,7 +32,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .client import get_client
 from .config import (
     set_credentials, validate_credentials, get_fixed_hostname,
-    HEADER_HOSTNAME, HEADER_TOKEN
+    HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
 )
 from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
 from .log import get_logger, get_uvicorn_log_config, mask_token
@@ -117,7 +117,8 @@ class CredentialsMiddleware:
             # Prefer the explicit X-ViaFoundry-Token header (IDE/manual setup);
             # fall back to an OAuth-style "Authorization: Bearer <token>" header
             # so clients that discovered credentials via the OAuth flow work too.
-            token = headers.get(HEADER_TOKEN.encode(), b"").decode()
+            token = (headers.get(HEADER_TOKEN_NEW.encode(), b"").decode()
+                     or headers.get(HEADER_TOKEN.encode(), b"").decode())
             if not token:
                 auth_header = headers.get(b"authorization", b"").decode()
                 if auth_header.lower().startswith("bearer "):
@@ -127,7 +128,8 @@ class CredentialsMiddleware:
             if self.fixed_hostname:
                 # Fixed hostname mode (production): ignore client header
                 hostname = self.fixed_hostname
-                client_hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+                client_hostname = (headers.get(HEADER_HOSTNAME_NEW.encode(), b"").decode()
+                                   or headers.get(HEADER_HOSTNAME.encode(), b"").decode())
                 if client_hostname and client_hostname != self.fixed_hostname:
                     self._log_with_context(
                         logging.DEBUG,
@@ -140,7 +142,8 @@ class CredentialsMiddleware:
                 # Open mode (development): use client-provided header, falling
                 # back to a hostname derived from the request Host (+ X-Forwarded-Proto)
                 # so OAuth clients that only send Authorization: Bearer still work.
-                hostname = headers.get(HEADER_HOSTNAME.encode(), b"").decode()
+                hostname = (headers.get(HEADER_HOSTNAME_NEW.encode(), b"").decode()
+                            or headers.get(HEADER_HOSTNAME.encode(), b"").decode())
                 if not hostname:
                     host = headers.get(b"host", b"").decode()
                     if host:
