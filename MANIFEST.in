@@ -1,5 +1,5 @@
 include README.md
 include LICENSE
 include CHANGELOG.md
-include src/viafoundry_mcp/.env.example
-recursive-include src/viafoundry_mcp *.py
+include src/foundry_mcp/.env.example
+recursive-include src/foundry_mcp *.py

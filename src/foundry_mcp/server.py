@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-ViaFoundry MCP HTTP Server
+Foundry Connect MCP HTTP Server
 
 Credentials are configured in mcp.json via headers:
 {
-  "viafoundry": {
+  "foundry": {
     "url": "http://127.0.0.1:8705/mcp",
     "headers": {
       "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
@@ -13,7 +13,7 @@ Credentials are configured in mcp.json via headers:
   }
 }
 
-Run with: python -m viafoundry_mcp.server --port 8705
+Run with: python -m foundry_mcp.server --port 8705
 """
 
 import json
@@ -48,7 +48,7 @@ MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
 
 class CredentialsMiddleware:
     """
-    Middleware that extracts ViaFoundry credentials from request headers,
+    Middleware that extracts Foundry Connect credentials from request headers,
     validates them, and stores them in context variables for use by tool handlers.
     
     Security Modes:
@@ -57,7 +57,7 @@ class CredentialsMiddleware:
         headers. This prevents the server from being used as an open proxy.
       
       - Open Mode (development): When fixed_hostname is None, the server accepts
-        X-ViaFoundry-Hostname from clients, allowing connection to any ViaFoundry
+        X-ViaFoundry-Hostname from clients, allowing connection to any Foundry Connect
         instance. Only safe for localhost deployments.
     
     Returns 401 Unauthorized if credentials are missing or invalid.
@@ -250,7 +250,7 @@ def create_mcp_server(stateless: bool = False) -> FastMCP:
     # which would be rejected by the SDK's default allowed_hosts list.
     # See: https://github.com/modelcontextprotocol/python-sdk/issues/1798
     return FastMCP(
-        "viafoundry-mcp",
+        "foundry-mcp",
         stateless_http=stateless,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=False,
@@ -543,13 +543,13 @@ def upload_file(report_id: str, file_name: str, file_content_base64: str, remote
     except Exception as e:
         return json.dumps({
             "error": f"Failed to initialize client: {e}",
-            "hint": "Check your ViaFoundry credentials"
+            "hint": "Check your Foundry Connect credentials"
         }, indent=2)
     
     # Use TemporaryDirectory context manager for automatic cleanup
     # Each call gets a unique directory - safe for concurrent access
     try:
-        with tempfile.TemporaryDirectory(prefix="viafoundry_upload_") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="foundry_upload_") as temp_dir:
             temp_file_path = os.path.join(temp_dir, safe_file_name)
             
             # Write decoded content to temp file
@@ -621,7 +621,7 @@ def list_runs(
     order: str = "desc"
 ) -> str:
     """
-    List and search for runs/pipeline executions in ViaFoundry.
+    List and search for runs/pipeline executions in Foundry Connect.
     Supports fuzzy search by name, pagination, and sorting.
     Returns run details including ID (same as report_id), name, status, pipeline info, and dates.
     Use this to discover runs and get their IDs for use with other tools.
@@ -911,7 +911,7 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
 @mcp.tool()
 def list_all_processes() -> str:
     """
-    List all processes/pipelines in ViaFoundry. Returns details including
+    List all processes/pipelines in Foundry Connect. Returns details including
     process ID, name, summary, and owner information.
     """
     try:
@@ -964,7 +964,7 @@ def get_process_revisions(process_id: str) -> str:
 @mcp.tool()
 def list_process_parameters() -> str:
     """
-    List all available parameters in ViaFoundry.
+    List all available parameters in Foundry Connect.
     Returns parameter definitions including name, type, and constraints.
     """
     try:
@@ -1154,7 +1154,7 @@ def update_process(process_id: str, process_data: dict) -> str:
     Update an existing process/pipeline.
     Modifies process configuration, scripts, or parameters.
 
-    WARNING: This modifies a persistent resource on the ViaFoundry server.
+    WARNING: This modifies a persistent resource on the Foundry Connect server.
     Changes affect all users who reference this process and cannot be undone
     automatically. The tool performs an ownership check before updating —
     if the process is owned by a different user, the update will be rejected.
@@ -1190,7 +1190,7 @@ def update_process(process_id: str, process_data: dict) -> str:
             return json.dumps({
                 "error": "Ownership check failed",
                 "detail": "Could not resolve current user identity. Update refused.",
-                "hint": "Ensure your ViaFoundry authentication is configured correctly."
+                "hint": "Ensure your Foundry Connect authentication is configured correctly."
             }, indent=2)
 
         # Enforce ownership
@@ -1284,7 +1284,7 @@ def create_menu_group(menu_name: str) -> str:
 @mcp.tool()
 def list_menu_groups() -> str:
     """
-    List all menu groups in ViaFoundry.
+    List all menu groups in Foundry Connect.
     Returns all available menu groups used for process organization.
     """
     try:
@@ -1389,7 +1389,7 @@ def search_datasets(dataset_id: str, filter_data: dict = None) -> str:
 @mcp.tool()
 def search_collections(filter_data: dict = None) -> str:
     """
-    Search for collections in ViaFoundry metadata system with filtering, sorting, and pagination.
+    Search for collections in Foundry Connect metadata system with filtering, sorting, and pagination.
     Collections are groups of related datasets (e.g., "Files", "Samples").
     
     Args:
@@ -1556,7 +1556,7 @@ def get_collection_fields(collection_id: str) -> str:
 @mcp.tool()
 def search_canvas(filter_data: dict = None) -> str:
     """
-    Search for canvas visualizations in ViaFoundry with filtering, sorting, and pagination.
+    Search for canvas visualizations in Foundry Connect with filtering, sorting, and pagination.
     Canvas objects represent data visualizations and dashboards.
     
     Args:
@@ -1668,7 +1668,7 @@ def create_canvas(canvas_data: dict) -> str:
 @mcp.tool()
 def search_metadata_fields(filter_data: dict = None) -> str:
     """
-    Search for metadata field definitions in ViaFoundry with filtering, sorting, and pagination.
+    Search for metadata field definitions in Foundry Connect with filtering, sorting, and pagination.
     Fields define the schema for metadata records.
     
     Args:
@@ -1752,7 +1752,7 @@ def create_metadata_field(field_data: dict) -> str:
 @mcp.tool()
 def search_metadata_records(canvas_id: str, collection_name: str, filter_data: dict = None) -> str:
     """
-    Search for metadata records (data entries) in a ViaFoundry canvas collection.
+    Search for metadata records (data entries) in a Foundry Connect canvas collection.
     Metadata records contain actual data values for defined fields.
     
     Args:
@@ -1869,7 +1869,7 @@ def create_metadata_record(canvas_id: str, collection_name: str, data_entry: dic
 @mcp.tool()
 def list_apps(search: str = None) -> str:
     """
-    List all available applications in ViaFoundry with their names, IDs, and details.
+    List all available applications in Foundry Connect with their names, IDs, and details.
     Use this to find apps by name before launching them.
     Returns app information including ID, name, description, image, and configuration.
     """
@@ -1909,7 +1909,7 @@ def list_apps(search: str = None) -> str:
 @mcp.tool()
 def discover_app_endpoints(search: str = None, as_json: bool = False) -> str:
     """
-    Discover and search for available API endpoints in ViaFoundry.
+    Discover and search for available API endpoints in Foundry Connect.
     Search by name, description, or endpoint path.
     Returns endpoint details including path, methods, and descriptions.
     Use list_apps for finding apps by name instead.
@@ -1934,7 +1934,7 @@ def discover_app_endpoints(search: str = None, as_json: bool = False) -> str:
 @mcp.tool()
 def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = None) -> str:
     """
-    Launch/run an application or pipeline in ViaFoundry.
+    Launch/run an application or pipeline in Foundry Connect.
     Executes a specific app with the provided parameters.
     Use discover_app_endpoints first to find the correct app_id and endpoint.
     """
@@ -1972,14 +1972,14 @@ def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = Non
 def main():
     """Entry point for the HTTP MCP server."""
     parser = argparse.ArgumentParser(
-        description='ViaFoundry MCP HTTP Server',
+        description='Foundry Connect MCP HTTP Server',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Credentials are configured in ~/.cursor/mcp.json:
 
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "url": "http://127.0.0.1:8705/mcp",
       "headers": {
         "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
@@ -1991,14 +1991,14 @@ Credentials are configured in ~/.cursor/mcp.json:
 
 Security Modes:
   - Fixed Hostname: Set FRONTEND_HOSTNAME (and optionally FRONTEND_PROTOCOL,
-    FRONTEND_PATH_PREFIX) to lock the server to a specific ViaFoundry instance.
+    FRONTEND_PATH_PREFIX) to lock the server to a specific Foundry Connect instance.
     Used for production deployments.
   - Open Mode: Without FRONTEND_HOSTNAME, clients can specify any target via
     X-ViaFoundry-Hostname header (development mode, only safe for localhost).
 
 Examples:
-  python -m viafoundry_mcp.server --port 8705
-  FRONTEND_HOSTNAME=prod.viafoundry.com python -m viafoundry_mcp.server
+  python -m foundry_mcp.server --port 8705
+  FRONTEND_HOSTNAME=prod.viafoundry.com python -m foundry_mcp.server
         """
     )
     parser.add_argument('--port', type=int, default=8705, 
@@ -2012,7 +2012,7 @@ Examples:
     
     # Log startup banner with security mode information
     logger.info("=" * 60)
-    logger.info("ViaFoundry MCP HTTP Server")
+    logger.info("Foundry Connect MCP HTTP Server")
     logger.info("=" * 60)
     logger.info(f"Endpoint: http://{args.host}:{args.port}/mcp")
     logger.info("")
@@ -2028,7 +2028,7 @@ Examples:
     else:
         # Open mode (development)
         logger.info("Security Mode: OPEN (development)")
-        logger.info("  Clients can specify any ViaFoundry instance via header")
+        logger.info("  Clients can specify any Foundry Connect instance via header")
         if args.host != "127.0.0.1" and args.host != "localhost":
             logger.warning(
                 "WARNING: Server bound to non-localhost without fixed hostname!"

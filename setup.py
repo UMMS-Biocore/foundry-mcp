@@ -1,5 +1,5 @@
 """
-Setup script for viafoundry-mcp package.
+Setup script for foundry-mcp package.
 For modern installations, pyproject.toml is preferred.
 """
 from setuptools import setup

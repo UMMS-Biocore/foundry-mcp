@@ -1,7 +1,7 @@
 """
-ViaFoundry MCP Server
+Foundry Connect MCP Server
 
-A Model Context Protocol (MCP) server for ViaFoundry.
+A Model Context Protocol (MCP) server for Foundry Connect.
 """
 
 __version__ = "1.2.1"

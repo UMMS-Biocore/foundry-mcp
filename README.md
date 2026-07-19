@@ -1,6 +1,6 @@
-# ViaFoundry MCP Server
+# Foundry Connect MCP Server
 
-Connect AI assistants to ViaFoundry bioinformatics workflows. Works with Cursor, Claude Desktop, and other MCP-compatible tools.
+Connect AI assistants to Foundry Connect bioinformatics workflows. Works with Cursor, Claude Desktop, and other MCP-compatible tools.
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -20,7 +20,7 @@ docker compose up --build -d
 ```json
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "url": "http://127.0.0.1:8705/mcp",
       "headers": {
         "X-ViaFoundry-Hostname": "https://your-viafoundry-instance.com",
@@ -37,9 +37,9 @@ docker compose up --build -d
 
 ## Getting Your Personal Access Token
 
-To connect any AI assistant to ViaFoundry, you need a Personal Access Token (PAT) configured for MCP usage.
+To connect any AI assistant to Foundry Connect, you need a Personal Access Token (PAT) configured for MCP usage.
 
-**1.** Log in to your ViaFoundry instance and click your **Profile** icon in the top-left corner. Select **Personal Access Tokens**.
+**1.** Log in to your Foundry Connect instance and click your **Profile** icon in the top-left corner. Select **Personal Access Tokens**.
 
 **2.** Click **Create New Token**. Fill in the following:
 
@@ -49,11 +49,11 @@ To connect any AI assistant to ViaFoundry, you need a Personal Access Token (PAT
 
 **3.** Click **Create Token**. Your token will be displayed once — copy it immediately and store it securely. You will not be able to view it again.
 
-**4.** After creation, ViaFoundry provides a ready-to-use MCP configuration snippet under **Usage Examples**. Use the **MCP** tab and select your client (Cursor or VS Code) from the dropdown to get a config block you can copy directly into your editor. For Claude Code and Claude Desktop, see the configuration sections below.
+**4.** After creation, Foundry Connect provides a ready-to-use MCP configuration snippet under **Usage Examples**. Use the **MCP** tab and select your client (Cursor or VS Code) from the dropdown to get a config block you can copy directly into your editor. For Claude Code and Claude Desktop, see the configuration sections below.
 
 ### Explore Pipelines
 
-- "What pipelines are available in ViaFoundry?"
+- "What pipelines are available in Foundry Connect?"
 - "Show me details about the RNA-Seq pipeline"
 - "What parameters does process 42 need?"
 - "Show me the revision history for pipeline 123"
@@ -88,7 +88,7 @@ To connect any AI assistant to ViaFoundry, you need a Personal Access Token (PAT
 
 ### 📊 Report Management (8 tools)
 
-Access and manage ViaFoundry reports and files.
+Access and manage Foundry Connect reports and files.
 
 | Tool                   | What It Does                                         |
 | ---------------------- | ---------------------------------------------------- |
@@ -125,7 +125,7 @@ Create, explore, and manage bioinformatics pipelines.
 
 | Tool                        | What It Does                                        |
 | --------------------------- | --------------------------------------------------- |
-| `list_all_processes`        | List all processes/pipelines in ViaFoundry          |
+| `list_all_processes`        | List all processes/pipelines in Foundry Connect          |
 | `get_process_details`       | Get detailed pipeline configuration and scripts     |
 | `get_process_revisions`     | Get version history for a pipeline                  |
 | `duplicate_process`         | Clone an existing pipeline for modification         |
@@ -152,7 +152,7 @@ Organize processes into logical groups.
 
 ### 🚀 App Management & Launch (3 tools)
 
-Discover and launch applications in ViaFoundry.
+Discover and launch applications in Foundry Connect.
 
 | Tool                     | What It Does                                                 |
 | ------------------------ | ------------------------------------------------------------ |
@@ -243,7 +243,7 @@ AI: Here are the first 5 rows of the VDJ B cell annotations:
 ### Launching Applications
 
 ```
-You: "What apps are available in ViaFoundry?"
+You: "What apps are available in Foundry Connect?"
 
 AI: Let me list the available applications for you.
     [Uses list_apps()]
@@ -341,28 +341,28 @@ AI: The collection has 12 metadata fields:
 
 Claude Code supports MCP servers at two levels — project-scoped (shared with your team) and global (available across all your projects).
 
-**Option A: CLI command** — The fastest way to add the ViaFoundry MCP server:
+**Option A: CLI command** — The fastest way to add the Foundry Connect MCP server:
 
 ```bash
 # Add globally (available in all projects)
-claude mcp add --transport http --scope user viafoundry \
+claude mcp add --transport http --scope user foundry \
   --header "X-ViaFoundry-Token: via_mcp_your-personal-access-token" \
   https://mcp.viafoundry.com/mcp
 
 # Or add to the current project only
-claude mcp add --transport http --scope project viafoundry \
+claude mcp add --transport http --scope project foundry \
   --header "X-ViaFoundry-Token: via_mcp_your-personal-access-token" \
   https://mcp.viafoundry.com/mcp
 ```
 
 **Option B: Manual configuration** — Add the config JSON directly to the appropriate file:
 
-*Project-level* — Create a `.mcp.json` file in your project root. This makes ViaFoundry tools available to anyone who opens this project in Claude Code:
+*Project-level* — Create a `.mcp.json` file in your project root. This makes Foundry Connect tools available to anyone who opens this project in Claude Code:
 
 ```json
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "type": "http",
       "url": "https://mcp.viafoundry.com/mcp",
       "headers": {
@@ -373,12 +373,12 @@ claude mcp add --transport http --scope project viafoundry \
 }
 ```
 
-*Global* — Add the same configuration to `~/.claude.json` to make ViaFoundry tools available across all your projects:
+*Global* — Add the same configuration to `~/.claude.json` to make Foundry Connect tools available across all your projects:
 
 ```json
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "type": "http",
       "url": "https://mcp.viafoundry.com/mcp",
       "headers": {
@@ -389,7 +389,7 @@ claude mcp add --transport http --scope project viafoundry \
 }
 ```
 
-> **Note:** The MCP server URL depends on your ViaFoundry deployment. For GCP-hosted instances, use `https://mcp.gcp.viafoundry.com/mcp` instead. Check with your ViaFoundry administrator for the correct URL.
+> **Note:** The MCP server URL depends on your Foundry Connect deployment. For GCP-hosted instances, use `https://mcp.gcp.viafoundry.com/mcp` instead. Check with your Foundry Connect administrator for the correct URL.
 
 ### Claude Desktop
 
@@ -401,7 +401,7 @@ Edit the Claude Desktop configuration file:
 ```json
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "url": "https://mcp.viafoundry.com/mcp",
       "headers": {
         "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
@@ -415,7 +415,7 @@ Restart Claude Desktop after saving for the changes to take effect.
 
 ### Cursor / VS Code
 
-ViaFoundry generates a ready-to-use config snippet when you create your token — select **Cursor** or **VS Code** from the dropdown and click **Copy Code**. Paste it into:
+Foundry Connect generates a ready-to-use config snippet when you create your token — select **Cursor** or **VS Code** from the dropdown and click **Copy Code**. Paste it into:
 
 - **Cursor:** `~/.cursor/mcp.json`
 - **VS Code:** Your MCP extension config file
@@ -445,7 +445,7 @@ The MCP server has two security modes to prevent misuse as an open proxy:
 
 ### Open Mode (Development/Localhost)
 
-In open mode, clients can specify any ViaFoundry instance via the `X-ViaFoundry-Hostname` header. This is the default when:
+In open mode, clients can specify any Foundry Connect instance via the `X-ViaFoundry-Hostname` header. This is the default when:
 
 - Running standalone with `docker compose up` in the `mcp/` directory
 - `FRONTEND_HOSTNAME` environment variable is not set
@@ -456,7 +456,7 @@ In open mode, clients can specify any ViaFoundry instance via the `X-ViaFoundry-
 ```json
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "url": "http://127.0.0.1:8705/mcp",
       "headers": {
         "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
@@ -469,9 +469,9 @@ In open mode, clients can specify any ViaFoundry instance via the `X-ViaFoundry-
 
 ### Fixed Hostname Mode (Production)
 
-In production deployments, the server locks to a specific ViaFoundry instance, ignoring client-provided `X-ViaFoundry-Hostname` headers. This prevents the server from being used as an open proxy.
+In production deployments, the server locks to a specific Foundry Connect instance, ignoring client-provided `X-ViaFoundry-Hostname` headers. This prevents the server from being used as an open proxy.
 
-**Enabled when** `FRONTEND_HOSTNAME` is set to a non-localhost value (typically from ViaFoundry's `.env` file):
+**Enabled when** `FRONTEND_HOSTNAME` is set to a non-localhost value (typically from Foundry Connect's `.env` file):
 
 ```bash
 FRONTEND_PROTOCOL=https
@@ -486,7 +486,7 @@ This constructs the fixed hostname: `https://prod.viafoundry.com/beta`
 ```json
 {
   "mcpServers": {
-    "viafoundry": {
+    "foundry": {
       "url": "https://your-mcp-server.com/mcp",
       "headers": {
         "X-ViaFoundry-Token": "via_mcp_your-token"
@@ -506,13 +506,13 @@ In addition to the `X-ViaFoundry-Token` / `X-ViaFoundry-Hostname` headers above,
 Authorization: Bearer via_mcp_your-token
 ```
 
-When a request uses `Authorization: Bearer`, the server derives the ViaFoundry hostname from the request's `Host` header instead of `X-ViaFoundry-Hostname`. If a request is unauthenticated, the server responds `401` with a `WWW-Authenticate` header pointing MCP clients at the ViaFoundry backend's `/.well-known/oauth-protected-resource` metadata, so OAuth-capable clients (like Claude) can discover and complete the authorization flow automatically instead of requiring a token to be pasted in by hand.
+When a request uses `Authorization: Bearer`, the server derives the Foundry Connect hostname from the request's `Host` header instead of `X-ViaFoundry-Hostname`. If a request is unauthenticated, the server responds `401` with a `WWW-Authenticate` header pointing MCP clients at the Foundry Connect backend's `/.well-known/oauth-protected-resource` metadata, so OAuth-capable clients (like Claude) can discover and complete the authorization flow automatically instead of requiring a token to be pasted in by hand.
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `FRONTEND_HOSTNAME` | Target ViaFoundry hostname. If set (non-localhost), enables fixed hostname mode | None (open mode) |
+| `FRONTEND_HOSTNAME` | Target Foundry Connect hostname. If set (non-localhost), enables fixed hostname mode | None (open mode) |
 | `FRONTEND_PROTOCOL` | Protocol for fixed hostname | `https` |
 | `FRONTEND_PATH_PREFIX` | Path prefix for fixed hostname (e.g., `/beta`) | None |
 
@@ -520,12 +520,12 @@ When a request uses `Authorization: Bearer`, the server derives the ViaFoundry h
 
 ## Cloud Deployment (HTTPS)
 
-> **Security Note:** When deploying to cloud platforms, use fixed hostname mode to prevent the MCP server from being used as an open proxy. Set `FRONTEND_HOSTNAME` to your ViaFoundry instance.
+> **Security Note:** When deploying to cloud platforms, use fixed hostname mode to prevent the MCP server from being used as an open proxy. Set `FRONTEND_HOSTNAME` to your Foundry Connect instance.
 
 ### Google Cloud Run
 
 ```bash
-gcloud run deploy viafoundry-mcp \
+gcloud run deploy foundry-mcp \
   --source . \
   --port 8705 \
   --set-env-vars="FRONTEND_HOSTNAME=your-viafoundry.com,FRONTEND_PROTOCOL=https"
@@ -542,7 +542,7 @@ Then update your client config with the HTTPS URL:
 
 ```json
 {
-  "viafoundry": {
+  "foundry": {
     "url": "https://your-app.fly.dev/mcp",
     "headers": {
       "X-ViaFoundry-Token": "via_mcp_your-token"
@@ -557,10 +557,10 @@ Then update your client config with the HTTPS URL:
 
 ```bash
 # Install
-pip install git+https://github.com/viascientific/viafoundry-mcp.git
+pip install git+https://github.com/UMMS-Biocore/foundry-mcp.git
 
 # Run server
-viafoundry-mcp --port 8705
+foundry-mcp --port 8705
 ```
 
 ---
@@ -568,18 +568,18 @@ viafoundry-mcp --port 8705
 ## Development
 
 ```bash
-git clone https://github.com/viascientific/viafoundry-mcp.git
-cd viafoundry-mcp
+git clone https://github.com/UMMS-Biocore/foundry-mcp.git
+cd foundry-mcp
 pip install -e ".[dev]"
 ```
 
 ### Project Structure
 
 ```
-viafoundry-mcp/
-├── src/viafoundry_mcp/
+foundry-mcp/
+├── src/foundry_mcp/
 │   ├── server.py        # MCP HTTP server
-│   ├── client.py        # ViaFoundry client
+│   ├── client.py        # Foundry Connect client
 │   ├── config.py        # Configuration
 │   └── utils.py         # Utility functions
 ├── Dockerfile
@@ -594,11 +594,11 @@ viafoundry-mcp/
 **Server not responding?**
 
 - Check container is running: `docker ps`
-- Check logs: `docker logs viafoundry-mcp`
+- Check logs: `docker logs foundry-mcp`
 
 **Authentication failed?**
 
-- Verify your token is valid in ViaFoundry web UI
+- Verify your token is valid in Foundry Connect web UI
 - Check `X-ViaFoundry-Hostname` includes `https://`
 
 **Tools not showing in IDE?**

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ViaFoundry client management for MCP server.
+Foundry Connect client management for MCP server.
 
 Credentials are passed via HTTP headers from mcp.json.
 """
@@ -42,7 +42,7 @@ def _resolve_hostname(hostname: str) -> str:
 
 def get_client() -> ViaFoundryClient:
     """
-    Get or initialize the ViaFoundry client using credentials from request headers.
+    Get or initialize the Foundry Connect client using credentials from request headers.
 
     Returns:
         Initialized ViaFoundryClient instance
@@ -56,7 +56,7 @@ def get_client() -> ViaFoundryClient:
         raise ValueError(
             "Missing credentials. Configure in mcp.json:\n"
             '{\n'
-            '  "viafoundry": {\n'
+            '  "foundry": {\n'
             '    "url": "http://127.0.0.1:8705/mcp",\n'
             '    "headers": {\n'
             '      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",\n'
@@ -85,10 +85,10 @@ def get_client() -> ViaFoundryClient:
 
         # Create new client
         masked = mask_token(token)
-        logger.info(f"Initializing ViaFoundry client for {hostname} (token: {masked})")
+        logger.info(f"Initializing Foundry Connect client for {hostname} (token: {masked})")
         client = ViaFoundryClient()
         client.configure_auth_token(hostname=hostname, token=token)
-        logger.info(f"ViaFoundry client authenticated for {hostname}")
+        logger.info(f"Foundry Connect client authenticated for {hostname}")
 
         # Cache it
         _clients[cache_key] = client

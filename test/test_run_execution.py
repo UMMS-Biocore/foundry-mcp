@@ -2,7 +2,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from src.viafoundry_mcp import server
+from src.foundry_mcp import server
 
 
 def _patched_client(call_return):

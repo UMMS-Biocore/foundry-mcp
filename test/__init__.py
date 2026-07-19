@@ -1,3 +1,3 @@
 """
-Tests for ViaFoundry MCP Server
+Tests for Foundry Connect MCP Server
 """

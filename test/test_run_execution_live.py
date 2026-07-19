@@ -1,6 +1,6 @@
 """Opt-in live integration test. Runs only when VIAFOUNDRY_LIVE_* env vars are set.
 
-These talk to a real ViaFoundry instance, so they are skipped by default. Set:
+These talk to a real Foundry Connect instance, so they are skipped by default. Set:
 
     VIAFOUNDRY_LIVE_HOST=https://<instance>       # or http://host:port
     VIAFOUNDRY_LIVE_TOKEN=via_mcp_...             # MUST be an MCP-scoped token
@@ -18,16 +18,16 @@ import json
 import os
 import pytest
 
-from src.viafoundry_mcp import server, config
+from src.foundry_mcp import server, config
 
 LIVE = all(os.environ.get(k) for k in (
     "VIAFOUNDRY_LIVE_HOST", "VIAFOUNDRY_LIVE_TOKEN", "VIAFOUNDRY_LIVE_SOURCE_RUN"
 ))
-pytestmark = pytest.mark.skipif(not LIVE, reason="live ViaFoundry creds not set")
+pytestmark = pytest.mark.skipif(not LIVE, reason="live Foundry Connect creds not set")
 
 LIVE_MUTATE = LIVE and bool(os.environ.get("VIAFOUNDRY_LIVE_TARGET_PROJECT"))
 
-# ViaFoundry permission value for GroupShared runs; group_id is required only then.
+# Foundry Connect permission value for GroupShared runs; group_id is required only then.
 GROUP_SHARED_PERMISSION = 15
 
 
