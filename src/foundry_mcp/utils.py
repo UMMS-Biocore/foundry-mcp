@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Utility functions for ViaFoundry MCP.
+Utility functions for Foundry Connect MCP.
 """
 
 from typing import Optional

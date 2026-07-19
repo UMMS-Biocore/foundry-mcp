@@ -2,7 +2,7 @@
 Tests for utility functions.
 """
 
-from src.viafoundry_mcp.utils import serialize_response, is_valid_mcp_token, MCP_TOKEN_PREFIX, MAX_SERIALIZATION_DEPTH
+from src.foundry_mcp.utils import serialize_response, is_valid_mcp_token, MCP_TOKEN_PREFIX, MAX_SERIALIZATION_DEPTH
 
 
 class TestIsValidMcpToken:

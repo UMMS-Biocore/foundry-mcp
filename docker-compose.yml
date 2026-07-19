@@ -1,5 +1,5 @@
 # =============================================================================
-# ViaFoundry MCP Server - Docker Compose
+# Foundry Connect MCP Server - Docker Compose
 # =============================================================================
 #
 # Quick Start:
@@ -14,10 +14,10 @@
 # =============================================================================
 
 services:
-  viafoundry-mcp:
+  foundry-mcp:
     build: .
-    image: viafoundry-mcp:latest
-    container_name: viafoundry-mcp
+    image: foundry-mcp:latest
+    container_name: foundry-mcp
     ports:
       - "${PORT:-8705}:${PORT:-8705}"
     environment:

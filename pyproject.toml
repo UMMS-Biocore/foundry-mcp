@@ -3,16 +3,16 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "viafoundry-mcp"
+name = "foundry-mcp"
 version = "1.2.2"
-description = "Model Context Protocol (MCP) server for ViaFoundry SDK"
+description = "Model Context Protocol (MCP) server for Foundry Connect SDK"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "UMMS Biocore"}
 ]
-keywords = ["mcp", "viafoundry", "bioinformatics", "workflow", "model-context-protocol"]
+keywords = ["mcp", "foundry", "bioinformatics", "workflow", "model-context-protocol"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -41,18 +41,18 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/viascientific/viafoundry-mcp"
-Documentation = "https://github.com/viascientific/viafoundry-mcp#readme"
-Repository = "https://github.com/viascientific/viafoundry-mcp"
-Issues = "https://github.com/viascientific/viafoundry-mcp/issues"
+Homepage = "https://github.com/UMMS-Biocore/foundry-mcp"
+Documentation = "https://github.com/UMMS-Biocore/foundry-mcp#readme"
+Repository = "https://github.com/UMMS-Biocore/foundry-mcp"
+Issues = "https://github.com/UMMS-Biocore/foundry-mcp/issues"
 
 [project.scripts]
-viafoundry-mcp = "viafoundry_mcp.server:main"
+foundry-mcp = "foundry_mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["viafoundry_mcp*"]
+include = ["foundry_mcp*"]
 exclude = ["test*"]
 
 [tool.setuptools.package-data]
-viafoundry_mcp = ["py.typed"]
+foundry_mcp = ["py.typed"]

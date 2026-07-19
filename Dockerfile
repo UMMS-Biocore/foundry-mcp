@@ -1,10 +1,10 @@
 # =============================================================================
-# ViaFoundry MCP Server - Docker Image
+# Foundry Connect MCP Server - Docker Image
 # =============================================================================
 # Multi-stage build for smaller, secure images
 #
-# Build:  docker build -t viafoundry-mcp .
-# Run:    docker run -p 8705:8705 viafoundry-mcp
+# Build:  docker build -t foundry-mcp .
+# Run:    docker run -p 8705:8705 foundry-mcp
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -70,4 +70,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', ${PORT})); s.close()" || exit 1
 
 # Run the HTTP server (bind to 0.0.0.0 for Docker)
-CMD ["sh", "-c", "viafoundry-mcp --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "foundry-mcp --host 0.0.0.0 --port ${PORT}"]

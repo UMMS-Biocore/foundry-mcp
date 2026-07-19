@@ -12,7 +12,7 @@ class TestCredentialsMiddleware:
     @pytest.fixture(autouse=True)
     def setup(self):
         """Reset credentials before and after each test."""
-        from src.viafoundry_mcp.config import set_credentials
+        from src.foundry_mcp.config import set_credentials
         set_credentials(None, None)
         yield
         set_credentials(None, None)
@@ -20,7 +20,7 @@ class TestCredentialsMiddleware:
     @pytest.fixture
     def middleware(self):
         """Create middleware instance with mock app."""
-        from src.viafoundry_mcp.server import CredentialsMiddleware
+        from src.foundry_mcp.server import CredentialsMiddleware
         mock_app = AsyncMock()
         return CredentialsMiddleware(mock_app)
 
@@ -127,7 +127,7 @@ class TestCredentialsMiddleware:
     @pytest.mark.asyncio
     async def test_valid_credentials_passes_through(self, middleware, mock_receive, mock_send):
         """Valid credentials should pass through to the app."""
-        from src.viafoundry_mcp.config import get_credentials, set_credentials
+        from src.foundry_mcp.config import get_credentials, set_credentials
         
         set_credentials(None, None)
         
@@ -149,7 +149,7 @@ class TestCredentialsMiddleware:
     @pytest.mark.asyncio
     async def test_valid_http_hostname_passes_through(self, middleware, mock_receive, mock_send):
         """HTTP hostname (not just HTTPS) should be valid."""
-        from src.viafoundry_mcp.config import set_credentials
+        from src.foundry_mcp.config import set_credentials
         
         set_credentials(None, None)
         
@@ -245,7 +245,7 @@ class TestOAuthBearerSupport:
     @pytest.fixture(autouse=True)
     def setup(self):
         """Reset credentials before and after each test."""
-        from src.viafoundry_mcp.config import set_credentials
+        from src.foundry_mcp.config import set_credentials
         set_credentials(None, None)
         yield
         set_credentials(None, None)
@@ -253,14 +253,14 @@ class TestOAuthBearerSupport:
     @pytest.fixture
     def middleware(self):
         """Create middleware instance with mock app (open mode, no fixed hostname)."""
-        from src.viafoundry_mcp.server import CredentialsMiddleware
+        from src.foundry_mcp.server import CredentialsMiddleware
         mock_app = AsyncMock()
         return CredentialsMiddleware(mock_app)
 
     @pytest.fixture
     def fixed_middleware(self):
         """Create middleware instance in fixed-hostname (production) mode."""
-        from src.viafoundry_mcp.server import CredentialsMiddleware
+        from src.foundry_mcp.server import CredentialsMiddleware
         mock_app = AsyncMock()
         return CredentialsMiddleware(mock_app, fixed_hostname="https://prod.viafoundry.com")
 
@@ -287,7 +287,7 @@ class TestOAuthBearerSupport:
     async def test_bearer_header_populates_credentials(self, middleware, mock_receive, mock_send):
         """Authorization: Bearer <token> should be used when X-ViaFoundry-Token is
         absent, and hostname should be derived from Host + X-Forwarded-Proto."""
-        from src.viafoundry_mcp.config import get_credentials
+        from src.foundry_mcp.config import get_credentials
 
         scope = self._create_scope(headers=[
             (b"authorization", b"Bearer via_mcp_abc123"),
@@ -308,7 +308,7 @@ class TestOAuthBearerSupport:
     ):
         """The 'Bearer' prefix match is case-insensitive; proto defaults to https
         when X-Forwarded-Proto is absent."""
-        from src.viafoundry_mcp.config import get_credentials
+        from src.foundry_mcp.config import get_credentials
 
         scope = self._create_scope(headers=[
             (b"authorization", b"bearer via_mcp_xyz789"),
@@ -325,7 +325,7 @@ class TestOAuthBearerSupport:
     @pytest.mark.asyncio
     async def test_explicit_headers_take_priority_over_bearer(self, middleware, mock_receive, mock_send):
         """Explicit X-ViaFoundry-Token/Hostname headers must win over Authorization: Bearer."""
-        from src.viafoundry_mcp.config import get_credentials
+        from src.foundry_mcp.config import get_credentials
 
         scope = self._create_scope(headers=[
             (b"x-viafoundry-hostname", b"https://explicit.example.com"),
@@ -345,7 +345,7 @@ class TestOAuthBearerSupport:
     async def test_bearer_header_works_in_fixed_hostname_mode(self, fixed_middleware, mock_receive, mock_send):
         """Bearer fallback should also work in fixed-hostname (production) mode; the
         fixed hostname still wins over any Host-derived value."""
-        from src.viafoundry_mcp.config import get_credentials
+        from src.foundry_mcp.config import get_credentials
 
         scope = self._create_scope(headers=[
             (b"authorization", b"Bearer via_mcp_prod-token"),

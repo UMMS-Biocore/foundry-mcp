@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Centralized logging configuration for ViaFoundry MCP.
+Centralized logging configuration for Foundry Connect MCP.
 
 Usage:
     from .log import get_logger, mask_token
@@ -29,7 +29,7 @@ LOG_FORMAT = "text"  # "text" or "json"
 LOG_FORMAT_TEXT = "%(asctime)s - %(name)s - %(levelname)s - [%(token)s] %(message)s"
 
 # Root logger name - all loggers will be children of this
-ROOT_LOGGER_NAME = "viafoundry-mcp"
+ROOT_LOGGER_NAME = "foundry-mcp"
 
 # Track if logging has been initialized
 _initialized = False
@@ -194,8 +194,8 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
         return logging.getLogger(ROOT_LOGGER_NAME)
     
     # Create child logger under our root
-    # e.g., "viafoundry_mcp.server" becomes "viafoundry-mcp.server"
-    short_name = name.replace("viafoundry_mcp.", "").replace("viafoundry_mcp", "")
+    # e.g., "foundry_mcp.server" becomes "foundry-mcp.server"
+    short_name = name.replace("foundry_mcp.", "").replace("foundry_mcp", "")
     if short_name:
         logger_name = f"{ROOT_LOGGER_NAME}.{short_name}"
     else:

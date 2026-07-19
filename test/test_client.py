@@ -1,11 +1,11 @@
 """
-Tests for ViaFoundry client management.
+Tests for Foundry Connect client management.
 """
 
 import pytest
 from unittest.mock import patch, MagicMock
-from src.viafoundry_mcp.client import get_client, reset_clients
-from src.viafoundry_mcp.config import set_credentials
+from src.foundry_mcp.client import get_client, reset_clients
+from src.foundry_mcp.config import set_credentials
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +27,7 @@ def mock_credentials():
     set_credentials(None, None)
 
 
-@patch('src.viafoundry_mcp.client.ViaFoundryClient')
+@patch('src.foundry_mcp.client.ViaFoundryClient')
 def test_get_client_initializes_once(mock_client_class, mock_credentials):
     """Test that client is initialized only once for same credentials."""
     mock_instance = MagicMock()
@@ -46,7 +46,7 @@ def test_get_client_initializes_once(mock_client_class, mock_credentials):
     assert mock_client_class.call_count == 1
 
 
-@patch('src.viafoundry_mcp.client.ViaFoundryClient')
+@patch('src.foundry_mcp.client.ViaFoundryClient')
 def test_get_client_configures_auth_token(mock_client_class, mock_credentials):
     """Test that client authentication is configured with token."""
     mock_instance = MagicMock()
@@ -61,7 +61,7 @@ def test_get_client_configures_auth_token(mock_client_class, mock_credentials):
     )
 
 
-@patch('src.viafoundry_mcp.config.load_env_file')
+@patch('src.foundry_mcp.config.load_env_file')
 def test_get_client_missing_credentials(mock_load_env):
     """Test that get_client raises error when credentials are missing."""
     set_credentials(None, None)
@@ -83,7 +83,7 @@ def test_get_client_missing_hostname():
         get_client()
 
 
-@patch('src.viafoundry_mcp.client.ViaFoundryClient')
+@patch('src.foundry_mcp.client.ViaFoundryClient')
 def test_reset_clients_clears_cache(mock_client_class, mock_credentials):
     """Test that reset_clients clears the cached instances."""
     # Create distinct mock instances for each call
@@ -107,7 +107,7 @@ def test_reset_clients_clears_cache(mock_client_class, mock_credentials):
     assert mock_client_class.call_count == 2
 
 
-@patch('src.viafoundry_mcp.client.ViaFoundryClient')
+@patch('src.foundry_mcp.client.ViaFoundryClient')
 def test_get_client_caches_by_credentials(mock_client_class):
     """Test that different credentials get different clients."""
     mock_instance1 = MagicMock(name='client1')

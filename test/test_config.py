@@ -3,7 +3,7 @@ Tests for configuration management.
 """
 
 import pytest
-from src.viafoundry_mcp.config import (
+from src.foundry_mcp.config import (
     get_credentials,
     set_credentials,
     validate_credentials,

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Configuration for ViaFoundry MCP.
+Configuration for Foundry Connect MCP.
 
 Credentials are passed via HTTP headers:
-  - X-ViaFoundry-Hostname: Your ViaFoundry instance URL (required in open mode)
+  - X-ViaFoundry-Hostname: Your Foundry Connect instance URL (required in open mode)
   - X-ViaFoundry-Token: Your Personal Access Token (required)
 
 Security Modes:
@@ -11,13 +11,13 @@ Security Modes:
     Used for localhost/development deployments.
   
   - Fixed Hostname Mode: Server uses a configured hostname, ignoring client header.
-    Enabled by setting FRONTEND_HOSTNAME environment variable (from ViaFoundry .env).
+    Enabled by setting FRONTEND_HOSTNAME environment variable (from Foundry Connect .env).
     Constructs URL from: FRONTEND_PROTOCOL (or https) + FRONTEND_HOSTNAME + FRONTEND_PATH_PREFIX
     Used for production deployments to prevent open proxy abuse.
 
 Configure in ~/.cursor/mcp.json:
 {
-  "viafoundry": {
+  "foundry": {
     "url": "http://127.0.0.1:8705/mcp",
     "headers": {
       "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
@@ -37,8 +37,8 @@ from .log import get_logger
 logger = get_logger(__name__)
 
 # Context variables for request-scoped credentials
-_hostname_var: ContextVar[Optional[str]] = ContextVar('viafoundry_hostname', default=None)
-_token_var: ContextVar[Optional[str]] = ContextVar('viafoundry_token', default=None)
+_hostname_var: ContextVar[Optional[str]] = ContextVar('foundry_hostname', default=None)
+_token_var: ContextVar[Optional[str]] = ContextVar('foundry_token', default=None)
 
 # Header names
 HEADER_HOSTNAME = "x-viafoundry-hostname"
@@ -109,7 +109,7 @@ def get_fixed_hostname() -> Optional[str]:
     When a fixed hostname is configured, the server ignores client-provided
     X-ViaFoundry-Hostname headers, preventing open proxy abuse.
     
-    Constructed from ViaFoundry environment variables:
+    Constructed from Foundry Connect environment variables:
       - FRONTEND_HOSTNAME: Required to enable fixed hostname mode
       - FRONTEND_PROTOCOL: Protocol (defaults to 'https' if not set)
       - FRONTEND_PATH_PREFIX: Optional path prefix (e.g., '/beta')
