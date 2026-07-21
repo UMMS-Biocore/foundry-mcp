@@ -23,8 +23,8 @@ docker compose up --build -d
     "foundry": {
       "url": "http://127.0.0.1:8705/mcp",
       "headers": {
-        "X-ViaFoundry-Hostname": "https://your-viafoundry-instance.com",
-        "X-ViaFoundry-Token": "your-personal-access-token"
+        "X-Foundry-Connect-Hostname": "https://your-viafoundry-instance.com",
+        "X-Foundry-Connect-Token": "your-personal-access-token"
       }
     }
   }
@@ -38,6 +38,8 @@ docker compose up --build -d
 ## Getting Your Personal Access Token
 
 To connect any AI assistant to Foundry Connect, you need a Personal Access Token (PAT) configured for MCP usage.
+
+> **Header names:** the examples below use `X-Foundry-Connect-Token` / `X-Foundry-Connect-Hostname`. The legacy `X-ViaFoundry-Token` / `X-ViaFoundry-Hostname` headers are still accepted for backward compatibility, so existing configurations keep working.
 
 **1.** Log in to your Foundry Connect instance and click your **Profile** icon in the top-left corner. Select **Personal Access Tokens**.
 
@@ -346,12 +348,12 @@ Claude Code supports MCP servers at two levels — project-scoped (shared with y
 ```bash
 # Add globally (available in all projects)
 claude mcp add --transport http --scope user foundry \
-  --header "X-ViaFoundry-Token: via_mcp_your-personal-access-token" \
+  --header "X-Foundry-Connect-Token: via_mcp_your-personal-access-token" \
   https://mcp.viafoundry.com/mcp
 
 # Or add to the current project only
 claude mcp add --transport http --scope project foundry \
-  --header "X-ViaFoundry-Token: via_mcp_your-personal-access-token" \
+  --header "X-Foundry-Connect-Token: via_mcp_your-personal-access-token" \
   https://mcp.viafoundry.com/mcp
 ```
 
@@ -366,7 +368,7 @@ claude mcp add --transport http --scope project foundry \
       "type": "http",
       "url": "https://mcp.viafoundry.com/mcp",
       "headers": {
-        "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
+        "X-Foundry-Connect-Token": "via_mcp_your-personal-access-token"
       }
     }
   }
@@ -382,7 +384,7 @@ claude mcp add --transport http --scope project foundry \
       "type": "http",
       "url": "https://mcp.viafoundry.com/mcp",
       "headers": {
-        "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
+        "X-Foundry-Connect-Token": "via_mcp_your-personal-access-token"
       }
     }
   }
@@ -404,7 +406,7 @@ Edit the Claude Desktop configuration file:
     "foundry": {
       "url": "https://mcp.viafoundry.com/mcp",
       "headers": {
-        "X-ViaFoundry-Token": "via_mcp_your-personal-access-token"
+        "X-Foundry-Connect-Token": "via_mcp_your-personal-access-token"
       }
     }
   }
@@ -445,7 +447,7 @@ The MCP server has two security modes to prevent misuse as an open proxy:
 
 ### Open Mode (Development/Localhost)
 
-In open mode, clients can specify any Foundry Connect instance via the `X-ViaFoundry-Hostname` header. This is the default when:
+In open mode, clients can specify any Foundry Connect instance via the `X-Foundry-Connect-Hostname` header. This is the default when:
 
 - Running standalone with `docker compose up` in the `mcp/` directory
 - `FRONTEND_HOSTNAME` environment variable is not set
@@ -459,8 +461,8 @@ In open mode, clients can specify any Foundry Connect instance via the `X-ViaFou
     "foundry": {
       "url": "http://127.0.0.1:8705/mcp",
       "headers": {
-        "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
-        "X-ViaFoundry-Token": "via_mcp_your-token"
+        "X-Foundry-Connect-Hostname": "https://your-viafoundry.com",
+        "X-Foundry-Connect-Token": "via_mcp_your-token"
       }
     }
   }
@@ -469,7 +471,7 @@ In open mode, clients can specify any Foundry Connect instance via the `X-ViaFou
 
 ### Fixed Hostname Mode (Production)
 
-In production deployments, the server locks to a specific Foundry Connect instance, ignoring client-provided `X-ViaFoundry-Hostname` headers. This prevents the server from being used as an open proxy.
+In production deployments, the server locks to a specific Foundry Connect instance, ignoring client-provided `X-Foundry-Connect-Hostname` headers. This prevents the server from being used as an open proxy.
 
 **Enabled when** `FRONTEND_HOSTNAME` is set to a non-localhost value (typically from Foundry Connect's `.env` file):
 
@@ -489,24 +491,24 @@ This constructs the fixed hostname: `https://prod.viafoundry.com/beta`
     "foundry": {
       "url": "https://your-mcp-server.com/mcp",
       "headers": {
-        "X-ViaFoundry-Token": "via_mcp_your-token"
+        "X-Foundry-Connect-Token": "via_mcp_your-token"
       }
     }
   }
 }
 ```
 
-> **Note:** In fixed hostname mode, clients only need to provide `X-ViaFoundry-Token`. The `X-ViaFoundry-Hostname` header is ignored.
+> **Note:** In fixed hostname mode, clients only need to provide `X-Foundry-Connect-Token`. The `X-Foundry-Connect-Hostname` header is ignored.
 
 ### OAuth Connect
 
-In addition to the `X-ViaFoundry-Token` / `X-ViaFoundry-Hostname` headers above, the server also accepts an OAuth bearer credential:
+In addition to the `X-Foundry-Connect-Token` / `X-Foundry-Connect-Hostname` headers above, the server also accepts an OAuth bearer credential:
 
 ```
 Authorization: Bearer via_mcp_your-token
 ```
 
-When a request uses `Authorization: Bearer`, the server derives the Foundry Connect hostname from the request's `Host` header instead of `X-ViaFoundry-Hostname`. If a request is unauthenticated, the server responds `401` with a `WWW-Authenticate` header pointing MCP clients at the Foundry Connect backend's `/.well-known/oauth-protected-resource` metadata, so OAuth-capable clients (like Claude) can discover and complete the authorization flow automatically instead of requiring a token to be pasted in by hand.
+When a request uses `Authorization: Bearer`, the server derives the Foundry Connect hostname from the request's `Host` header instead of `X-Foundry-Connect-Hostname`. If a request is unauthenticated, the server responds `401` with a `WWW-Authenticate` header pointing MCP clients at the Foundry Connect backend's `/.well-known/oauth-protected-resource` metadata, so OAuth-capable clients (like Claude) can discover and complete the authorization flow automatically instead of requiring a token to be pasted in by hand.
 
 ### Environment Variables
 
@@ -545,7 +547,7 @@ Then update your client config with the HTTPS URL:
   "foundry": {
     "url": "https://your-app.fly.dev/mcp",
     "headers": {
-      "X-ViaFoundry-Token": "via_mcp_your-token"
+      "X-Foundry-Connect-Token": "via_mcp_your-token"
     }
   }
 }
@@ -599,7 +601,7 @@ foundry-mcp/
 **Authentication failed?**
 
 - Verify your token is valid in Foundry Connect web UI
-- Check `X-ViaFoundry-Hostname` includes `https://`
+- Check `X-Foundry-Connect-Hostname` includes `https://`
 
 **Tools not showing in IDE?**
 
