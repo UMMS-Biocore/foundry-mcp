@@ -34,7 +34,7 @@ from .config import (
     set_credentials, validate_credentials, get_fixed_hostname,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
 )
-from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
+from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
 from .log import get_logger, get_uvicorn_log_config, mask_token
 
 
@@ -747,6 +747,26 @@ def list_runs(
         return json.dumps({"error": str(e)})
 
 
+# Bench-friendly labels for raw RunStatus values (mirrors the frontend's
+# getRunStatusDisplayText, but says "Failed" instead of "Error" for clarity).
+_RUN_STATUS_DISPLAY = {
+    "NextErr": "Failed",
+    "Error": "Failed",
+    "NextSuc": "Completed",
+    "NextRun": "Running",
+    "init": "Initializing",
+    "Waiting": "Initializing",
+    "Terminated": "Terminated",
+    "NotSubmitted": "Not submitted",
+    "Aborted": "Connecting",
+}
+
+
+def _human_run_status(status):
+    """Map a raw RunStatus string to a plain-language label for scientists."""
+    return _RUN_STATUS_DISPLAY.get(status, "Connecting")
+
+
 @mcp.tool()
 def get_run(run_id: str = None, run_name: str = None, include_reports: bool = False) -> str:
     """
@@ -754,6 +774,7 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
     Supports fuzzy name matching - if exact match not found, returns similar matches.
     Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports.
     The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file).
+    If the run failed, call get_run_log(run_id) to see the error.
     """
     try:
         via_client = get_client()
@@ -833,10 +854,139 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
             except Exception as e:
                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
                 result["reports"] = {"error": str(e)}
-        
+
+        # NOTE: summary/next_steps are merged FLAT into `result` here (not
+        # nested in an envelope like get_run_log/get_run_details) so that
+        # existing consumers of result["run"] keep working unchanged. Don't
+        # "fix" this to use envelope() without also updating those consumers.
+        run_obj = result.get("run")
+        if isinstance(run_obj, dict):
+            display = _human_run_status(run_obj.get("status"))
+            result["status_display"] = display
+            name = run_obj.get("name")
+            if display == "Failed":
+                result["summary"] = (
+                    f"Run '{name}' ({run_id}) failed. Fetch the log to see why."
+                )
+                result["next_steps"] = [
+                    f"get_run_log(run_id='{run_id}') to see the error."
+                ]
+            elif display == "Running":
+                result["summary"] = f"Run '{name}' ({run_id}) is still running."
+                result["next_steps"] = [
+                    f"Check again later, or get_run_log(run_id='{run_id}') "
+                    f"to watch progress."
+                ]
+            elif display == "Completed":
+                result["summary"] = (
+                    f"Run '{name}' ({run_id}) completed successfully."
+                )
+                result["next_steps"] = [
+                    f"get_run(run_id='{run_id}', include_reports=True) to see "
+                    f"the result files."
+                ]
+            else:
+                result["summary"] = f"Run '{name}' ({run_id}) status: {display}."
+
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting run: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# Log file names, ordered most→least useful for diagnosing a failed run.
+_LOG_PRIORITY = [
+    ".command.err", ".command.out", "err.log", ".command.log", "log.txt",
+    ".nextflow.log", "serverlog.txt",
+]
+
+# Non-log artifacts the backend's log set can include (Nextflow HTML reports,
+# trace files, the pipeline script itself) that should never be handed to the
+# user as "the most relevant log" via the fallback picker.
+_NON_LOG_SUFFIXES = (".html", ".nf", ".config")
+
+
+def _pick_diagnostic_log(logs):
+    """From a list of {"name","content"} dicts, return (name, content) of the
+    most useful non-empty log for diagnosis, or (None, None) if all are empty."""
+    by_name = {
+        entry.get("name"): (entry.get("content") or "")
+        for entry in logs
+        if isinstance(entry, dict)
+    }
+    for name in _LOG_PRIORITY:
+        if by_name.get(name, "").strip():
+            return name, by_name[name]
+    for name, content in by_name.items():
+        if name and name.endswith(_NON_LOG_SUFFIXES):
+            continue
+        if name and content.strip():
+            return name, content
+    return None, None
+
+
+@mcp.tool()
+def get_run_log(run_id: str, attempt_id: int = None) -> str:
+    """
+    Show why a run is in its current state by returning its execution log.
+    Use this whenever a run's status is Failed (Error/NextErr) or the user asks
+    "why did it fail / what happened". Returns a plain-language summary plus the
+    tail of the most relevant log (.command.err / Nextflow). Pair with get_run
+    (status) and get_run_details (the settings that produced it).
+    """
+    try:
+        via_client = get_client()
+        params = {"attemptId": attempt_id} if attempt_id else None
+        logger.info(
+            f"Fetching logs for run {run_id}"
+            + (f" attempt {attempt_id}" if attempt_id else "")
+        )
+        logs = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/logs", params=params
+        )
+        if isinstance(logs, dict) and "logs" in logs:
+            logs = logs["logs"]
+        if not isinstance(logs, list):
+            logs = []
+
+        name, content = _pick_diagnostic_log(logs)
+        if not name:
+            result = envelope(
+                summary=(
+                    f"No log output is available yet for run {run_id}. If it is "
+                    f"still starting or running on a cluster, logs may not have "
+                    f"synced — try again shortly."
+                ),
+                data={"logs": []},
+                next_steps=[f"Check status with get_run(run_id='{run_id}')."],
+            )
+            return json.dumps(result, indent=2)
+
+        result = envelope(
+            summary=(
+                f"Showing the tail of '{name}' for run {run_id} (the most "
+                f"relevant log). Read the last lines for the error or the "
+                f"completion message."
+            ),
+            data={
+                "log_name": name,
+                "log_tail": tail_text(content),
+                "available_logs": [
+                    entry.get("name") for entry in logs
+                    if isinstance(entry, dict) and entry.get("name")
+                ],
+            },
+            next_steps=[
+                f"If it failed, get_run_details(run_id='{run_id}') shows the "
+                f"inputs/params that caused it.",
+                f"Fix the cause, then — after confirming with the user — "
+                f"re-launch with initiate_run(run_id='{run_id}', "
+                f"run_type='resumerun') to reuse completed steps.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error fetching logs for run {run_id}: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -845,20 +995,90 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
 # ============================================================================
 
 
+def _iter_run_inputs(inputs):
+    """Yield (name, value, type) triples from either run-input shape:
+    the ViaFoundry list of {name,value,type}, or the external-pipeline
+    (nf-core/Nextflow) dict of {name: {...}} that the backend returns instead."""
+    if isinstance(inputs, dict):
+        for name, val in inputs.items():
+            if isinstance(val, dict) and "value" in val:
+                yield name, val.get("value"), val.get("type")
+            else:
+                yield name, val, None
+        return
+    for inp in inputs or []:
+        if isinstance(inp, dict):
+            yield inp.get("name"), inp.get("value"), inp.get("type")
+
+
+def _summarize_run_details(details):
+    """Distill a run's full details blob into a compact, plain-language summary
+    a bench scientist can read without wading through processOptions."""
+    pipeline = details.get("mainPipeline") or {}
+    project = details.get("project") or {}
+    inputs = details.get("inputs") or []
+    proc_opts = details.get("processOptions") or {}
+
+    sample_inputs, settings, reference_paths = [], [], []
+    for name, value, itype in _iter_run_inputs(inputs):
+        if itype == "vmetaCollection":
+            sample_inputs.append({"name": name, "dataset": value})
+        elif isinstance(value, str) and value.startswith("/"):
+            reference_paths.append(name)
+        else:
+            settings.append({"name": name, "value": value})
+
+    return {
+        "pipeline": {
+            "name": pipeline.get("name"),
+            "version": pipeline.get("version"),
+            "id": pipeline.get("id"),
+        },
+        "project": {"name": project.get("name"), "id": project.get("id")},
+        "permission": details.get("permission"),
+        "groupId": details.get("groupId"),
+        "sample_inputs": sample_inputs,
+        "settings": settings,
+        "reference_paths": reference_paths,
+        "process_option_groups": len(proc_opts),
+    }
+
+
 @mcp.tool()
-def get_run_details(run_id: str) -> str:
+def get_run_details(run_id: str, verbose: bool = False) -> str:
     """
-    Get the full execution details of a run: inputs[], processOptions{},
-    permission, groupId, and mainPipeline. Use this before duplicating or
-    updating a run — it returns the shape needed to build an update_run body.
-    (get_run returns summary/search info only; this returns the editable run.)
+    Show a run's configuration. By default returns a compact, plain-language
+    summary (pipeline, samples, key settings, count of process-option groups).
+    Pass verbose=True to get the FULL editable inputs[] and processOptions{}
+    needed to build an update_run body — do this before duplicate_run/update_run.
+    get_run shows a run's status; this shows the settings that produced it.
     """
     try:
         via_client = get_client()
         details = via_client.call(
             method="GET", endpoint=f"/api/v1/run/{run_id}/details"
         )
-        return json.dumps(details, indent=2)
+        if verbose:
+            return json.dumps(details, indent=2)
+
+        summary_data = _summarize_run_details(details)
+        pipeline = summary_data["pipeline"]
+        result = envelope(
+            summary=(
+                f"Run {run_id} uses pipeline '{pipeline['name']}' "
+                f"(v{pipeline['version']}) with {len(summary_data['settings'])} "
+                f"settings and {summary_data['process_option_groups']} "
+                f"process-option groups."
+            ),
+            data=summary_data,
+            next_steps=[
+                f"To edit or re-launch, call get_run_details(run_id='{run_id}', "
+                f"verbose=True) for the full editable config, then update_run.",
+                "Launching a run uses HPC compute — confirm with the user "
+                "before initiate_run.",
+            ],
+        )
+        return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting run details for {run_id}: {e}")
         return json.dumps({"error": str(e)})
@@ -892,12 +1112,13 @@ def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
     """
     Duplicate an existing run into a target project/pipeline and return the
     new run's `duplicatedRunId`. `project_id` and `pipeline_id` come from
-    get_run_details on the source run (its `projectId` and `mainPipeline.id`).
-    Use `duplicatedRunId` from the response when wiring into update_run or
-    initiate_run. NOTE: the duplicate may DROP the vmetaCollection input (e.g.
-    `reads`) and copy processOptions with empty arrays — re-add/patch them
-    with update_run before initiate_run. Path inputs (references, genomes) are
-    copied verbatim and may point at the source project's paths.
+    get_run_details(run_id, verbose=True) on the source run (its `project.id`
+    and `mainPipeline.id`). Use `duplicatedRunId` from the response when
+    wiring into update_run or initiate_run. NOTE: the duplicate may DROP the
+    vmetaCollection input (e.g. `reads`) and copy processOptions with empty
+    arrays — re-add/patch them with update_run before initiate_run. Path
+    inputs (references, genomes) are copied verbatim and may point at the
+    source project's paths.
     """
     try:
         via_client = get_client()
@@ -949,11 +1170,12 @@ def update_run(
 ) -> str:
     """
     Patch a run's inputs and processOptions (PATCH /save). `permission` is
-    REQUIRED (echo it from get_run_details); `group_id` is REQUIRED only when
-    `permission` is 15 (GroupShared) — otherwise it may be omitted/None. No
-    input `value` may be an empty string — use "NA" or omit the input. Within
-    one processOptions entry, all spreadsheet (list) columns must be equal
-    length. This mutates the run; confirm with the user before calling.
+    REQUIRED (echo it from get_run_details(run_id, verbose=True)); `group_id`
+    is REQUIRED only when `permission` is 15 (GroupShared) — otherwise it
+    may be omitted/None. No input `value` may be an empty string — use "NA"
+    or omit the input. Within one processOptions entry, all spreadsheet
+    (list) columns must be equal length. This mutates the run; confirm with
+    the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id)
@@ -982,8 +1204,9 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
     """
     Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
     (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
-    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
-    confirm with the user before calling.
+    params). Returns status, runUUID, localRunDir. This LAUNCHES real HPC compute
+    (it can take minutes to hours and consumes cluster time) — always confirm
+    with the user before calling.
     """
     try:
         if run_type not in _VALID_RUN_TYPES:

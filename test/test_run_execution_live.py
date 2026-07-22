@@ -42,7 +42,9 @@ def test_get_run_details_roundtrip():
     )
     try:
         result = json.loads(
-            server.get_run_details(os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"])
+            server.get_run_details(
+                os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"], verbose=True
+            )
         )
         assert "error" not in result
         assert "permission" in result and "groupId" in result
@@ -70,7 +72,7 @@ def test_duplicate_then_update_run_chain():
         target_project = int(os.environ["VIAFOUNDRY_LIVE_TARGET_PROJECT"])
 
         # Learn the source run's shape.
-        src = json.loads(server.get_run_details(source_run))
+        src = json.loads(server.get_run_details(source_run, verbose=True))
         assert "error" not in src
         pipeline_id = (src.get("mainPipeline") or {}).get("id")
         assert pipeline_id, "source run has no mainPipeline.id"
@@ -84,7 +86,7 @@ def test_duplicate_then_update_run_chain():
         assert new_run, f"no duplicatedRunId in response: {dup}"
 
         # 2) re-inspect the duplicate and build a minimal, execution-inert patch.
-        det = json.loads(server.get_run_details(str(new_run)))
+        det = json.loads(server.get_run_details(str(new_run), verbose=True))
         assert "error" not in det
         permission = det["permission"]
         group_id = det.get("groupId") if permission == GROUP_SHARED_PERMISSION else None
@@ -133,7 +135,7 @@ def test_duplicate_then_update_run_chain():
         assert not _is_error(res), f"update_run failed: {res}"
 
         # 4) the run must still be coherent afterwards (do NOT initiate it).
-        after = json.loads(server.get_run_details(str(new_run)))
+        after = json.loads(server.get_run_details(str(new_run), verbose=True))
         assert "error" not in after
         assert after.get("inputs"), "run lost all inputs after update_run"
         assert "permission" in after

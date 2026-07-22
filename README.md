@@ -86,7 +86,7 @@ To connect any AI assistant to Foundry Connect, you need a Personal Access Token
 
 ---
 
-## Available Tools (47 Total)
+## Available Tools (48 Total)
 
 ### 📊 Report Management (8 tools)
 
@@ -105,7 +105,7 @@ Access and manage Foundry Connect reports and files.
 
 ---
 
-### 🏃 Run Management (7 tools)
+### 🏃 Run Management (8 tools)
 
 Search and retrieve pipeline run information.
 
@@ -113,7 +113,8 @@ Search and retrieve pipeline run information.
 | ----------- | --------------------------------------------------------- |
 | `list_runs` | List and search for runs/pipeline executions              |
 | `get_run`   | Get detailed run info by ID or name (supports fuzzy match)|
-| `get_run_details`     | Full editable run: inputs, processOptions, permission, groupId |
+| `get_run_log`         | Execution logs for a run (diagnose failures); `attempt_id` optional |
+| `get_run_details`     | Compact run config; `verbose=True` returns the full editable inputs/processOptions |
 | `create_vmeta_dataset`| Create an empty vmeta dataset (returns _id for run inputs)      |
 | `duplicate_run`       | Duplicate a run into a project/pipeline; returns `duplicatedRunId` |
 | `update_run`          | Patch a run's inputs + processOptions (requires permission; groupId required only if permission=15) |

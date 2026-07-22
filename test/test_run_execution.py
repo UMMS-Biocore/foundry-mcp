@@ -20,7 +20,7 @@ class TestGetRunDetails:
         }
         client = _patched_client(details)
         with patch.object(server, "get_client", return_value=client):
-            result = server.get_run_details("123")
+            result = server.get_run_details("123", verbose=True)
         client.call.assert_called_once_with(
             method="GET", endpoint="/api/v1/run/123/details"
         )

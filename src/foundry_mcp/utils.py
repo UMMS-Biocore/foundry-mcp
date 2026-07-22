@@ -96,3 +96,25 @@ def remove_none(obj):
     elif isinstance(obj, list):
         return [remove_none(item) for item in obj]
     return obj
+
+
+def tail_text(text, max_lines: int = 200, max_chars: int = 12000) -> str:
+    """Return the last `max_lines` lines of `text`, capped at `max_chars`
+    characters (keeping the tail — the end of a log is where errors live)."""
+    if not text:
+        return ""
+    tail = "\n".join(text.splitlines()[-max_lines:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
+def envelope(summary: str, data=None, next_steps=None) -> dict:
+    """Wrap a tool result in the standard bench-scientist response shape:
+    a plain-language `summary`, optional `next_steps` suggestions, and the
+    structured `data` payload. Key order is summary, next_steps, data."""
+    result = {"summary": summary}
+    if next_steps:
+        result["next_steps"] = next_steps
+    result["data"] = data if data is not None else {}
+    return result
