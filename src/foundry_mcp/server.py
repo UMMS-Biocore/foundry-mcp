@@ -34,7 +34,7 @@ from .config import (
     set_credentials, validate_credentials, get_fixed_hostname,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
 )
-from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
+from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
 from .log import get_logger, get_uvicorn_log_config, mask_token
 
 
@@ -738,6 +738,93 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting run: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# Log file names, ordered most→least useful for diagnosing a failed run.
+_LOG_PRIORITY = [
+    ".command.err", "err.log", ".command.log", "log.txt",
+    ".nextflow.log", "serverlog.txt",
+]
+
+
+def _pick_diagnostic_log(logs):
+    """From a list of {"name","content"} dicts, return (name, content) of the
+    most useful non-empty log for diagnosis, or (None, None) if all are empty."""
+    by_name = {
+        entry.get("name"): (entry.get("content") or "")
+        for entry in logs
+        if isinstance(entry, dict)
+    }
+    for name in _LOG_PRIORITY:
+        if by_name.get(name, "").strip():
+            return name, by_name[name]
+    for name, content in by_name.items():
+        if content.strip():
+            return name, content
+    return None, None
+
+
+@mcp.tool()
+def get_run_log(run_id: str, attempt_id: int = None) -> str:
+    """
+    Show why a run is in its current state by returning its execution log.
+    Use this whenever a run's status is Failed (Error/NextErr) or the user asks
+    "why did it fail / what happened". Returns a plain-language summary plus the
+    tail of the most relevant log (.command.err / Nextflow). Pair with get_run
+    (status) and get_run_details (the settings that produced it).
+    """
+    try:
+        via_client = get_client()
+        params = {"attemptId": attempt_id} if attempt_id else None
+        logger.info(
+            f"Fetching logs for run {run_id}"
+            + (f" attempt {attempt_id}" if attempt_id else "")
+        )
+        logs = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/logs", params=params
+        )
+        if isinstance(logs, dict) and "logs" in logs:
+            logs = logs["logs"]
+        if not isinstance(logs, list):
+            logs = []
+
+        name, content = _pick_diagnostic_log(logs)
+        if not name:
+            result = envelope(
+                summary=(
+                    f"No log output is available yet for run {run_id}. If it is "
+                    f"still starting or running on a cluster, logs may not have "
+                    f"synced — try again shortly."
+                ),
+                data={"logs": []},
+                next_steps=[f"Check status with get_run(run_id='{run_id}')."],
+            )
+            return json.dumps(result, indent=2)
+
+        result = envelope(
+            summary=(
+                f"Showing the tail of '{name}' for run {run_id} (the most "
+                f"relevant log). Read the last lines for the error or the "
+                f"completion message."
+            ),
+            data={
+                "log_name": name,
+                "log_tail": tail_text(content),
+                "available_logs": [
+                    entry.get("name") for entry in logs if isinstance(entry, dict)
+                ],
+            },
+            next_steps=[
+                f"If it failed, get_run_details(run_id='{run_id}') shows the "
+                f"inputs/params that caused it.",
+                "Fix the cause, then re-launch with "
+                "initiate_run(run_type='resumerun') to reuse completed steps.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error fetching logs for run {run_id}: {e}")
         return json.dumps({"error": str(e)})
 
 
