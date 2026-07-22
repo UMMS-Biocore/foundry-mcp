@@ -57,3 +57,50 @@ class TestGetRunLog:
         with patch.object(server, "get_client", return_value=client):
             result = server.get_run_log("1")
         assert json.loads(result) == {"error": "boom"}
+
+    def test_command_out_outranks_nextflow_log(self):
+        logs = [
+            {"name": ".nextflow.log", "content": "generic nextflow chatter"},
+            {"name": ".command.out", "content": "Killed\nOOM"},
+        ]
+        client = _client(logs)
+        with patch.object(server, "get_client", return_value=client):
+            result = server.get_run_log("1")
+        assert json.loads(result)["data"]["log_name"] == ".command.out"
+
+    def test_fallback_skips_html_and_config_and_nf_artifacts(self):
+        # No priority-listed log has content; only non-log artifacts + a
+        # genuine (unlisted) log file have content. The fallback must skip
+        # the html/nf/config artifacts and surface the real log.
+        logs = [
+            {"name": "report.html", "content": "<html>big nextflow report</html>"},
+            {"name": "timeline.html", "content": "<html>timeline</html>"},
+            {"name": "nextflow.nf", "content": "process foo { ... }"},
+            {"name": "nextflow.config", "content": "params { ... }"},
+            {"name": "some_other.log", "content": "real diagnostic content here"},
+        ]
+        client = _client(logs)
+        with patch.object(server, "get_client", return_value=client):
+            result = server.get_run_log("1")
+        assert json.loads(result)["data"]["log_name"] == "some_other.log"
+
+    def test_available_logs_excludes_nameless_entries(self):
+        logs = [
+            {"name": "err.log", "content": "boom"},
+            {"name": "", "content": "some anonymous blob"},
+            {"content": "no name key at all"},
+        ]
+        client = _client(logs)
+        with patch.object(server, "get_client", return_value=client):
+            result = server.get_run_log("1")
+        available = json.loads(result)["data"]["available_logs"]
+        assert available == ["err.log"]
+
+    def test_relaunch_next_step_has_confirm_cue_and_run_id(self):
+        client = _client([{"name": "err.log", "content": "boom"}])
+        with patch.object(server, "get_client", return_value=client):
+            result = server.get_run_log("12219")
+        next_steps = json.loads(result)["next_steps"]
+        relaunch_step = next(s for s in next_steps if "resumerun" in s)
+        assert "confirming with the user" in relaunch_step
+        assert "run_id='12219'" in relaunch_step

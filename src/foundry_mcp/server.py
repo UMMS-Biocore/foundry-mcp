@@ -793,9 +793,14 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
 
 # Log file names, ordered most→least useful for diagnosing a failed run.
 _LOG_PRIORITY = [
-    ".command.err", "err.log", ".command.log", "log.txt",
+    ".command.err", ".command.out", "err.log", ".command.log", "log.txt",
     ".nextflow.log", "serverlog.txt",
 ]
+
+# Non-log artifacts the backend's log set can include (Nextflow HTML reports,
+# trace files, the pipeline script itself) that should never be handed to the
+# user as "the most relevant log" via the fallback picker.
+_NON_LOG_SUFFIXES = (".html", ".nf", ".config")
 
 
 def _pick_diagnostic_log(logs):
@@ -810,7 +815,9 @@ def _pick_diagnostic_log(logs):
         if by_name.get(name, "").strip():
             return name, by_name[name]
     for name, content in by_name.items():
-        if content.strip():
+        if name and name.endswith(_NON_LOG_SUFFIXES):
+            continue
+        if name and content.strip():
             return name, content
     return None, None
 
@@ -862,14 +869,16 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
                 "log_name": name,
                 "log_tail": tail_text(content),
                 "available_logs": [
-                    entry.get("name") for entry in logs if isinstance(entry, dict)
+                    entry.get("name") for entry in logs
+                    if isinstance(entry, dict) and entry.get("name")
                 ],
             },
             next_steps=[
                 f"If it failed, get_run_details(run_id='{run_id}') shows the "
                 f"inputs/params that caused it.",
-                "Fix the cause, then re-launch with "
-                "initiate_run(run_type='resumerun') to reuse completed steps.",
+                f"Fix the cause, then — after confirming with the user — "
+                f"re-launch with initiate_run(run_id='{run_id}', "
+                f"run_type='resumerun') to reuse completed steps.",
             ],
         )
         return json.dumps(result, indent=2)
