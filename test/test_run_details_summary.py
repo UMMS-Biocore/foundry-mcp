@@ -50,3 +50,41 @@ class TestGetRunDetailsCompact:
             parsed = json.loads(server.get_run_details("123", verbose=True))
         assert parsed["groupId"] == 10
         assert "summary" not in parsed
+
+
+_EXTERNAL_DETAILS = {
+    "mainPipeline": {"id": 42, "name": "nf-core/rnaseq", "version": "3.14.0"},
+    "project": {"id": 2664, "name": "BC_RNAseq"},
+    "permission": 3,
+    "groupId": None,
+    # External (nf-core/Nextflow) pipelines: backend returns a dict keyed by
+    # input name, not the ViaFoundry list-of-{name,value,type}.
+    "inputs": {
+        "genome": {"value": "/pi/x/genome.fa", "type": "input"},
+        "aligner": {"value": "star_salmon", "type": "input"},
+        "reads": {"value": "AAV_UCP1", "type": "vmetaCollection"},
+    },
+    "processOptions": {"1_1": {}},
+}
+
+
+class TestGetRunDetailsExternalPipelineDictInputs:
+    def test_dict_shaped_inputs_populate_settings_not_empty(self):
+        client = _client(_EXTERNAL_DETAILS)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("456"))
+        assert parsed["data"]["settings"], "settings must not be silently empty"
+        names = {s["name"] for s in parsed["data"]["settings"]}
+        assert "aligner" in names
+
+    def test_dict_shaped_path_value_lands_in_reference_paths(self):
+        client = _client(_EXTERNAL_DETAILS)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("456"))
+        assert "genome" in parsed["data"]["reference_paths"]
+
+    def test_dict_shaped_vmeta_collection_lands_in_sample_inputs(self):
+        client = _client(_EXTERNAL_DETAILS)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("456"))
+        assert {"name": "reads", "dataset": "AAV_UCP1"} in parsed["data"]["sample_inputs"]

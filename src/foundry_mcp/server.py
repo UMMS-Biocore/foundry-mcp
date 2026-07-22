@@ -883,6 +883,22 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
 # ============================================================================
 
 
+def _iter_run_inputs(inputs):
+    """Yield (name, value, type) triples from either run-input shape:
+    the ViaFoundry list of {name,value,type}, or the external-pipeline
+    (nf-core/Nextflow) dict of {name: {...}} that the backend returns instead."""
+    if isinstance(inputs, dict):
+        for name, val in inputs.items():
+            if isinstance(val, dict) and "value" in val:
+                yield name, val.get("value"), val.get("type")
+            else:
+                yield name, val, None
+        return
+    for inp in inputs or []:
+        if isinstance(inp, dict):
+            yield inp.get("name"), inp.get("value"), inp.get("type")
+
+
 def _summarize_run_details(details):
     """Distill a run's full details blob into a compact, plain-language summary
     a bench scientist can read without wading through processOptions."""
@@ -892,11 +908,8 @@ def _summarize_run_details(details):
     proc_opts = details.get("processOptions") or {}
 
     sample_inputs, settings, reference_paths = [], [], []
-    for inp in inputs:
-        if not isinstance(inp, dict):
-            continue
-        name, value = inp.get("name"), inp.get("value")
-        if inp.get("type") == "vmetaCollection":
+    for name, value, itype in _iter_run_inputs(inputs):
+        if itype == "vmetaCollection":
             sample_inputs.append({"name": name, "dataset": value})
         elif isinstance(value, str) and value.startswith("/"):
             reference_paths.append(name)
