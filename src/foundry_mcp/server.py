@@ -612,23 +612,122 @@ def get_all_report_paths(report_id: str) -> str:
 # Run Management Tools
 # ============================================================================
 
+# Valid run-list sort fields — must match the backend's runListAPIDbMap
+# (backend/src/types/run.ts). Any other value is rejected by the backend.
+RUN_LIST_SORT_FIELDS = {
+    "id", "name", "status", "username", "dateCreated",
+    "pipelineId", "pipelineName", "summary", "dateCreatedLastRun", "schedulerId",
+}
+
+# Common model-guessed sort aliases -> a valid field. Keys are normalized
+# (lowercased, non-alphanumerics stripped) before lookup.
+RUN_LIST_SORT_ALIASES = {
+    "datemodified": "dateCreated",
+    "modifiedat": "dateCreated",
+    "updatedat": "dateCreated",
+    "modified": "dateCreated",
+    "updated": "dateCreated",
+    "created": "dateCreated",
+    "createdat": "dateCreated",
+    "date": "dateCreated",
+    "lastrun": "dateCreatedLastRun",
+    "recent": "dateCreatedLastRun",
+}
+
+
+def _normalize_run_sort(sort: str) -> str:
+    """Map a requested sort field to a sort key the backend accepts.
+
+    The backend only accepts the keys of runListAPIDbMap; anything else is
+    rejected (e.g. a model guessing "dateModified"). Pass valid keys through,
+    alias the common guesses, and fall back to "dateCreated" so listing never
+    hard-fails on an unknown sort field.
+    """
+    if not sort:
+        return "dateCreated"
+    if sort in RUN_LIST_SORT_FIELDS:
+        return sort
+    normalized = "".join(ch for ch in sort.lower() if ch.isalnum())
+    return RUN_LIST_SORT_ALIASES.get(normalized, "dateCreated")
+
+
+def _resolve_run_tag_ids(via_client, tags: str):
+    """Resolve comma-separated run tag NAMES to tag IDs for the run-list filter.
+
+    The backend's run-list tag filter takes tag IDs (UUIDs), not names, so we
+    look names up via GET /api/v1/tag?entityType=run (the same endpoint the web
+    UI uses). Returns (tag_ids, unknown_names, available_names).
+    """
+    requested = [t.strip() for t in tags.split(",") if t.strip()]
+    if not requested:
+        return [], [], []
+    resp = via_client.call(
+        method="GET", endpoint="/api/v1/tag", params={"entityType": "run"}
+    )
+    available = resp.get("data", []) if isinstance(resp, dict) else []
+    by_name = {}
+    for t in available:
+        name = (t.get("name") or "").strip()
+        if name:
+            by_name[name.lower()] = t.get("id")
+    tag_ids, unknown = [], []
+    for name in requested:
+        tid = by_name.get(name.lower())
+        if tid:
+            tag_ids.append(tid)
+        else:
+            unknown.append(name)
+    available_names = sorted(t.get("name") for t in available if t.get("name"))
+    return tag_ids, unknown, available_names
+
+
 @mcp.tool()
 def list_runs(
     search_query: str = "",
     take: int = 10,
     skip: int = 0,
     sort: str = "dateCreated",
-    order: str = "desc"
+    order: str = "desc",
+    tags: str = ""
 ) -> str:
     """
     List and search for runs/pipeline executions in Foundry Connect.
-    Supports fuzzy search by name, pagination, and sorting.
+    Supports fuzzy search by name, pagination, sorting, and filtering by tag.
     Returns run details including ID (same as report_id), name, status, pipeline info, and dates.
     Use this to discover runs and get their IDs for use with other tools.
+
+    Args:
+        search_query: Fuzzy match on run name (optional).
+        take: Page size (default 10).
+        skip: Offset for pagination (default 0).
+        sort: Sort field. Valid values: id, name, status, username, dateCreated,
+            pipelineId, pipelineName, summary, dateCreatedLastRun, schedulerId.
+            There is NO "dateModified"/"updatedAt" — use "dateCreated" for the most
+            recent runs. Unrecognized values fall back to "dateCreated".
+        order: "desc" (newest first, default) or "asc".
+        tags: Comma-separated tag name(s) to filter by, e.g. "demo" or "demo,qc".
+            A run matches if it carries ANY of the named tags (case-insensitive).
+            Unknown names return an error listing the available run tags.
     """
     try:
         via_client = get_client()
-        logger.info(f"Listing runs (search: '{search_query}', take: {take}, skip: {skip})")
+        sort = _normalize_run_sort(sort)
+
+        body = {"searchKey": search_query}
+        if tags and tags.strip():
+            tag_ids, unknown, available_names = _resolve_run_tag_ids(via_client, tags)
+            if unknown:
+                return json.dumps({
+                    "error": f"Unknown run tag(s): {', '.join(unknown)}",
+                    "available_run_tags": available_names,
+                }, indent=2)
+            if tag_ids:
+                body["tagIds"] = tag_ids
+
+        logger.info(
+            f"Listing runs (search: '{search_query}', take: {take}, skip: {skip}, "
+            f"sort: {sort}, tags: '{tags}')"
+        )
         
         response = via_client.call(
             method="POST",
@@ -639,9 +738,9 @@ def list_runs(
                 "sort": sort,
                 "order": order
             },
-            data={"searchKey": search_query}
+            data=body
         )
-        
+
         return json.dumps(response, indent=2)
     except Exception as e:
         logger.error(f"Error listing runs: {e}")
