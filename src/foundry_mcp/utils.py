@@ -100,8 +100,13 @@ def remove_none(obj):
 
 def tail_text(text, max_lines: int = 200, max_chars: int = 12000) -> str:
     """Return the last `max_lines` lines of `text`, capped at `max_chars`
-    characters (keeping the tail — the end of a log is where errors live)."""
-    if not text:
+    characters (keeping the tail — the end of a log is where errors live).
+
+    A non-positive `max_lines`/`max_chars` means "no lines"/"no characters" and
+    returns "". Guarding this explicitly matters because Python's `seq[-0:]` is
+    `seq[0:]`, which would otherwise return the WHOLE text for a caller asking
+    for none of it."""
+    if not text or max_lines <= 0 or max_chars <= 0:
         return ""
     tail = "\n".join(text.splitlines()[-max_lines:])
     if len(tail) > max_chars:
