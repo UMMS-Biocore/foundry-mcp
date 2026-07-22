@@ -50,6 +50,7 @@ class TestMCPTools:
         expected_run_tools = [
             'list_runs',
             'get_run',
+            'get_run_log',
             'get_run_details',
             'create_vmeta_dataset',
             'duplicate_run',

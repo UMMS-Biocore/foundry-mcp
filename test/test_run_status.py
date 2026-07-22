@@ -37,3 +37,19 @@ class TestGetRunHumanStatus:
         with patch.object(server, "get_client", return_value=client):
             parsed = json.loads(server.get_run(run_id="1"))
         assert parsed["status_display"] == "Connecting"
+
+    def test_fuzzy_match_does_not_get_status_display(self):
+        client = _search_client(
+            [{"id": 1, "name": "not-quite-it", "status": "NextSuc"}]
+        )
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run(run_name="nope"))
+        assert parsed["match_type"] == "fuzzy"
+        assert "status_display" not in parsed
+
+    def test_no_match_does_not_get_status_display(self):
+        client = _search_client([])
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run(run_name="nope"))
+        assert parsed["match_type"] == "none"
+        assert "status_display" not in parsed

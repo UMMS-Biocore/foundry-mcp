@@ -756,6 +756,10 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
                 result["reports"] = {"error": str(e)}
 
+        # NOTE: summary/next_steps are merged FLAT into `result` here (not
+        # nested in an envelope like get_run_log/get_run_details) so that
+        # existing consumers of result["run"] keep working unchanged. Don't
+        # "fix" this to use envelope() without also updating those consumers.
         run_obj = result.get("run")
         if isinstance(run_obj, dict):
             display = _human_run_status(run_obj.get("status"))
@@ -1009,12 +1013,13 @@ def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
     """
     Duplicate an existing run into a target project/pipeline and return the
     new run's `duplicatedRunId`. `project_id` and `pipeline_id` come from
-    get_run_details on the source run (its `projectId` and `mainPipeline.id`).
-    Use `duplicatedRunId` from the response when wiring into update_run or
-    initiate_run. NOTE: the duplicate may DROP the vmetaCollection input (e.g.
-    `reads`) and copy processOptions with empty arrays — re-add/patch them
-    with update_run before initiate_run. Path inputs (references, genomes) are
-    copied verbatim and may point at the source project's paths.
+    get_run_details(run_id, verbose=True) on the source run (its `project.id`
+    and `mainPipeline.id`). Use `duplicatedRunId` from the response when
+    wiring into update_run or initiate_run. NOTE: the duplicate may DROP the
+    vmetaCollection input (e.g. `reads`) and copy processOptions with empty
+    arrays — re-add/patch them with update_run before initiate_run. Path
+    inputs (references, genomes) are copied verbatim and may point at the
+    source project's paths.
     """
     try:
         via_client = get_client()
@@ -1066,11 +1071,12 @@ def update_run(
 ) -> str:
     """
     Patch a run's inputs and processOptions (PATCH /save). `permission` is
-    REQUIRED (echo it from get_run_details); `group_id` is REQUIRED only when
-    `permission` is 15 (GroupShared) — otherwise it may be omitted/None. No
-    input `value` may be an empty string — use "NA" or omit the input. Within
-    one processOptions entry, all spreadsheet (list) columns must be equal
-    length. This mutates the run; confirm with the user before calling.
+    REQUIRED (echo it from get_run_details(run_id, verbose=True)); `group_id`
+    is REQUIRED only when `permission` is 15 (GroupShared) — otherwise it
+    may be omitted/None. No input `value` may be an empty string — use "NA"
+    or omit the input. Within one processOptions entry, all spreadsheet
+    (list) columns must be equal length. This mutates the run; confirm with
+    the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id)
