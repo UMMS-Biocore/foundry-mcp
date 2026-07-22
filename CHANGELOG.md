@@ -9,6 +9,11 @@
   requirement, rejects empty-string input values, and checks equal-length
   spreadsheet arrays.
 - **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
+- **Chat-friendly run journey (Phase 0)** — `get_run_log` surfaces execution
+  logs (`.command.err`/Nextflow tail) so failed runs are diagnosable from chat;
+  `get_run` now returns a plain-language `status_display` + `next_steps`;
+  `get_run_details` returns a compact summary by default (`verbose=True` for the
+  full editable config); all use a shared `{summary, next_steps, data}` envelope.
 
 ## [1.2.2] - 2026-03-06
 

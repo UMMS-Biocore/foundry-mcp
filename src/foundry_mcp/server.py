@@ -883,20 +883,77 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
 # ============================================================================
 
 
+def _summarize_run_details(details):
+    """Distill a run's full details blob into a compact, plain-language summary
+    a bench scientist can read without wading through processOptions."""
+    pipeline = details.get("mainPipeline") or {}
+    project = details.get("project") or {}
+    inputs = details.get("inputs") or []
+    proc_opts = details.get("processOptions") or {}
+
+    sample_inputs, settings, reference_paths = [], [], []
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name, value = inp.get("name"), inp.get("value")
+        if inp.get("type") == "vmetaCollection":
+            sample_inputs.append({"name": name, "dataset": value})
+        elif isinstance(value, str) and value.startswith("/"):
+            reference_paths.append(name)
+        else:
+            settings.append({"name": name, "value": value})
+
+    return {
+        "pipeline": {
+            "name": pipeline.get("name"),
+            "version": pipeline.get("version"),
+            "id": pipeline.get("id"),
+        },
+        "project": {"name": project.get("name"), "id": project.get("id")},
+        "permission": details.get("permission"),
+        "groupId": details.get("groupId"),
+        "sample_inputs": sample_inputs,
+        "settings": settings,
+        "reference_paths": reference_paths,
+        "process_option_groups": len(proc_opts),
+    }
+
+
 @mcp.tool()
-def get_run_details(run_id: str) -> str:
+def get_run_details(run_id: str, verbose: bool = False) -> str:
     """
-    Get the full execution details of a run: inputs[], processOptions{},
-    permission, groupId, and mainPipeline. Use this before duplicating or
-    updating a run — it returns the shape needed to build an update_run body.
-    (get_run returns summary/search info only; this returns the editable run.)
+    Show a run's configuration. By default returns a compact, plain-language
+    summary (pipeline, samples, key settings, count of process-option groups).
+    Pass verbose=True to get the FULL editable inputs[] and processOptions{}
+    needed to build an update_run body — do this before duplicate_run/update_run.
+    get_run shows a run's status; this shows the settings that produced it.
     """
     try:
         via_client = get_client()
         details = via_client.call(
             method="GET", endpoint=f"/api/v1/run/{run_id}/details"
         )
-        return json.dumps(details, indent=2)
+        if verbose:
+            return json.dumps(details, indent=2)
+
+        summary_data = _summarize_run_details(details)
+        pipeline = summary_data["pipeline"]
+        result = envelope(
+            summary=(
+                f"Run {run_id} uses pipeline '{pipeline['name']}' "
+                f"(v{pipeline['version']}) with {len(summary_data['settings'])} "
+                f"settings and {summary_data['process_option_groups']} "
+                f"process-option groups."
+            ),
+            data=summary_data,
+            next_steps=[
+                f"To edit or re-launch, call get_run_details(run_id='{run_id}', "
+                f"verbose=True) for the full editable config, then update_run.",
+                "Launching a run uses HPC compute — confirm with the user "
+                "before initiate_run.",
+            ],
+        )
+        return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting run details for {run_id}: {e}")
         return json.dumps({"error": str(e)})
@@ -1020,8 +1077,9 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
     """
     Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
     (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
-    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
-    confirm with the user before calling.
+    params). Returns status, runUUID, localRunDir. This LAUNCHES real HPC compute
+    (it can take minutes to hours and consumes cluster time) — always confirm
+    with the user before calling.
     """
     try:
         if run_type not in _VALID_RUN_TYPES:
