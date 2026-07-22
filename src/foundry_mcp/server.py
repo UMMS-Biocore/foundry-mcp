@@ -648,6 +648,26 @@ def list_runs(
         return json.dumps({"error": str(e)})
 
 
+# Bench-friendly labels for raw RunStatus values (mirrors the frontend's
+# getRunStatusDisplayText, but says "Failed" instead of "Error" for clarity).
+_RUN_STATUS_DISPLAY = {
+    "NextErr": "Failed",
+    "Error": "Failed",
+    "NextSuc": "Completed",
+    "NextRun": "Running",
+    "init": "Initializing",
+    "Waiting": "Initializing",
+    "Terminated": "Terminated",
+    "NotSubmitted": "Not submitted",
+    "Aborted": "Connecting",
+}
+
+
+def _human_run_status(status):
+    """Map a raw RunStatus string to a plain-language label for scientists."""
+    return _RUN_STATUS_DISPLAY.get(status, "Connecting")
+
+
 @mcp.tool()
 def get_run(run_id: str = None, run_name: str = None, include_reports: bool = False) -> str:
     """
@@ -655,6 +675,7 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
     Supports fuzzy name matching - if exact match not found, returns similar matches.
     Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports.
     The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file).
+    If the run failed, call get_run_log(run_id) to see the error.
     """
     try:
         via_client = get_client()
@@ -734,7 +755,36 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
             except Exception as e:
                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
                 result["reports"] = {"error": str(e)}
-        
+
+        run_obj = result.get("run")
+        if isinstance(run_obj, dict):
+            display = _human_run_status(run_obj.get("status"))
+            result["status_display"] = display
+            name = run_obj.get("name")
+            if display == "Failed":
+                result["summary"] = (
+                    f"Run '{name}' ({run_id}) failed. Fetch the log to see why."
+                )
+                result["next_steps"] = [
+                    f"get_run_log(run_id='{run_id}') to see the error."
+                ]
+            elif display == "Running":
+                result["summary"] = f"Run '{name}' ({run_id}) is still running."
+                result["next_steps"] = [
+                    f"Check again later, or get_run_log(run_id='{run_id}') "
+                    f"to watch progress."
+                ]
+            elif display == "Completed":
+                result["summary"] = (
+                    f"Run '{name}' ({run_id}) completed successfully."
+                )
+                result["next_steps"] = [
+                    f"get_run(run_id='{run_id}', include_reports=True) to see "
+                    f"the result files."
+                ]
+            else:
+                result["summary"] = f"Run '{name}' ({run_id}) status: {display}."
+
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting run: {e}")
