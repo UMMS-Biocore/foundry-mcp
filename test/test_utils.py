@@ -179,3 +179,35 @@ class TestSerializeResponse:
         assert isinstance(result, str)
         assert "2024" in result
 
+
+from src.foundry_mcp.utils import tail_text, envelope
+
+
+def test_tail_text_returns_last_n_lines():
+    text = "\n".join(str(i) for i in range(1, 501))
+    assert tail_text(text, max_lines=3) == "498\n499\n500"
+
+
+def test_tail_text_caps_chars_keeping_tail():
+    text = "x" * 100 + "TAIL"
+    assert tail_text(text, max_lines=10, max_chars=4) == "TAIL"
+
+
+def test_tail_text_handles_empty():
+    assert tail_text("") == ""
+    assert tail_text(None) == ""
+
+
+def test_envelope_orders_summary_next_steps_data():
+    result = envelope("did a thing", data={"x": 1}, next_steps=["do next"])
+    assert list(result.keys()) == ["summary", "next_steps", "data"]
+    assert result["summary"] == "did a thing"
+    assert result["data"] == {"x": 1}
+    assert result["next_steps"] == ["do next"]
+
+
+def test_envelope_omits_next_steps_when_empty():
+    result = envelope("ok")
+    assert "next_steps" not in result
+    assert result["data"] == {}
+
