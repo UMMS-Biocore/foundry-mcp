@@ -20,6 +20,8 @@ import json
 import logging
 import argparse
 import base64
+import html
+import re
 import tempfile
 import os
 import requests
@@ -863,7 +865,7 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
         if isinstance(run_obj, dict):
             display = _human_run_status(run_obj.get("status"))
             result["status_display"] = display
-            name = run_obj.get("name")
+            name = run_obj.get("name") or f"#{run_id}"
             if display == "Failed":
                 result["summary"] = (
                     f"Run '{name}' ({run_id}) failed. Fetch the log to see why."
@@ -996,19 +998,45 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
 
 
 def _iter_run_inputs(inputs):
-    """Yield (name, value, type) triples from either run-input shape:
-    the ViaFoundry list of {name,value,type}, or the external-pipeline
-    (nf-core/Nextflow) dict of {name: {...}} that the backend returns instead."""
+    """Yield normalized {name, value, type, vmetaCollectionId} dicts from either
+    run-input shape: the ViaFoundry list of {name,value,type,...}, or the
+    external-pipeline (nf-core/Nextflow) dict of {name: {...}} that the backend
+    returns instead."""
     if isinstance(inputs, dict):
         for name, val in inputs.items():
             if isinstance(val, dict) and "value" in val:
-                yield name, val.get("value"), val.get("type")
+                yield {
+                    "name": name,
+                    "value": val.get("value"),
+                    "type": val.get("type"),
+                    "vmetaCollectionId": val.get("vmetaCollectionId"),
+                }
             else:
-                yield name, val, None
+                yield {
+                    "name": name,
+                    "value": val,
+                    "type": None,
+                    "vmetaCollectionId": None,
+                }
         return
     for inp in inputs or []:
         if isinstance(inp, dict):
-            yield inp.get("name"), inp.get("value"), inp.get("type")
+            yield {
+                "name": inp.get("name"),
+                "value": inp.get("value"),
+                "type": inp.get("type"),
+                "vmetaCollectionId": inp.get("vmetaCollectionId"),
+            }
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text):
+    """Reduce a run's stored HTML description to plain text for chat display."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", html.unescape(_HTML_TAG_RE.sub(" ", text))).strip()
 
 
 def _summarize_run_details(details):
@@ -1020,15 +1048,25 @@ def _summarize_run_details(details):
     proc_opts = details.get("processOptions") or {}
 
     sample_inputs, settings, reference_paths = [], [], []
-    for name, value, itype in _iter_run_inputs(inputs):
-        if itype == "vmetaCollection":
-            sample_inputs.append({"name": name, "dataset": value})
+    for inp in _iter_run_inputs(inputs):
+        name, value = inp["name"], inp["value"]
+        if inp["type"] == "vmetaCollection":
+            entry = {"name": name, "dataset": value}
+            # The dataset id is the one thing needed to re-point samples at a
+            # new dataset, so keep it in the compact view.
+            if inp.get("vmetaCollectionId"):
+                entry["vmetaCollectionId"] = inp["vmetaCollectionId"]
+            sample_inputs.append(entry)
         elif isinstance(value, str) and value.startswith("/"):
             reference_paths.append(name)
         else:
             settings.append({"name": name, "value": value})
 
     return {
+        "run": {
+            "name": details.get("name"),
+            "description": _strip_html(details.get("summary")),
+        },
         "pipeline": {
             "name": pipeline.get("name"),
             "version": pipeline.get("version"),
@@ -1063,12 +1101,13 @@ def get_run_details(run_id: str, verbose: bool = False) -> str:
 
         summary_data = _summarize_run_details(details)
         pipeline = summary_data["pipeline"]
+        run_label = summary_data["run"]["name"] or f"#{run_id}"
         result = envelope(
             summary=(
-                f"Run {run_id} uses pipeline '{pipeline['name']}' "
-                f"(v{pipeline['version']}) with {len(summary_data['settings'])} "
-                f"settings and {summary_data['process_option_groups']} "
-                f"process-option groups."
+                f"Run '{run_label}' ({run_id}) uses pipeline "
+                f"'{pipeline['name']}' (v{pipeline['version']}) with "
+                f"{len(summary_data['settings'])} settings and "
+                f"{summary_data['process_option_groups']} process-option groups."
             ),
             data=summary_data,
             next_steps=[

@@ -14,6 +14,10 @@
   `get_run` now returns a plain-language `status_display` + `next_steps`;
   `get_run_details` returns a compact summary by default (`verbose=True` for the
   full editable config); all use a shared `{summary, next_steps, data}` envelope.
+  The compact summary carries the run's own name and a plain-text description
+  (stored HTML stripped), keeps each sample input's `vmetaCollectionId` so
+  samples can be re-pointed, and handles the dict-shaped `inputs` that external
+  (nf-core/Nextflow) pipelines return instead of a list.
 
 ## [1.2.2] - 2026-03-06
 

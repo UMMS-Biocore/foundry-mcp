@@ -2,7 +2,14 @@
 Tests for utility functions.
 """
 
-from src.foundry_mcp.utils import serialize_response, is_valid_mcp_token, MCP_TOKEN_PREFIX, MAX_SERIALIZATION_DEPTH
+from src.foundry_mcp.utils import (
+    serialize_response,
+    is_valid_mcp_token,
+    MCP_TOKEN_PREFIX,
+    MAX_SERIALIZATION_DEPTH,
+    tail_text,
+    envelope,
+)
 
 
 class TestIsValidMcpToken:
@@ -180,9 +187,6 @@ class TestSerializeResponse:
         assert "2024" in result
 
 
-from src.foundry_mcp.utils import tail_text, envelope
-
-
 def test_tail_text_returns_last_n_lines():
     text = "\n".join(str(i) for i in range(1, 501))
     assert tail_text(text, max_lines=3) == "498\n499\n500"
@@ -211,3 +215,11 @@ def test_envelope_omits_next_steps_when_empty():
     assert "next_steps" not in result
     assert result["data"] == {}
 
+
+
+def test_tail_text_returns_empty_for_non_positive_limits():
+    text = "\n".join(str(i) for i in range(1, 11))
+    # Python's seq[-0:] is seq[0:], so a naive implementation returns everything.
+    assert tail_text(text, max_lines=0) == ""
+    assert tail_text(text, max_chars=0) == ""
+    assert tail_text(text, max_lines=-5) == ""

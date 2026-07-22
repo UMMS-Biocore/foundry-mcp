@@ -88,3 +88,50 @@ class TestGetRunDetailsExternalPipelineDictInputs:
         with patch.object(server, "get_client", return_value=client):
             parsed = json.loads(server.get_run_details("456"))
         assert {"name": "reads", "dataset": "AAV_UCP1"} in parsed["data"]["sample_inputs"]
+
+
+class TestSummaryEnrichment:
+    """The compact summary should carry the run's own identity and the dataset
+    id needed to re-point samples — both are what a scientist actually asks for."""
+
+    _DETAILS_WITH_RUN = {
+        "name": "UCP1_AAV (Duplicated)",
+        "summary": "<p>UCP1 vs GFP AAV Mice&nbsp;</p>",
+        "mainPipeline": {"id": 1539, "name": "PMM RNASeq DE", "version": "2.0.0"},
+        "project": {"id": 2664, "name": "BC_RNAseq"},
+        "inputs": [
+            {
+                "name": "reads",
+                "type": "vmetaCollection",
+                "value": "AAV_UCP1_GFP_Ben",
+                "vmetaCollectionId": "6a4fbd740cc2ec76b722219c",
+            },
+        ],
+        "processOptions": {},
+    }
+
+    def test_surfaces_run_name_and_plaintext_description(self):
+        client = _client(self._DETAILS_WITH_RUN)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("12219"))
+        assert parsed["data"]["run"]["name"] == "UCP1_AAV (Duplicated)"
+        # HTML tags stripped and entities decoded for chat display
+        assert parsed["data"]["run"]["description"] == "UCP1 vs GFP AAV Mice"
+        # the human name, not just the numeric id, leads the summary
+        assert "UCP1_AAV (Duplicated)" in parsed["summary"]
+
+    def test_keeps_vmeta_collection_id_for_repointing_samples(self):
+        client = _client(self._DETAILS_WITH_RUN)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("12219"))
+        sample = parsed["data"]["sample_inputs"][0]
+        assert sample["dataset"] == "AAV_UCP1_GFP_Ben"
+        assert sample["vmetaCollectionId"] == "6a4fbd740cc2ec76b722219c"
+
+    def test_falls_back_to_run_id_when_name_missing(self):
+        details = dict(self._DETAILS_WITH_RUN)
+        details.pop("name")
+        client = _client(details)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("12219"))
+        assert "#12219" in parsed["summary"]
