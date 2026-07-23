@@ -897,10 +897,24 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
 
 
 # Log file names, ordered most→least useful for diagnosing a failed run.
+#
+# Ordering follows what real cluster runs actually produce, not just what the
+# backend's constants suggest. Verified against failed LSF runs on staging
+# (12193/12194): those return NO `.command.*` files at all, and `err.log` is a
+# fixed 42-byte job-starter stub ("JOB_STARTER: slots=1 ..."). The composite
+# `log.txt` and the Nextflow debug log are what actually carry the failure, so
+# they rank above `err.log` — the reverse of the original ordering, which
+# handed the user the stub and answered nothing.
 _LOG_PRIORITY = [
-    ".command.err", ".command.out", "err.log", ".command.log", "log.txt",
-    ".nextflow.log", "serverlog.txt",
+    ".command.err", ".command.out", ".command.log",
+    "log.txt", ".nextflow.log",
+    "err.log", "serverlog.txt",
 ]
+
+# A log shorter than this is treated as a stub and only used when nothing
+# substantive exists. Sized against the 42-byte `err.log` above; the real
+# composite logs run to tens of KB, so there is no ambiguity in between.
+_MIN_USEFUL_LOG_CHARS = 200
 
 # Non-log artifacts the backend's log set can include (Nextflow HTML reports,
 # trace files, the pipeline script itself) that should never be handed to the
@@ -910,21 +924,43 @@ _NON_LOG_SUFFIXES = (".html", ".nf", ".config")
 
 def _pick_diagnostic_log(logs):
     """From a list of {"name","content"} dicts, return (name, content) of the
-    most useful non-empty log for diagnosis, or (None, None) if all are empty."""
+    most useful non-empty log for diagnosis, or (None, None) if all are empty.
+
+    Prefers a *substantive* log: a near-empty stub never outranks a real log,
+    however high it sits in the priority list. A stub is still returned if it
+    is all that exists — some log beats "no logs available"."""
     by_name = {
         entry.get("name"): (entry.get("content") or "")
         for entry in logs
         if isinstance(entry, dict)
     }
-    for name in _LOG_PRIORITY:
-        if by_name.get(name, "").strip():
-            return name, by_name[name]
-    for name, content in by_name.items():
-        if name and name.endswith(_NON_LOG_SUFFIXES):
-            continue
-        if name and content.strip():
+    stub = None  # best near-empty candidate, used only as a last resort
+
+    def consider(name, content):
+        """Return (name, content) if substantive; otherwise remember as stub."""
+        nonlocal stub
+        body = content.strip()
+        if not body:
+            return None
+        if len(body) >= _MIN_USEFUL_LOG_CHARS:
             return name, content
-    return None, None
+        if stub is None:
+            stub = (name, content)
+        return None
+
+    for name in _LOG_PRIORITY:
+        picked = consider(name, by_name.get(name, ""))
+        if picked:
+            return picked
+
+    for name, content in by_name.items():
+        if not name or name.endswith(_NON_LOG_SUFFIXES):
+            continue
+        picked = consider(name, content)
+        if picked:
+            return picked
+
+    return stub if stub else (None, None)
 
 
 @mcp.tool()
