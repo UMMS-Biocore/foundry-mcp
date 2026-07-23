@@ -1,0 +1,744 @@
+# Review package: fb213af..367d9b2
+
+## Commits
+367d9b2 feat(mcp): compact get_run_details with verbose escape hatch + launch advisory
+031e6ec feat(mcp): add human-readable status + next steps to get_run
+240ddeb feat(mcp): add get_run_log tool to surface failure logs in chat
+6e442ba feat(mcp): add envelope + tail_text response helpers
+
+## Files changed
+ CHANGELOG.md                     |   5 +
+ src/foundry_mcp/server.py        | 215 +++++++++++++++++++++++++++++++++++++--
+ src/foundry_mcp/utils.py         |  22 ++++
+ test/test_run_details_summary.py |  52 ++++++++++
+ test/test_run_execution.py       |   2 +-
+ test/test_run_execution_live.py  |  10 +-
+ test/test_run_logs.py            |  59 +++++++++++
+ test/test_run_status.py          |  39 +++++++
+ test/test_utils.py               |  32 ++++++
+ 9 files changed, 421 insertions(+), 15 deletions(-)
+
+## Diff
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 89208c7..a3b9968 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,20 +2,25 @@
+ 
+ ## [Unreleased]
+ 
+ ### Added
+ - Run-execution tools: `get_run_details`, `create_vmeta_dataset`, `duplicate_run`,
+   `update_run`, `initiate_run` — enables duplicating and launching runs via MCP
+   (previously runs were read-only). `update_run` enforces the `permission`+`groupId`
+   requirement, rejects empty-string input values, and checks equal-length
+   spreadsheet arrays.
+ - **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
++- **Chat-friendly run journey (Phase 0)** — `get_run_log` surfaces execution
++  logs (`.command.err`/Nextflow tail) so failed runs are diagnosable from chat;
++  `get_run` now returns a plain-language `status_display` + `next_steps`;
++  `get_run_details` returns a compact summary by default (`verbose=True` for the
++  full editable config); all use a shared `{summary, next_steps, data}` envelope.
+ 
+ ## [1.2.2] - 2026-03-06
+ 
+ ### Added
+ 
+ - **`update_process`** - New tool to update an existing process with ownership guardrails to prevent cross-user modifications
+ 
+ ### Changed
+ 
+ - **`remove_none` utility** - Extracted shared `remove_none` helper from `create_process` and `update_process` into `utils.py`
+diff --git a/src/foundry_mcp/server.py b/src/foundry_mcp/server.py
+index 95c5251..761b198 100644
+--- a/src/foundry_mcp/server.py
++++ b/src/foundry_mcp/server.py
+@@ -27,21 +27,21 @@ import requests
+ from starlette.types import ASGIApp, Receive, Scope, Send
+ from mcp.server.fastmcp import FastMCP
+ from mcp.server.transport_security import TransportSecuritySettings
+ 
+ # Import from our modules
+ from .client import get_client
+ from .config import (
+     set_credentials, validate_credentials, get_fixed_hostname,
+     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
+ )
+-from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
++from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
+ from .log import get_logger, get_uvicorn_log_config, mask_token
+ 
+ 
+ # Get logger for this module
+ logger = get_logger(__name__)
+ 
+ # Maximum file size for upload/download via base64 (200MB)
+ # Base64 encoding increases size by ~33%, so 200MB file becomes ~267MB in transport
+ MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
+ 
+@@ -641,27 +641,48 @@ def list_runs(
+             },
+             data={"searchKey": search_query}
+         )
+         
+         return json.dumps(response, indent=2)
+     except Exception as e:
+         logger.error(f"Error listing runs: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
++# Bench-friendly labels for raw RunStatus values (mirrors the frontend's
++# getRunStatusDisplayText, but says "Failed" instead of "Error" for clarity).
++_RUN_STATUS_DISPLAY = {
++    "NextErr": "Failed",
++    "Error": "Failed",
++    "NextSuc": "Completed",
++    "NextRun": "Running",
++    "init": "Initializing",
++    "Waiting": "Initializing",
++    "Terminated": "Terminated",
++    "NotSubmitted": "Not submitted",
++    "Aborted": "Connecting",
++}
++
++
++def _human_run_status(status):
++    """Map a raw RunStatus string to a plain-language label for scientists."""
++    return _RUN_STATUS_DISPLAY.get(status, "Connecting")
++
++
+ @mcp.tool()
+ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = False) -> str:
+     """
+     Get detailed information about a specific run by its ID or name.
+     Supports fuzzy name matching - if exact match not found, returns similar matches.
+     Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports.
+     The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file).
++    If the run failed, call get_run_log(run_id) to see the error.
+     """
+     try:
+         via_client = get_client()
+         
+         if not run_id and not run_name:
+             return json.dumps({
+                 "error": "Either run_id or run_name must be provided"
+             }, indent=2)
+         
+         # If run_name provided, search for it
+@@ -727,46 +748,219 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
+             logger.info(f"Fetching reports for run ID: {run_id}")
+             try:
+                 reports = via_client.call(
+                     method="GET",
+                     endpoint=f"/api/v1/run/{run_id}/reports"
+                 )
+                 result["reports"] = reports
+             except Exception as e:
+                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                 result["reports"] = {"error": str(e)}
+-        
++
++        run_obj = result.get("run")
++        if isinstance(run_obj, dict):
++            display = _human_run_status(run_obj.get("status"))
++            result["status_display"] = display
++            name = run_obj.get("name")
++            if display == "Failed":
++                result["summary"] = (
++                    f"Run '{name}' ({run_id}) failed. Fetch the log to see why."
++                )
++                result["next_steps"] = [
++                    f"get_run_log(run_id='{run_id}') to see the error."
++                ]
++            elif display == "Running":
++                result["summary"] = f"Run '{name}' ({run_id}) is still running."
++                result["next_steps"] = [
++                    f"Check again later, or get_run_log(run_id='{run_id}') "
++                    f"to watch progress."
++                ]
++            elif display == "Completed":
++                result["summary"] = (
++                    f"Run '{name}' ({run_id}) completed successfully."
++                )
++                result["next_steps"] = [
++                    f"get_run(run_id='{run_id}', include_reports=True) to see "
++                    f"the result files."
++                ]
++            else:
++                result["summary"] = f"Run '{name}' ({run_id}) status: {display}."
++
+         return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error getting run: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
++# Log file names, ordered most→least useful for diagnosing a failed run.
++_LOG_PRIORITY = [
++    ".command.err", "err.log", ".command.log", "log.txt",
++    ".nextflow.log", "serverlog.txt",
++]
++
++
++def _pick_diagnostic_log(logs):
++    """From a list of {"name","content"} dicts, return (name, content) of the
++    most useful non-empty log for diagnosis, or (None, None) if all are empty."""
++    by_name = {
++        entry.get("name"): (entry.get("content") or "")
++        for entry in logs
++        if isinstance(entry, dict)
++    }
++    for name in _LOG_PRIORITY:
++        if by_name.get(name, "").strip():
++            return name, by_name[name]
++    for name, content in by_name.items():
++        if content.strip():
++            return name, content
++    return None, None
++
++
++@mcp.tool()
++def get_run_log(run_id: str, attempt_id: int = None) -> str:
++    """
++    Show why a run is in its current state by returning its execution log.
++    Use this whenever a run's status is Failed (Error/NextErr) or the user asks
++    "why did it fail / what happened". Returns a plain-language summary plus the
++    tail of the most relevant log (.command.err / Nextflow). Pair with get_run
++    (status) and get_run_details (the settings that produced it).
++    """
++    try:
++        via_client = get_client()
++        params = {"attemptId": attempt_id} if attempt_id else None
++        logger.info(
++            f"Fetching logs for run {run_id}"
++            + (f" attempt {attempt_id}" if attempt_id else "")
++        )
++        logs = via_client.call(
++            method="GET", endpoint=f"/api/v1/run/{run_id}/logs", params=params
++        )
++        if isinstance(logs, dict) and "logs" in logs:
++            logs = logs["logs"]
++        if not isinstance(logs, list):
++            logs = []
++
++        name, content = _pick_diagnostic_log(logs)
++        if not name:
++            result = envelope(
++                summary=(
++                    f"No log output is available yet for run {run_id}. If it is "
++                    f"still starting or running on a cluster, logs may not have "
++                    f"synced — try again shortly."
++                ),
++                data={"logs": []},
++                next_steps=[f"Check status with get_run(run_id='{run_id}')."],
++            )
++            return json.dumps(result, indent=2)
++
++        result = envelope(
++            summary=(
++                f"Showing the tail of '{name}' for run {run_id} (the most "
++                f"relevant log). Read the last lines for the error or the "
++                f"completion message."
++            ),
++            data={
++                "log_name": name,
++                "log_tail": tail_text(content),
++                "available_logs": [
++                    entry.get("name") for entry in logs if isinstance(entry, dict)
++                ],
++            },
++            next_steps=[
++                f"If it failed, get_run_details(run_id='{run_id}') shows the "
++                f"inputs/params that caused it.",
++                "Fix the cause, then re-launch with "
++                "initiate_run(run_type='resumerun') to reuse completed steps.",
++            ],
++        )
++        return json.dumps(result, indent=2)
++    except Exception as e:
++        logger.error(f"Error fetching logs for run {run_id}: {e}")
++        return json.dumps({"error": str(e)})
++
++
+ # ============================================================================
+ # Run Execution Tools
+ # ============================================================================
+ 
+ 
++def _summarize_run_details(details):
++    """Distill a run's full details blob into a compact, plain-language summary
++    a bench scientist can read without wading through processOptions."""
++    pipeline = details.get("mainPipeline") or {}
++    project = details.get("project") or {}
++    inputs = details.get("inputs") or []
++    proc_opts = details.get("processOptions") or {}
++
++    sample_inputs, settings, reference_paths = [], [], []
++    for inp in inputs:
++        if not isinstance(inp, dict):
++            continue
++        name, value = inp.get("name"), inp.get("value")
++        if inp.get("type") == "vmetaCollection":
++            sample_inputs.append({"name": name, "dataset": value})
++        elif isinstance(value, str) and value.startswith("/"):
++            reference_paths.append(name)
++        else:
++            settings.append({"name": name, "value": value})
++
++    return {
++        "pipeline": {
++            "name": pipeline.get("name"),
++            "version": pipeline.get("version"),
++            "id": pipeline.get("id"),
++        },
++        "project": {"name": project.get("name"), "id": project.get("id")},
++        "permission": details.get("permission"),
++        "groupId": details.get("groupId"),
++        "sample_inputs": sample_inputs,
++        "settings": settings,
++        "reference_paths": reference_paths,
++        "process_option_groups": len(proc_opts),
++    }
++
++
+ @mcp.tool()
+-def get_run_details(run_id: str) -> str:
++def get_run_details(run_id: str, verbose: bool = False) -> str:
+     """
+-    Get the full execution details of a run: inputs[], processOptions{},
+-    permission, groupId, and mainPipeline. Use this before duplicating or
+-    updating a run — it returns the shape needed to build an update_run body.
+-    (get_run returns summary/search info only; this returns the editable run.)
++    Show a run's configuration. By default returns a compact, plain-language
++    summary (pipeline, samples, key settings, count of process-option groups).
++    Pass verbose=True to get the FULL editable inputs[] and processOptions{}
++    needed to build an update_run body — do this before duplicate_run/update_run.
++    get_run shows a run's status; this shows the settings that produced it.
+     """
+     try:
+         via_client = get_client()
+         details = via_client.call(
+             method="GET", endpoint=f"/api/v1/run/{run_id}/details"
+         )
+-        return json.dumps(details, indent=2)
++        if verbose:
++            return json.dumps(details, indent=2)
++
++        summary_data = _summarize_run_details(details)
++        pipeline = summary_data["pipeline"]
++        result = envelope(
++            summary=(
++                f"Run {run_id} uses pipeline '{pipeline['name']}' "
++                f"(v{pipeline['version']}) with {len(summary_data['settings'])} "
++                f"settings and {summary_data['process_option_groups']} "
++                f"process-option groups."
++            ),
++            data=summary_data,
++            next_steps=[
++                f"To edit or re-launch, call get_run_details(run_id='{run_id}', "
++                f"verbose=True) for the full editable config, then update_run.",
++                "Launching a run uses HPC compute — confirm with the user "
++                "before initiate_run.",
++            ],
++        )
++        return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error getting run details for {run_id}: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ @mcp.tool()
+ def create_vmeta_dataset(name: str) -> str:
+     """
+     Create an empty vmeta dataset (study-tracker dataset). Returns its `_id`,
+     which is used as the `vmetaCollectionId` of a run's file input. Add file
+@@ -876,22 +1070,23 @@ def update_run(
+ 
+ 
+ _VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")
+ 
+ 
+ @mcp.tool()
+ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
+     """
+     Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
+     (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
+-    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
+-    confirm with the user before calling.
++    params). Returns status, runUUID, localRunDir. This LAUNCHES real HPC compute
++    (it can take minutes to hours and consumes cluster time) — always confirm
++    with the user before calling.
+     """
+     try:
+         if run_type not in _VALID_RUN_TYPES:
+             raise ValueError(
+                 f"runType must be one of {', '.join(_VALID_RUN_TYPES)}, "
+                 f"got '{run_type}'"
+             )
+         via_client = get_client()
+         started = via_client.call(
+             method="POST",
+diff --git a/src/foundry_mcp/utils.py b/src/foundry_mcp/utils.py
+index f56ffc9..cf965e4 100644
+--- a/src/foundry_mcp/utils.py
++++ b/src/foundry_mcp/utils.py
+@@ -89,10 +89,32 @@ def serialize_response(obj, _visited=None, _depth: int = 0):
+     return str(obj)
+ 
+ 
+ def remove_none(obj):
+     """Recursively remove None values from nested dicts and lists."""
+     if isinstance(obj, dict):
+         return {k: remove_none(v) for k, v in obj.items() if v is not None}
+     elif isinstance(obj, list):
+         return [remove_none(item) for item in obj]
+     return obj
++
++
++def tail_text(text, max_lines: int = 200, max_chars: int = 12000) -> str:
++    """Return the last `max_lines` lines of `text`, capped at `max_chars`
++    characters (keeping the tail — the end of a log is where errors live)."""
++    if not text:
++        return ""
++    tail = "\n".join(text.splitlines()[-max_lines:])
++    if len(tail) > max_chars:
++        tail = tail[-max_chars:]
++    return tail
++
++
++def envelope(summary: str, data=None, next_steps=None) -> dict:
++    """Wrap a tool result in the standard bench-scientist response shape:
++    a plain-language `summary`, optional `next_steps` suggestions, and the
++    structured `data` payload. Key order is summary, next_steps, data."""
++    result = {"summary": summary}
++    if next_steps:
++        result["next_steps"] = next_steps
++    result["data"] = data if data is not None else {}
++    return result
+diff --git a/test/test_run_details_summary.py b/test/test_run_details_summary.py
+new file mode 100644
+index 0000000..8c8006b
+--- /dev/null
++++ b/test/test_run_details_summary.py
+@@ -0,0 +1,52 @@
++"""Tests for the compact get_run_details summary."""
++import json
++from unittest.mock import MagicMock, patch
++
++from src.foundry_mcp import server
++
++
++def _client(call_return):
++    c = MagicMock()
++    c.call.return_value = call_return
++    return c
++
++
++_DETAILS = {
++    "mainPipeline": {"id": 1539, "name": "PMM RNASeq DE Pipeline", "version": "2.0.0"},
++    "project": {"id": 2664, "name": "BC_RNAseq"},
++    "permission": 15,
++    "groupId": 10,
++    "inputs": [
++        {"name": "reads", "type": "vmetaCollection", "value": "AAV_UCP1"},
++        {"name": "genome", "type": "input", "value": "/pi/x/genome.fa"},
++        {"name": "run_STAR", "type": "input", "value": "no"},
++    ],
++    "processOptions": {"281_32": {}, "289_12": {}},
++}
++
++
++class TestGetRunDetailsCompact:
++    def test_default_returns_compact_summary_envelope(self):
++        client = _client(_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("123"))
++        assert list(parsed.keys())[0] == "summary"
++        assert parsed["data"]["pipeline"]["name"] == "PMM RNASeq DE Pipeline"
++        assert parsed["data"]["sample_inputs"][0]["dataset"] == "AAV_UCP1"
++        assert parsed["data"]["settings"][0]["name"] == "run_STAR"
++        assert parsed["data"]["reference_paths"] == ["genome"]
++        assert parsed["data"]["process_option_groups"] == 2
++
++    def test_default_next_steps_have_verbose_and_hpc_advisory(self):
++        client = _client(_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("123"))
++        assert any("verbose=True" in s for s in parsed["next_steps"])
++        assert any("HPC" in s for s in parsed["next_steps"])
++
++    def test_verbose_returns_full_blob(self):
++        client = _client(_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("123", verbose=True))
++        assert parsed["groupId"] == 10
++        assert "summary" not in parsed
+diff --git a/test/test_run_execution.py b/test/test_run_execution.py
+index a8bf404..118ecbe 100644
+--- a/test/test_run_execution.py
++++ b/test/test_run_execution.py
+@@ -13,21 +13,21 @@ def _patched_client(call_return):
+ 
+ 
+ class TestGetRunDetails:
+     def test_hits_details_endpoint_and_returns_json(self):
+         details = {
+             "id": 123, "inputs": [], "processOptions": {},
+             "permission": 2, "groupId": 5, "mainPipeline": {"id": 1408},
+         }
+         client = _patched_client(details)
+         with patch.object(server, "get_client", return_value=client):
+-            result = server.get_run_details("123")
++            result = server.get_run_details("123", verbose=True)
+         client.call.assert_called_once_with(
+             method="GET", endpoint="/api/v1/run/123/details"
+         )
+         assert json.loads(result)["groupId"] == 5
+ 
+     def test_returns_error_json_on_exception(self):
+         client = MagicMock()
+         client.call.side_effect = RuntimeError("boom")
+         with patch.object(server, "get_client", return_value=client):
+             result = server.get_run_details("123")
+diff --git a/test/test_run_execution_live.py b/test/test_run_execution_live.py
+index 50b70f6..cdcb283 100644
+--- a/test/test_run_execution_live.py
++++ b/test/test_run_execution_live.py
+@@ -35,21 +35,23 @@ def _is_error(result):
+     """update_run/duplicate_run return a JSON string; an error is a dict with 'error'."""
+     return isinstance(result, dict) and "error" in result
+ 
+ 
+ def test_get_run_details_roundtrip():
+     config.set_credentials(
+         os.environ["VIAFOUNDRY_LIVE_HOST"], os.environ["VIAFOUNDRY_LIVE_TOKEN"]
+     )
+     try:
+         result = json.loads(
+-            server.get_run_details(os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"])
++            server.get_run_details(
++                os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"], verbose=True
++            )
+         )
+         assert "error" not in result
+         assert "permission" in result and "groupId" in result
+     finally:
+         config.set_credentials(None, None)
+ 
+ 
+ @pytest.mark.skipif(
+     not LIVE_MUTATE, reason="VIAFOUNDRY_LIVE_TARGET_PROJECT not set (mutating chain)"
+ )
+@@ -63,35 +65,35 @@ def test_duplicate_then_update_run_chain():
+     preserved.
+     """
+     config.set_credentials(
+         os.environ["VIAFOUNDRY_LIVE_HOST"], os.environ["VIAFOUNDRY_LIVE_TOKEN"]
+     )
+     try:
+         source_run = os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"]
+         target_project = int(os.environ["VIAFOUNDRY_LIVE_TARGET_PROJECT"])
+ 
+         # Learn the source run's shape.
+-        src = json.loads(server.get_run_details(source_run))
++        src = json.loads(server.get_run_details(source_run, verbose=True))
+         assert "error" not in src
+         pipeline_id = (src.get("mainPipeline") or {}).get("id")
+         assert pipeline_id, "source run has no mainPipeline.id"
+ 
+         # 1) duplicate into the target project.
+         dup = json.loads(
+             server.duplicate_run(source_run, target_project, int(pipeline_id))
+         )
+         assert not _is_error(dup), f"duplicate_run failed: {dup}"
+         new_run = dup.get("duplicatedRunId")
+         assert new_run, f"no duplicatedRunId in response: {dup}"
+ 
+         # 2) re-inspect the duplicate and build a minimal, execution-inert patch.
+-        det = json.loads(server.get_run_details(str(new_run)))
++        det = json.loads(server.get_run_details(str(new_run), verbose=True))
+         assert "error" not in det
+         permission = det["permission"]
+         group_id = det.get("groupId") if permission == GROUP_SHARED_PERMISSION else None
+         process_options = det.get("processOptions") or {}
+ 
+         # Re-affirm one existing input (upsert). Prefer the vmetaCollection input
+         # (the one duplicate_run is known to sometimes drop); else any scalar with
+         # a non-empty value. Never send an empty-string value.
+         inputs_patch = []
+         vmeta = next(
+@@ -126,16 +128,16 @@ def test_duplicate_then_update_run_chain():
+         res = json.loads(server.update_run(
+             str(new_run),
+             inputs=inputs_patch,
+             process_options=process_options,
+             permission=permission,
+             group_id=group_id,
+         ))
+         assert not _is_error(res), f"update_run failed: {res}"
+ 
+         # 4) the run must still be coherent afterwards (do NOT initiate it).
+-        after = json.loads(server.get_run_details(str(new_run)))
++        after = json.loads(server.get_run_details(str(new_run), verbose=True))
+         assert "error" not in after
+         assert after.get("inputs"), "run lost all inputs after update_run"
+         assert "permission" in after
+     finally:
+         config.set_credentials(None, None)
+diff --git a/test/test_run_logs.py b/test/test_run_logs.py
+new file mode 100644
+index 0000000..7f4e2aa
+--- /dev/null
++++ b/test/test_run_logs.py
+@@ -0,0 +1,59 @@
++"""Tests for get_run_log."""
++import json
++from unittest.mock import MagicMock, patch
++
++from src.foundry_mcp import server
++
++
++def _client(call_return):
++    c = MagicMock()
++    c.call.return_value = call_return
++    return c
++
++
++class TestGetRunLog:
++    def test_hits_logs_endpoint_and_tails_command_err(self):
++        logs = [
++            {"name": "log.txt", "content": "started\nstep1 ok\n"},
++            {"name": ".command.err", "content": "Traceback\nSTAR: genome index not found\n"},
++        ]
++        client = _client(logs)
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("12219")
++        client.call.assert_called_once_with(
++            method="GET", endpoint="/api/v1/run/12219/logs", params=None
++        )
++        parsed = json.loads(result)
++        assert parsed["data"]["log_name"] == ".command.err"
++        assert "genome index not found" in parsed["data"]["log_tail"]
++        assert parsed["summary"]
++        assert parsed["next_steps"]
++
++    def test_passes_attempt_id_as_query(self):
++        client = _client([{"name": "err.log", "content": "boom"}])
++        with patch.object(server, "get_client", return_value=client):
++            server.get_run_log("12219", attempt_id=3)
++        client.call.assert_called_once_with(
++            method="GET", endpoint="/api/v1/run/12219/logs", params={"attemptId": 3}
++        )
++
++    def test_unwraps_dict_logs_key(self):
++        client = _client({"logs": [{"name": "err.log", "content": "oops"}]})
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        assert json.loads(result)["data"]["log_name"] == "err.log"
++
++    def test_reports_when_no_logs_available(self):
++        client = _client([{"name": "log.txt", "content": ""}])
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        parsed = json.loads(result)
++        assert parsed["data"]["logs"] == []
++        assert "synced" in parsed["summary"]
++
++    def test_returns_error_json_on_exception(self):
++        client = MagicMock()
++        client.call.side_effect = RuntimeError("boom")
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        assert json.loads(result) == {"error": "boom"}
+diff --git a/test/test_run_status.py b/test/test_run_status.py
+new file mode 100644
+index 0000000..f7c6df1
+--- /dev/null
++++ b/test/test_run_status.py
+@@ -0,0 +1,39 @@
++"""Tests for get_run human status enrichment."""
++import json
++from unittest.mock import MagicMock, patch
++
++from src.foundry_mcp import server
++
++
++def _search_client(runs):
++    c = MagicMock()
++    c.call.return_value = {"data": runs}
++    return c
++
++
++class TestGetRunHumanStatus:
++    def test_failed_run_gets_failed_display_and_log_next_step(self):
++        client = _search_client([{"id": 12219, "name": "UCP1_AAV", "status": "NextErr"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="12219"))
++        assert parsed["status_display"] == "Failed"
++        assert "get_run_log" in parsed["next_steps"][0]
++
++    def test_completed_run_points_to_reports(self):
++        client = _search_client([{"id": 1, "name": "x", "status": "NextSuc"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="1"))
++        assert parsed["status_display"] == "Completed"
++        assert "include_reports" in parsed["next_steps"][0]
++
++    def test_running_run_display(self):
++        client = _search_client([{"id": 1, "name": "x", "status": "NextRun"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="1"))
++        assert parsed["status_display"] == "Running"
++
++    def test_unknown_status_falls_back_to_connecting(self):
++        client = _search_client([{"id": 1, "name": "x", "status": "Manual"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="1"))
++        assert parsed["status_display"] == "Connecting"
+diff --git a/test/test_utils.py b/test/test_utils.py
+index 33d96fe..7eef7a0 100644
+--- a/test/test_utils.py
++++ b/test/test_utils.py
+@@ -172,10 +172,42 @@ class TestSerializeResponse:
+     def test_serialize_fallback_to_string(self):
+         """Test that unhandled types fall back to string conversion."""
+         import datetime
+         dt = datetime.datetime(2024, 1, 15, 12, 30, 0)
+         
+         result = serialize_response(dt)
+         
+         assert isinstance(result, str)
+         assert "2024" in result
+ 
++
++from src.foundry_mcp.utils import tail_text, envelope
++
++
++def test_tail_text_returns_last_n_lines():
++    text = "\n".join(str(i) for i in range(1, 501))
++    assert tail_text(text, max_lines=3) == "498\n499\n500"
++
++
++def test_tail_text_caps_chars_keeping_tail():
++    text = "x" * 100 + "TAIL"
++    assert tail_text(text, max_lines=10, max_chars=4) == "TAIL"
++
++
++def test_tail_text_handles_empty():
++    assert tail_text("") == ""
++    assert tail_text(None) == ""
++
++
++def test_envelope_orders_summary_next_steps_data():
++    result = envelope("did a thing", data={"x": 1}, next_steps=["do next"])
++    assert list(result.keys()) == ["summary", "next_steps", "data"]
++    assert result["summary"] == "did a thing"
++    assert result["data"] == {"x": 1}
++    assert result["next_steps"] == ["do next"]
++
++
++def test_envelope_omits_next_steps_when_empty():
++    result = envelope("ok")
++    assert "next_steps" not in result
++    assert result["data"] == {}
++

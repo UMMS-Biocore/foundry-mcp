@@ -104,3 +104,58 @@ class TestGetRunLog:
         relaunch_step = next(s for s in next_steps if "resumerun" in s)
         assert "confirming with the user" in relaunch_step
         assert "run_id='12219'" in relaunch_step
+
+
+class TestPicksSubstantiveLogOnClusterRuns:
+    """Real LSF cluster runs (verified against staging runs 12193/12194) return
+    NO .command.* files at all, and `err.log` is a fixed 42-byte job-starter
+    stub. The composite `log.txt` and the Nextflow debug log carry the actual
+    failure, so a stub must never outrank them."""
+
+    # verbatim from staging run 12193
+    _ERR_LOG_STUB = "JOB_STARTER: slots=1 (LSB_DJOB_NUMPROC=1)\n"
+
+    def _cluster_logs(self):
+        return [
+            {"name": "trace.txt", "content": "task\tstatus\n" * 40},
+            {"name": "timeline.html", "content": "<html>" + "x" * 5000},
+            {"name": "report.html", "content": "<html>" + "y" * 9000},
+            {"name": "log.txt", "content": "Started\n" * 50 + "ERROR: DESeq2 step failed\n##Exit status: 1\n"},
+            {"name": "err.log", "content": self._ERR_LOG_STUB},
+            {"name": ".nextflow.log", "content": "DEBUG nextflow\n" * 200},
+            {"name": "nextflow.nf", "content": "process foo {}\n" * 100},
+        ]
+
+    def test_prefers_composite_log_over_42_byte_err_stub(self):
+        client = _client(self._cluster_logs())
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_log("12193"))
+        assert parsed["data"]["log_name"] == "log.txt"
+        assert "DESeq2 step failed" in parsed["data"]["log_tail"]
+
+    def test_still_prefers_command_err_when_it_actually_exists(self):
+        logs = self._cluster_logs() + [
+            {"name": ".command.err", "content": "STAR: genome index not found\n" * 10}
+        ]
+        client = _client(logs)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_log("1"))
+        assert parsed["data"]["log_name"] == ".command.err"
+
+    def test_falls_back_to_stub_only_when_nothing_substantive_exists(self):
+        client = _client([{"name": "err.log", "content": self._ERR_LOG_STUB}])
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_log("1"))
+        # better a stub than "no logs available"
+        assert parsed["data"]["log_name"] == "err.log"
+        assert "JOB_STARTER" in parsed["data"]["log_tail"]
+
+    def test_never_returns_html_or_pipeline_source_as_the_log(self):
+        client = _client([
+            {"name": "report.html", "content": "<html>" + "z" * 20000},
+            {"name": "nextflow.nf", "content": "process x {}\n" * 500},
+            {"name": "err.log", "content": self._ERR_LOG_STUB},
+        ])
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_log("1"))
+        assert parsed["data"]["log_name"] == "err.log"

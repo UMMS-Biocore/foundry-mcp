@@ -1,0 +1,468 @@
+# Review package: 367d9b2..HEAD
+
+## Commits
+611fbdd docs(mcp): fix stale run-tool docstrings/README and pin get_run's early-return contract
+6734e25 fix(mcp): harden get_run_log's diagnostic log picker and relaunch guardrail
+31e4754 fix(mcp): normalize external-pipeline dict-shaped inputs in get_run_details summary
+
+## Files changed
+ README.md                        |  7 ++--
+ src/foundry_mcp/server.py        | 70 ++++++++++++++++++++++++++++------------
+ test/test_integration.py         |  1 +
+ test/test_run_details_summary.py | 38 ++++++++++++++++++++++
+ test/test_run_logs.py            | 47 +++++++++++++++++++++++++++
+ test/test_run_status.py          | 16 +++++++++
+ 6 files changed, 155 insertions(+), 24 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 0f0421d..c4f5e64 100644
+--- a/README.md
++++ b/README.md
+@@ -79,48 +79,49 @@ To connect any AI assistant to Foundry Connect, you need a Personal Access Token
+ 
+ ### Manage Metadata
+ 
+ - "Search for metadata records matching 'cancer'"
+ - "Show me metadata record 456"
+ - "What metadata fields are defined in the system?"
+ - "Create a new metadata record for my experiment"
+ 
+ ---
+ 
+-## Available Tools (47 Total)
++## Available Tools (48 Total)
+ 
+ ### 📊 Report Management (8 tools)
+ 
+ Access and manage Foundry Connect reports and files.
+ 
+ | Tool                   | What It Does                                         |
+ | ---------------------- | ---------------------------------------------------- |
+ | `fetch_report`         | Get complete report data with metadata               |
+ | `list_processes`       | List all processes that generated output in a report |
+ | `list_files`           | List files (all or by specific process)              |
+ | `download_file`        | Download files from reports to local machine         |
+ | `load_file`            | View file contents directly (tabular data formatted) |
+ | `upload_file`          | Upload files to reports                              |
+ | `get_report_dirs`      | Get available directories for file uploads           |
+ | `get_all_report_paths` | Get all accessible file paths in a report            |
+ 
+ ---
+ 
+-### 🏃 Run Management (7 tools)
++### 🏃 Run Management (8 tools)
+ 
+ Search and retrieve pipeline run information.
+ 
+ | Tool        | What It Does                                              |
+ | ----------- | --------------------------------------------------------- |
+ | `list_runs` | List and search for runs/pipeline executions              |
+ | `get_run`   | Get detailed run info by ID or name (supports fuzzy match)|
+-| `get_run_details`     | Full editable run: inputs, processOptions, permission, groupId |
++| `get_run_log`         | Execution logs for a run (diagnose failures); `attempt_id` optional |
++| `get_run_details`     | Compact run config; `verbose=True` returns the full editable inputs/processOptions |
+ | `create_vmeta_dataset`| Create an empty vmeta dataset (returns _id for run inputs)      |
+ | `duplicate_run`       | Duplicate a run into a project/pipeline; returns `duplicatedRunId` |
+ | `update_run`          | Patch a run's inputs + processOptions (requires permission; groupId required only if permission=15) |
+ | `initiate_run`        | Launch a prepared run (newrun/resumerun/rerun)                 |
+ 
+ ---
+ 
+ ### 🔬 Process & Pipeline Management (10 tools)
+ 
+ Create, explore, and manage bioinformatics pipelines.
+diff --git a/src/foundry_mcp/server.py b/src/foundry_mcp/server.py
+index 761b198..ece9a5e 100644
+--- a/src/foundry_mcp/server.py
++++ b/src/foundry_mcp/server.py
+@@ -749,20 +749,24 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
+             try:
+                 reports = via_client.call(
+                     method="GET",
+                     endpoint=f"/api/v1/run/{run_id}/reports"
+                 )
+                 result["reports"] = reports
+             except Exception as e:
+                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                 result["reports"] = {"error": str(e)}
+ 
++        # NOTE: summary/next_steps are merged FLAT into `result` here (not
++        # nested in an envelope like get_run_log/get_run_details) so that
++        # existing consumers of result["run"] keep working unchanged. Don't
++        # "fix" this to use envelope() without also updating those consumers.
+         run_obj = result.get("run")
+         if isinstance(run_obj, dict):
+             display = _human_run_status(run_obj.get("status"))
+             result["status_display"] = display
+             name = run_obj.get("name")
+             if display == "Failed":
+                 result["summary"] = (
+                     f"Run '{name}' ({run_id}) failed. Fetch the log to see why."
+                 )
+                 result["next_steps"] = [
+@@ -786,38 +790,45 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
+                 result["summary"] = f"Run '{name}' ({run_id}) status: {display}."
+ 
+         return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error getting run: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ # Log file names, ordered most→least useful for diagnosing a failed run.
+ _LOG_PRIORITY = [
+-    ".command.err", "err.log", ".command.log", "log.txt",
++    ".command.err", ".command.out", "err.log", ".command.log", "log.txt",
+     ".nextflow.log", "serverlog.txt",
+ ]
+ 
++# Non-log artifacts the backend's log set can include (Nextflow HTML reports,
++# trace files, the pipeline script itself) that should never be handed to the
++# user as "the most relevant log" via the fallback picker.
++_NON_LOG_SUFFIXES = (".html", ".nf", ".config")
++
+ 
+ def _pick_diagnostic_log(logs):
+     """From a list of {"name","content"} dicts, return (name, content) of the
+     most useful non-empty log for diagnosis, or (None, None) if all are empty."""
+     by_name = {
+         entry.get("name"): (entry.get("content") or "")
+         for entry in logs
+         if isinstance(entry, dict)
+     }
+     for name in _LOG_PRIORITY:
+         if by_name.get(name, "").strip():
+             return name, by_name[name]
+     for name, content in by_name.items():
+-        if content.strip():
++        if name and name.endswith(_NON_LOG_SUFFIXES):
++            continue
++        if name and content.strip():
+             return name, content
+     return None, None
+ 
+ 
+ @mcp.tool()
+ def get_run_log(run_id: str, attempt_id: int = None) -> str:
+     """
+     Show why a run is in its current state by returning its execution log.
+     Use this whenever a run's status is Failed (Error/NextErr) or the user asks
+     "why did it fail / what happened". Returns a plain-language summary plus the
+@@ -855,55 +866,70 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
+         result = envelope(
+             summary=(
+                 f"Showing the tail of '{name}' for run {run_id} (the most "
+                 f"relevant log). Read the last lines for the error or the "
+                 f"completion message."
+             ),
+             data={
+                 "log_name": name,
+                 "log_tail": tail_text(content),
+                 "available_logs": [
+-                    entry.get("name") for entry in logs if isinstance(entry, dict)
++                    entry.get("name") for entry in logs
++                    if isinstance(entry, dict) and entry.get("name")
+                 ],
+             },
+             next_steps=[
+                 f"If it failed, get_run_details(run_id='{run_id}') shows the "
+                 f"inputs/params that caused it.",
+-                "Fix the cause, then re-launch with "
+-                "initiate_run(run_type='resumerun') to reuse completed steps.",
++                f"Fix the cause, then — after confirming with the user — "
++                f"re-launch with initiate_run(run_id='{run_id}', "
++                f"run_type='resumerun') to reuse completed steps.",
+             ],
+         )
+         return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error fetching logs for run {run_id}: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ # ============================================================================
+ # Run Execution Tools
+ # ============================================================================
+ 
+ 
++def _iter_run_inputs(inputs):
++    """Yield (name, value, type) triples from either run-input shape:
++    the ViaFoundry list of {name,value,type}, or the external-pipeline
++    (nf-core/Nextflow) dict of {name: {...}} that the backend returns instead."""
++    if isinstance(inputs, dict):
++        for name, val in inputs.items():
++            if isinstance(val, dict) and "value" in val:
++                yield name, val.get("value"), val.get("type")
++            else:
++                yield name, val, None
++        return
++    for inp in inputs or []:
++        if isinstance(inp, dict):
++            yield inp.get("name"), inp.get("value"), inp.get("type")
++
++
+ def _summarize_run_details(details):
+     """Distill a run's full details blob into a compact, plain-language summary
+     a bench scientist can read without wading through processOptions."""
+     pipeline = details.get("mainPipeline") or {}
+     project = details.get("project") or {}
+     inputs = details.get("inputs") or []
+     proc_opts = details.get("processOptions") or {}
+ 
+     sample_inputs, settings, reference_paths = [], [], []
+-    for inp in inputs:
+-        if not isinstance(inp, dict):
+-            continue
+-        name, value = inp.get("name"), inp.get("value")
+-        if inp.get("type") == "vmetaCollection":
++    for name, value, itype in _iter_run_inputs(inputs):
++        if itype == "vmetaCollection":
+             sample_inputs.append({"name": name, "dataset": value})
+         elif isinstance(value, str) and value.startswith("/"):
+             reference_paths.append(name)
+         else:
+             settings.append({"name": name, "value": value})
+ 
+     return {
+         "pipeline": {
+             "name": pipeline.get("name"),
+             "version": pipeline.get("version"),
+@@ -980,26 +1006,27 @@ def create_vmeta_dataset(name: str) -> str:
+     except Exception as e:
+         logger.error(f"Error creating vmeta dataset '{name}': {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ @mcp.tool()
+ def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
+     """
+     Duplicate an existing run into a target project/pipeline and return the
+     new run's `duplicatedRunId`. `project_id` and `pipeline_id` come from
+-    get_run_details on the source run (its `projectId` and `mainPipeline.id`).
+-    Use `duplicatedRunId` from the response when wiring into update_run or
+-    initiate_run. NOTE: the duplicate may DROP the vmetaCollection input (e.g.
+-    `reads`) and copy processOptions with empty arrays — re-add/patch them
+-    with update_run before initiate_run. Path inputs (references, genomes) are
+-    copied verbatim and may point at the source project's paths.
++    get_run_details(run_id, verbose=True) on the source run (its `project.id`
++    and `mainPipeline.id`). Use `duplicatedRunId` from the response when
++    wiring into update_run or initiate_run. NOTE: the duplicate may DROP the
++    vmetaCollection input (e.g. `reads`) and copy processOptions with empty
++    arrays — re-add/patch them with update_run before initiate_run. Path
++    inputs (references, genomes) are copied verbatim and may point at the
++    source project's paths.
+     """
+     try:
+         via_client = get_client()
+         duplicated = via_client.call(
+             method="POST",
+             endpoint=f"/api/v1/run/{run_id}/duplicate",
+             data={"projectId": project_id, "pipelineId": pipeline_id},
+         )
+         return json.dumps(duplicated, indent=2)
+     except Exception as e:
+@@ -1037,25 +1064,26 @@ def _validate_update_run(inputs, process_options, permission, group_id):
+ @mcp.tool()
+ def update_run(
+     run_id: str,
+     inputs: list,
+     process_options: dict,
+     permission: int,
+     group_id: int = None,
+ ) -> str:
+     """
+     Patch a run's inputs and processOptions (PATCH /save). `permission` is
+-    REQUIRED (echo it from get_run_details); `group_id` is REQUIRED only when
+-    `permission` is 15 (GroupShared) — otherwise it may be omitted/None. No
+-    input `value` may be an empty string — use "NA" or omit the input. Within
+-    one processOptions entry, all spreadsheet (list) columns must be equal
+-    length. This mutates the run; confirm with the user before calling.
++    REQUIRED (echo it from get_run_details(run_id, verbose=True)); `group_id`
++    is REQUIRED only when `permission` is 15 (GroupShared) — otherwise it
++    may be omitted/None. No input `value` may be an empty string — use "NA"
++    or omit the input. Within one processOptions entry, all spreadsheet
++    (list) columns must be equal length. This mutates the run; confirm with
++    the user before calling.
+     """
+     try:
+         _validate_update_run(inputs, process_options, permission, group_id)
+         via_client = get_client()
+         saved = via_client.call(
+             method="PATCH",
+             endpoint=f"/api/v1/run/{run_id}/save",
+             data={
+                 "inputs": inputs,
+                 "processOptions": process_options,
+diff --git a/test/test_integration.py b/test/test_integration.py
+index 54452aa..20b273b 100644
+--- a/test/test_integration.py
++++ b/test/test_integration.py
+@@ -43,20 +43,21 @@ class TestMCPTools:
+     def test_run_tools_registered(self):
+         """Verify run management tools are registered."""
+         from src.foundry_mcp.server import mcp
+         
+         tools = mcp._tool_manager._tools
+         tool_names = list(tools.keys())
+         
+         expected_run_tools = [
+             'list_runs',
+             'get_run',
++            'get_run_log',
+             'get_run_details',
+             'create_vmeta_dataset',
+             'duplicate_run',
+             'update_run',
+             'initiate_run',
+         ]
+         
+         for tool in expected_run_tools:
+             assert tool in tool_names, f"Missing run tool: {tool}"
+     
+diff --git a/test/test_run_details_summary.py b/test/test_run_details_summary.py
+index 8c8006b..2c05dfd 100644
+--- a/test/test_run_details_summary.py
++++ b/test/test_run_details_summary.py
+@@ -43,10 +43,48 @@ class TestGetRunDetailsCompact:
+             parsed = json.loads(server.get_run_details("123"))
+         assert any("verbose=True" in s for s in parsed["next_steps"])
+         assert any("HPC" in s for s in parsed["next_steps"])
+ 
+     def test_verbose_returns_full_blob(self):
+         client = _client(_DETAILS)
+         with patch.object(server, "get_client", return_value=client):
+             parsed = json.loads(server.get_run_details("123", verbose=True))
+         assert parsed["groupId"] == 10
+         assert "summary" not in parsed
++
++
++_EXTERNAL_DETAILS = {
++    "mainPipeline": {"id": 42, "name": "nf-core/rnaseq", "version": "3.14.0"},
++    "project": {"id": 2664, "name": "BC_RNAseq"},
++    "permission": 3,
++    "groupId": None,
++    # External (nf-core/Nextflow) pipelines: backend returns a dict keyed by
++    # input name, not the ViaFoundry list-of-{name,value,type}.
++    "inputs": {
++        "genome": {"value": "/pi/x/genome.fa", "type": "input"},
++        "aligner": {"value": "star_salmon", "type": "input"},
++        "reads": {"value": "AAV_UCP1", "type": "vmetaCollection"},
++    },
++    "processOptions": {"1_1": {}},
++}
++
++
++class TestGetRunDetailsExternalPipelineDictInputs:
++    def test_dict_shaped_inputs_populate_settings_not_empty(self):
++        client = _client(_EXTERNAL_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("456"))
++        assert parsed["data"]["settings"], "settings must not be silently empty"
++        names = {s["name"] for s in parsed["data"]["settings"]}
++        assert "aligner" in names
++
++    def test_dict_shaped_path_value_lands_in_reference_paths(self):
++        client = _client(_EXTERNAL_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("456"))
++        assert "genome" in parsed["data"]["reference_paths"]
++
++    def test_dict_shaped_vmeta_collection_lands_in_sample_inputs(self):
++        client = _client(_EXTERNAL_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("456"))
++        assert {"name": "reads", "dataset": "AAV_UCP1"} in parsed["data"]["sample_inputs"]
+diff --git a/test/test_run_logs.py b/test/test_run_logs.py
+index 7f4e2aa..e3653dd 100644
+--- a/test/test_run_logs.py
++++ b/test/test_run_logs.py
+@@ -50,10 +50,57 @@ class TestGetRunLog:
+         parsed = json.loads(result)
+         assert parsed["data"]["logs"] == []
+         assert "synced" in parsed["summary"]
+ 
+     def test_returns_error_json_on_exception(self):
+         client = MagicMock()
+         client.call.side_effect = RuntimeError("boom")
+         with patch.object(server, "get_client", return_value=client):
+             result = server.get_run_log("1")
+         assert json.loads(result) == {"error": "boom"}
++
++    def test_command_out_outranks_nextflow_log(self):
++        logs = [
++            {"name": ".nextflow.log", "content": "generic nextflow chatter"},
++            {"name": ".command.out", "content": "Killed\nOOM"},
++        ]
++        client = _client(logs)
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        assert json.loads(result)["data"]["log_name"] == ".command.out"
++
++    def test_fallback_skips_html_and_config_and_nf_artifacts(self):
++        # No priority-listed log has content; only non-log artifacts + a
++        # genuine (unlisted) log file have content. The fallback must skip
++        # the html/nf/config artifacts and surface the real log.
++        logs = [
++            {"name": "report.html", "content": "<html>big nextflow report</html>"},
++            {"name": "timeline.html", "content": "<html>timeline</html>"},
++            {"name": "nextflow.nf", "content": "process foo { ... }"},
++            {"name": "nextflow.config", "content": "params { ... }"},
++            {"name": "some_other.log", "content": "real diagnostic content here"},
++        ]
++        client = _client(logs)
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        assert json.loads(result)["data"]["log_name"] == "some_other.log"
++
++    def test_available_logs_excludes_nameless_entries(self):
++        logs = [
++            {"name": "err.log", "content": "boom"},
++            {"name": "", "content": "some anonymous blob"},
++            {"content": "no name key at all"},
++        ]
++        client = _client(logs)
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        available = json.loads(result)["data"]["available_logs"]
++        assert available == ["err.log"]
++
++    def test_relaunch_next_step_has_confirm_cue_and_run_id(self):
++        client = _client([{"name": "err.log", "content": "boom"}])
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("12219")
++        next_steps = json.loads(result)["next_steps"]
++        relaunch_step = next(s for s in next_steps if "resumerun" in s)
++        assert "confirming with the user" in relaunch_step
++        assert "run_id='12219'" in relaunch_step
+diff --git a/test/test_run_status.py b/test/test_run_status.py
+index f7c6df1..283a4dd 100644
+--- a/test/test_run_status.py
++++ b/test/test_run_status.py
+@@ -30,10 +30,26 @@ class TestGetRunHumanStatus:
+         client = _search_client([{"id": 1, "name": "x", "status": "NextRun"}])
+         with patch.object(server, "get_client", return_value=client):
+             parsed = json.loads(server.get_run(run_id="1"))
+         assert parsed["status_display"] == "Running"
+ 
+     def test_unknown_status_falls_back_to_connecting(self):
+         client = _search_client([{"id": 1, "name": "x", "status": "Manual"}])
+         with patch.object(server, "get_client", return_value=client):
+             parsed = json.loads(server.get_run(run_id="1"))
+         assert parsed["status_display"] == "Connecting"
++
++    def test_fuzzy_match_does_not_get_status_display(self):
++        client = _search_client(
++            [{"id": 1, "name": "not-quite-it", "status": "NextSuc"}]
++        )
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_name="nope"))
++        assert parsed["match_type"] == "fuzzy"
++        assert "status_display" not in parsed
++
++    def test_no_match_does_not_get_status_display(self):
++        client = _search_client([])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_name="nope"))
++        assert parsed["match_type"] == "none"
++        assert "status_display" not in parsed

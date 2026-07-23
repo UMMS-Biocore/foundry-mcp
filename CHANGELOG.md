@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- **Better failure diagnosis from chat** — `get_run_log` now returns the log
+  that actually carries the failure. On real cluster (LSF) runs the backend
+  returns no `.command.*` files and `err.log` is a fixed 42-byte job-starter
+  stub, which the previous ordering handed back as "the most relevant log".
+  Substantive logs (`log.txt`, `.nextflow.log`) now outrank near-empty stubs.
 - Run-execution tools: `get_run_details`, `create_vmeta_dataset`, `duplicate_run`,
   `update_run`, `initiate_run` — enables duplicating and launching runs via MCP
   (previously runs were read-only). `update_run` enforces the `permission`+`groupId`

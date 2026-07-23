@@ -1,0 +1,211 @@
+# Review package: 6e442ba..240ddeb
+
+## Commits
+240ddeb feat(mcp): add get_run_log tool to surface failure logs in chat
+
+## Files changed
+ src/foundry_mcp/server.py | 89 ++++++++++++++++++++++++++++++++++++++++++++++-
+ test/test_run_logs.py     | 59 +++++++++++++++++++++++++++++++
+ 2 files changed, 147 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/foundry_mcp/server.py b/src/foundry_mcp/server.py
+index 95c5251..0586910 100644
+--- a/src/foundry_mcp/server.py
++++ b/src/foundry_mcp/server.py
+@@ -27,21 +27,21 @@ import requests
+ from starlette.types import ASGIApp, Receive, Scope, Send
+ from mcp.server.fastmcp import FastMCP
+ from mcp.server.transport_security import TransportSecuritySettings
+ 
+ # Import from our modules
+ from .client import get_client
+ from .config import (
+     set_credentials, validate_credentials, get_fixed_hostname,
+     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
+ )
+-from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none
++from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
+ from .log import get_logger, get_uvicorn_log_config, mask_token
+ 
+ 
+ # Get logger for this module
+ logger = get_logger(__name__)
+ 
+ # Maximum file size for upload/download via base64 (200MB)
+ # Base64 encoding increases size by ~33%, so 200MB file becomes ~267MB in transport
+ MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
+ 
+@@ -734,20 +734,107 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
+             except Exception as e:
+                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                 result["reports"] = {"error": str(e)}
+         
+         return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error getting run: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
++# Log file names, ordered most→least useful for diagnosing a failed run.
++_LOG_PRIORITY = [
++    ".command.err", "err.log", ".command.log", "log.txt",
++    ".nextflow.log", "serverlog.txt",
++]
++
++
++def _pick_diagnostic_log(logs):
++    """From a list of {"name","content"} dicts, return (name, content) of the
++    most useful non-empty log for diagnosis, or (None, None) if all are empty."""
++    by_name = {
++        entry.get("name"): (entry.get("content") or "")
++        for entry in logs
++        if isinstance(entry, dict)
++    }
++    for name in _LOG_PRIORITY:
++        if by_name.get(name, "").strip():
++            return name, by_name[name]
++    for name, content in by_name.items():
++        if content.strip():
++            return name, content
++    return None, None
++
++
++@mcp.tool()
++def get_run_log(run_id: str, attempt_id: int = None) -> str:
++    """
++    Show why a run is in its current state by returning its execution log.
++    Use this whenever a run's status is Failed (Error/NextErr) or the user asks
++    "why did it fail / what happened". Returns a plain-language summary plus the
++    tail of the most relevant log (.command.err / Nextflow). Pair with get_run
++    (status) and get_run_details (the settings that produced it).
++    """
++    try:
++        via_client = get_client()
++        params = {"attemptId": attempt_id} if attempt_id else None
++        logger.info(
++            f"Fetching logs for run {run_id}"
++            + (f" attempt {attempt_id}" if attempt_id else "")
++        )
++        logs = via_client.call(
++            method="GET", endpoint=f"/api/v1/run/{run_id}/logs", params=params
++        )
++        if isinstance(logs, dict) and "logs" in logs:
++            logs = logs["logs"]
++        if not isinstance(logs, list):
++            logs = []
++
++        name, content = _pick_diagnostic_log(logs)
++        if not name:
++            result = envelope(
++                summary=(
++                    f"No log output is available yet for run {run_id}. If it is "
++                    f"still starting or running on a cluster, logs may not have "
++                    f"synced — try again shortly."
++                ),
++                data={"logs": []},
++                next_steps=[f"Check status with get_run(run_id='{run_id}')."],
++            )
++            return json.dumps(result, indent=2)
++
++        result = envelope(
++            summary=(
++                f"Showing the tail of '{name}' for run {run_id} (the most "
++                f"relevant log). Read the last lines for the error or the "
++                f"completion message."
++            ),
++            data={
++                "log_name": name,
++                "log_tail": tail_text(content),
++                "available_logs": [
++                    entry.get("name") for entry in logs if isinstance(entry, dict)
++                ],
++            },
++            next_steps=[
++                f"If it failed, get_run_details(run_id='{run_id}') shows the "
++                f"inputs/params that caused it.",
++                "Fix the cause, then re-launch with "
++                "initiate_run(run_type='resumerun') to reuse completed steps.",
++            ],
++        )
++        return json.dumps(result, indent=2)
++    except Exception as e:
++        logger.error(f"Error fetching logs for run {run_id}: {e}")
++        return json.dumps({"error": str(e)})
++
++
+ # ============================================================================
+ # Run Execution Tools
+ # ============================================================================
+ 
+ 
+ @mcp.tool()
+ def get_run_details(run_id: str) -> str:
+     """
+     Get the full execution details of a run: inputs[], processOptions{},
+     permission, groupId, and mainPipeline. Use this before duplicating or
+diff --git a/test/test_run_logs.py b/test/test_run_logs.py
+new file mode 100644
+index 0000000..7f4e2aa
+--- /dev/null
++++ b/test/test_run_logs.py
+@@ -0,0 +1,59 @@
++"""Tests for get_run_log."""
++import json
++from unittest.mock import MagicMock, patch
++
++from src.foundry_mcp import server
++
++
++def _client(call_return):
++    c = MagicMock()
++    c.call.return_value = call_return
++    return c
++
++
++class TestGetRunLog:
++    def test_hits_logs_endpoint_and_tails_command_err(self):
++        logs = [
++            {"name": "log.txt", "content": "started\nstep1 ok\n"},
++            {"name": ".command.err", "content": "Traceback\nSTAR: genome index not found\n"},
++        ]
++        client = _client(logs)
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("12219")
++        client.call.assert_called_once_with(
++            method="GET", endpoint="/api/v1/run/12219/logs", params=None
++        )
++        parsed = json.loads(result)
++        assert parsed["data"]["log_name"] == ".command.err"
++        assert "genome index not found" in parsed["data"]["log_tail"]
++        assert parsed["summary"]
++        assert parsed["next_steps"]
++
++    def test_passes_attempt_id_as_query(self):
++        client = _client([{"name": "err.log", "content": "boom"}])
++        with patch.object(server, "get_client", return_value=client):
++            server.get_run_log("12219", attempt_id=3)
++        client.call.assert_called_once_with(
++            method="GET", endpoint="/api/v1/run/12219/logs", params={"attemptId": 3}
++        )
++
++    def test_unwraps_dict_logs_key(self):
++        client = _client({"logs": [{"name": "err.log", "content": "oops"}]})
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        assert json.loads(result)["data"]["log_name"] == "err.log"
++
++    def test_reports_when_no_logs_available(self):
++        client = _client([{"name": "log.txt", "content": ""}])
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        parsed = json.loads(result)
++        assert parsed["data"]["logs"] == []
++        assert "synced" in parsed["summary"]
++
++    def test_returns_error_json_on_exception(self):
++        client = MagicMock()
++        client.call.side_effect = RuntimeError("boom")
++        with patch.object(server, "get_client", return_value=client):
++            result = server.get_run_log("1")
++        assert json.loads(result) == {"error": "boom"}

@@ -1,0 +1,342 @@
+# Review package: 031e6ec..367d9b2
+
+## Commits
+367d9b2 feat(mcp): compact get_run_details with verbose escape hatch + launch advisory
+
+## Files changed
+ CHANGELOG.md                     |  5 +++
+ src/foundry_mcp/server.py        | 74 +++++++++++++++++++++++++++++++++++-----
+ test/test_run_details_summary.py | 52 ++++++++++++++++++++++++++++
+ test/test_run_execution.py       |  2 +-
+ test/test_run_execution_live.py  | 10 +++---
+ 5 files changed, 130 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 89208c7..a3b9968 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,20 +2,25 @@
+ 
+ ## [Unreleased]
+ 
+ ### Added
+ - Run-execution tools: `get_run_details`, `create_vmeta_dataset`, `duplicate_run`,
+   `update_run`, `initiate_run` — enables duplicating and launching runs via MCP
+   (previously runs were read-only). `update_run` enforces the `permission`+`groupId`
+   requirement, rejects empty-string input values, and checks equal-length
+   spreadsheet arrays.
+ - **OAuth Bearer token support** - Accept `Authorization: Bearer` credentials and emit `WWW-Authenticate` for OAuth discovery.
++- **Chat-friendly run journey (Phase 0)** — `get_run_log` surfaces execution
++  logs (`.command.err`/Nextflow tail) so failed runs are diagnosable from chat;
++  `get_run` now returns a plain-language `status_display` + `next_steps`;
++  `get_run_details` returns a compact summary by default (`verbose=True` for the
++  full editable config); all use a shared `{summary, next_steps, data}` envelope.
+ 
+ ## [1.2.2] - 2026-03-06
+ 
+ ### Added
+ 
+ - **`update_process`** - New tool to update an existing process with ownership guardrails to prevent cross-user modifications
+ 
+ ### Changed
+ 
+ - **`remove_none` utility** - Extracted shared `remove_none` helper from `create_process` and `update_process` into `utils.py`
+diff --git a/src/foundry_mcp/server.py b/src/foundry_mcp/server.py
+index 22723e2..761b198 100644
+--- a/src/foundry_mcp/server.py
++++ b/src/foundry_mcp/server.py
+@@ -876,34 +876,91 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
+     except Exception as e:
+         logger.error(f"Error fetching logs for run {run_id}: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ # ============================================================================
+ # Run Execution Tools
+ # ============================================================================
+ 
+ 
++def _summarize_run_details(details):
++    """Distill a run's full details blob into a compact, plain-language summary
++    a bench scientist can read without wading through processOptions."""
++    pipeline = details.get("mainPipeline") or {}
++    project = details.get("project") or {}
++    inputs = details.get("inputs") or []
++    proc_opts = details.get("processOptions") or {}
++
++    sample_inputs, settings, reference_paths = [], [], []
++    for inp in inputs:
++        if not isinstance(inp, dict):
++            continue
++        name, value = inp.get("name"), inp.get("value")
++        if inp.get("type") == "vmetaCollection":
++            sample_inputs.append({"name": name, "dataset": value})
++        elif isinstance(value, str) and value.startswith("/"):
++            reference_paths.append(name)
++        else:
++            settings.append({"name": name, "value": value})
++
++    return {
++        "pipeline": {
++            "name": pipeline.get("name"),
++            "version": pipeline.get("version"),
++            "id": pipeline.get("id"),
++        },
++        "project": {"name": project.get("name"), "id": project.get("id")},
++        "permission": details.get("permission"),
++        "groupId": details.get("groupId"),
++        "sample_inputs": sample_inputs,
++        "settings": settings,
++        "reference_paths": reference_paths,
++        "process_option_groups": len(proc_opts),
++    }
++
++
+ @mcp.tool()
+-def get_run_details(run_id: str) -> str:
++def get_run_details(run_id: str, verbose: bool = False) -> str:
+     """
+-    Get the full execution details of a run: inputs[], processOptions{},
+-    permission, groupId, and mainPipeline. Use this before duplicating or
+-    updating a run — it returns the shape needed to build an update_run body.
+-    (get_run returns summary/search info only; this returns the editable run.)
++    Show a run's configuration. By default returns a compact, plain-language
++    summary (pipeline, samples, key settings, count of process-option groups).
++    Pass verbose=True to get the FULL editable inputs[] and processOptions{}
++    needed to build an update_run body — do this before duplicate_run/update_run.
++    get_run shows a run's status; this shows the settings that produced it.
+     """
+     try:
+         via_client = get_client()
+         details = via_client.call(
+             method="GET", endpoint=f"/api/v1/run/{run_id}/details"
+         )
+-        return json.dumps(details, indent=2)
++        if verbose:
++            return json.dumps(details, indent=2)
++
++        summary_data = _summarize_run_details(details)
++        pipeline = summary_data["pipeline"]
++        result = envelope(
++            summary=(
++                f"Run {run_id} uses pipeline '{pipeline['name']}' "
++                f"(v{pipeline['version']}) with {len(summary_data['settings'])} "
++                f"settings and {summary_data['process_option_groups']} "
++                f"process-option groups."
++            ),
++            data=summary_data,
++            next_steps=[
++                f"To edit or re-launch, call get_run_details(run_id='{run_id}', "
++                f"verbose=True) for the full editable config, then update_run.",
++                "Launching a run uses HPC compute — confirm with the user "
++                "before initiate_run.",
++            ],
++        )
++        return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error getting run details for {run_id}: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ @mcp.tool()
+ def create_vmeta_dataset(name: str) -> str:
+     """
+     Create an empty vmeta dataset (study-tracker dataset). Returns its `_id`,
+     which is used as the `vmetaCollectionId` of a run's file input. Add file
+@@ -1013,22 +1070,23 @@ def update_run(
+ 
+ 
+ _VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")
+ 
+ 
+ @mcp.tool()
+ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
+     """
+     Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
+     (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
+-    params). Returns status, runUUID, localRunDir. This LAUNCHES compute;
+-    confirm with the user before calling.
++    params). Returns status, runUUID, localRunDir. This LAUNCHES real HPC compute
++    (it can take minutes to hours and consumes cluster time) — always confirm
++    with the user before calling.
+     """
+     try:
+         if run_type not in _VALID_RUN_TYPES:
+             raise ValueError(
+                 f"runType must be one of {', '.join(_VALID_RUN_TYPES)}, "
+                 f"got '{run_type}'"
+             )
+         via_client = get_client()
+         started = via_client.call(
+             method="POST",
+diff --git a/test/test_run_details_summary.py b/test/test_run_details_summary.py
+new file mode 100644
+index 0000000..8c8006b
+--- /dev/null
++++ b/test/test_run_details_summary.py
+@@ -0,0 +1,52 @@
++"""Tests for the compact get_run_details summary."""
++import json
++from unittest.mock import MagicMock, patch
++
++from src.foundry_mcp import server
++
++
++def _client(call_return):
++    c = MagicMock()
++    c.call.return_value = call_return
++    return c
++
++
++_DETAILS = {
++    "mainPipeline": {"id": 1539, "name": "PMM RNASeq DE Pipeline", "version": "2.0.0"},
++    "project": {"id": 2664, "name": "BC_RNAseq"},
++    "permission": 15,
++    "groupId": 10,
++    "inputs": [
++        {"name": "reads", "type": "vmetaCollection", "value": "AAV_UCP1"},
++        {"name": "genome", "type": "input", "value": "/pi/x/genome.fa"},
++        {"name": "run_STAR", "type": "input", "value": "no"},
++    ],
++    "processOptions": {"281_32": {}, "289_12": {}},
++}
++
++
++class TestGetRunDetailsCompact:
++    def test_default_returns_compact_summary_envelope(self):
++        client = _client(_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("123"))
++        assert list(parsed.keys())[0] == "summary"
++        assert parsed["data"]["pipeline"]["name"] == "PMM RNASeq DE Pipeline"
++        assert parsed["data"]["sample_inputs"][0]["dataset"] == "AAV_UCP1"
++        assert parsed["data"]["settings"][0]["name"] == "run_STAR"
++        assert parsed["data"]["reference_paths"] == ["genome"]
++        assert parsed["data"]["process_option_groups"] == 2
++
++    def test_default_next_steps_have_verbose_and_hpc_advisory(self):
++        client = _client(_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("123"))
++        assert any("verbose=True" in s for s in parsed["next_steps"])
++        assert any("HPC" in s for s in parsed["next_steps"])
++
++    def test_verbose_returns_full_blob(self):
++        client = _client(_DETAILS)
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run_details("123", verbose=True))
++        assert parsed["groupId"] == 10
++        assert "summary" not in parsed
+diff --git a/test/test_run_execution.py b/test/test_run_execution.py
+index a8bf404..118ecbe 100644
+--- a/test/test_run_execution.py
++++ b/test/test_run_execution.py
+@@ -13,21 +13,21 @@ def _patched_client(call_return):
+ 
+ 
+ class TestGetRunDetails:
+     def test_hits_details_endpoint_and_returns_json(self):
+         details = {
+             "id": 123, "inputs": [], "processOptions": {},
+             "permission": 2, "groupId": 5, "mainPipeline": {"id": 1408},
+         }
+         client = _patched_client(details)
+         with patch.object(server, "get_client", return_value=client):
+-            result = server.get_run_details("123")
++            result = server.get_run_details("123", verbose=True)
+         client.call.assert_called_once_with(
+             method="GET", endpoint="/api/v1/run/123/details"
+         )
+         assert json.loads(result)["groupId"] == 5
+ 
+     def test_returns_error_json_on_exception(self):
+         client = MagicMock()
+         client.call.side_effect = RuntimeError("boom")
+         with patch.object(server, "get_client", return_value=client):
+             result = server.get_run_details("123")
+diff --git a/test/test_run_execution_live.py b/test/test_run_execution_live.py
+index 50b70f6..cdcb283 100644
+--- a/test/test_run_execution_live.py
++++ b/test/test_run_execution_live.py
+@@ -35,21 +35,23 @@ def _is_error(result):
+     """update_run/duplicate_run return a JSON string; an error is a dict with 'error'."""
+     return isinstance(result, dict) and "error" in result
+ 
+ 
+ def test_get_run_details_roundtrip():
+     config.set_credentials(
+         os.environ["VIAFOUNDRY_LIVE_HOST"], os.environ["VIAFOUNDRY_LIVE_TOKEN"]
+     )
+     try:
+         result = json.loads(
+-            server.get_run_details(os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"])
++            server.get_run_details(
++                os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"], verbose=True
++            )
+         )
+         assert "error" not in result
+         assert "permission" in result and "groupId" in result
+     finally:
+         config.set_credentials(None, None)
+ 
+ 
+ @pytest.mark.skipif(
+     not LIVE_MUTATE, reason="VIAFOUNDRY_LIVE_TARGET_PROJECT not set (mutating chain)"
+ )
+@@ -63,35 +65,35 @@ def test_duplicate_then_update_run_chain():
+     preserved.
+     """
+     config.set_credentials(
+         os.environ["VIAFOUNDRY_LIVE_HOST"], os.environ["VIAFOUNDRY_LIVE_TOKEN"]
+     )
+     try:
+         source_run = os.environ["VIAFOUNDRY_LIVE_SOURCE_RUN"]
+         target_project = int(os.environ["VIAFOUNDRY_LIVE_TARGET_PROJECT"])
+ 
+         # Learn the source run's shape.
+-        src = json.loads(server.get_run_details(source_run))
++        src = json.loads(server.get_run_details(source_run, verbose=True))
+         assert "error" not in src
+         pipeline_id = (src.get("mainPipeline") or {}).get("id")
+         assert pipeline_id, "source run has no mainPipeline.id"
+ 
+         # 1) duplicate into the target project.
+         dup = json.loads(
+             server.duplicate_run(source_run, target_project, int(pipeline_id))
+         )
+         assert not _is_error(dup), f"duplicate_run failed: {dup}"
+         new_run = dup.get("duplicatedRunId")
+         assert new_run, f"no duplicatedRunId in response: {dup}"
+ 
+         # 2) re-inspect the duplicate and build a minimal, execution-inert patch.
+-        det = json.loads(server.get_run_details(str(new_run)))
++        det = json.loads(server.get_run_details(str(new_run), verbose=True))
+         assert "error" not in det
+         permission = det["permission"]
+         group_id = det.get("groupId") if permission == GROUP_SHARED_PERMISSION else None
+         process_options = det.get("processOptions") or {}
+ 
+         # Re-affirm one existing input (upsert). Prefer the vmetaCollection input
+         # (the one duplicate_run is known to sometimes drop); else any scalar with
+         # a non-empty value. Never send an empty-string value.
+         inputs_patch = []
+         vmeta = next(
+@@ -126,16 +128,16 @@ def test_duplicate_then_update_run_chain():
+         res = json.loads(server.update_run(
+             str(new_run),
+             inputs=inputs_patch,
+             process_options=process_options,
+             permission=permission,
+             group_id=group_id,
+         ))
+         assert not _is_error(res), f"update_run failed: {res}"
+ 
+         # 4) the run must still be coherent afterwards (do NOT initiate it).
+-        after = json.loads(server.get_run_details(str(new_run)))
++        after = json.loads(server.get_run_details(str(new_run), verbose=True))
+         assert "error" not in after
+         assert after.get("inputs"), "run lost all inputs after update_run"
+         assert "permission" in after
+     finally:
+         config.set_credentials(None, None)

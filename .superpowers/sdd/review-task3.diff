@@ -1,0 +1,161 @@
+# Review package: 240ddeb..031e6ec
+
+## Commits
+031e6ec feat(mcp): add human-readable status + next steps to get_run
+
+## Files changed
+ src/foundry_mcp/server.py | 52 ++++++++++++++++++++++++++++++++++++++++++++++-
+ test/test_run_status.py   | 39 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 90 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/foundry_mcp/server.py b/src/foundry_mcp/server.py
+index 0586910..22723e2 100644
+--- a/src/foundry_mcp/server.py
++++ b/src/foundry_mcp/server.py
+@@ -641,27 +641,48 @@ def list_runs(
+             },
+             data={"searchKey": search_query}
+         )
+         
+         return json.dumps(response, indent=2)
+     except Exception as e:
+         logger.error(f"Error listing runs: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
++# Bench-friendly labels for raw RunStatus values (mirrors the frontend's
++# getRunStatusDisplayText, but says "Failed" instead of "Error" for clarity).
++_RUN_STATUS_DISPLAY = {
++    "NextErr": "Failed",
++    "Error": "Failed",
++    "NextSuc": "Completed",
++    "NextRun": "Running",
++    "init": "Initializing",
++    "Waiting": "Initializing",
++    "Terminated": "Terminated",
++    "NotSubmitted": "Not submitted",
++    "Aborted": "Connecting",
++}
++
++
++def _human_run_status(status):
++    """Map a raw RunStatus string to a plain-language label for scientists."""
++    return _RUN_STATUS_DISPLAY.get(status, "Connecting")
++
++
+ @mcp.tool()
+ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = False) -> str:
+     """
+     Get detailed information about a specific run by its ID or name.
+     Supports fuzzy name matching - if exact match not found, returns similar matches.
+     Returns run properties including ID (same as report_id), status, pipeline info, dates, and associated reports.
+     The returned run ID can be used with report tools (e.g., fetch_report, list_files, download_file).
++    If the run failed, call get_run_log(run_id) to see the error.
+     """
+     try:
+         via_client = get_client()
+         
+         if not run_id and not run_name:
+             return json.dumps({
+                 "error": "Either run_id or run_name must be provided"
+             }, indent=2)
+         
+         # If run_name provided, search for it
+@@ -727,21 +748,50 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
+             logger.info(f"Fetching reports for run ID: {run_id}")
+             try:
+                 reports = via_client.call(
+                     method="GET",
+                     endpoint=f"/api/v1/run/{run_id}/reports"
+                 )
+                 result["reports"] = reports
+             except Exception as e:
+                 logger.warning(f"Could not fetch reports for run {run_id}: {e}")
+                 result["reports"] = {"error": str(e)}
+-        
++
++        run_obj = result.get("run")
++        if isinstance(run_obj, dict):
++            display = _human_run_status(run_obj.get("status"))
++            result["status_display"] = display
++            name = run_obj.get("name")
++            if display == "Failed":
++                result["summary"] = (
++                    f"Run '{name}' ({run_id}) failed. Fetch the log to see why."
++                )
++                result["next_steps"] = [
++                    f"get_run_log(run_id='{run_id}') to see the error."
++                ]
++            elif display == "Running":
++                result["summary"] = f"Run '{name}' ({run_id}) is still running."
++                result["next_steps"] = [
++                    f"Check again later, or get_run_log(run_id='{run_id}') "
++                    f"to watch progress."
++                ]
++            elif display == "Completed":
++                result["summary"] = (
++                    f"Run '{name}' ({run_id}) completed successfully."
++                )
++                result["next_steps"] = [
++                    f"get_run(run_id='{run_id}', include_reports=True) to see "
++                    f"the result files."
++                ]
++            else:
++                result["summary"] = f"Run '{name}' ({run_id}) status: {display}."
++
+         return json.dumps(result, indent=2)
+     except Exception as e:
+         logger.error(f"Error getting run: {e}")
+         return json.dumps({"error": str(e)})
+ 
+ 
+ # Log file names, ordered most→least useful for diagnosing a failed run.
+ _LOG_PRIORITY = [
+     ".command.err", "err.log", ".command.log", "log.txt",
+     ".nextflow.log", "serverlog.txt",
+diff --git a/test/test_run_status.py b/test/test_run_status.py
+new file mode 100644
+index 0000000..f7c6df1
+--- /dev/null
++++ b/test/test_run_status.py
+@@ -0,0 +1,39 @@
++"""Tests for get_run human status enrichment."""
++import json
++from unittest.mock import MagicMock, patch
++
++from src.foundry_mcp import server
++
++
++def _search_client(runs):
++    c = MagicMock()
++    c.call.return_value = {"data": runs}
++    return c
++
++
++class TestGetRunHumanStatus:
++    def test_failed_run_gets_failed_display_and_log_next_step(self):
++        client = _search_client([{"id": 12219, "name": "UCP1_AAV", "status": "NextErr"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="12219"))
++        assert parsed["status_display"] == "Failed"
++        assert "get_run_log" in parsed["next_steps"][0]
++
++    def test_completed_run_points_to_reports(self):
++        client = _search_client([{"id": 1, "name": "x", "status": "NextSuc"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="1"))
++        assert parsed["status_display"] == "Completed"
++        assert "include_reports" in parsed["next_steps"][0]
++
++    def test_running_run_display(self):
++        client = _search_client([{"id": 1, "name": "x", "status": "NextRun"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="1"))
++        assert parsed["status_display"] == "Running"
++
++    def test_unknown_status_falls_back_to_connecting(self):
++        client = _search_client([{"id": 1, "name": "x", "status": "Manual"}])
++        with patch.object(server, "get_client", return_value=client):
++            parsed = json.loads(server.get_run(run_id="1"))
++        assert parsed["status_display"] == "Connecting"
