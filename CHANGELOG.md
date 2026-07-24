@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### Added
+- **Guided discovery and launch (Phase 1)** — a scientist who states a *goal*
+  instead of naming a pipeline is now guided all the way to launch:
+  - `recommend_pipeline(goal)` matches plain-language goals to pipelines and
+    explains why, understanding assay language the catalog never spells out
+    (chromatin accessibility → ATAC-seq, SNPs → variant calling). It returns the
+    most recent successful run to clone, and returns *nothing* rather than
+    guessing when no pipeline plausibly fits.
+  - `plan_run(pipeline_id)` reduces a pipeline to at most 8 answerable
+    decisions with plain-language labels, hiding the reference/index paths and
+    process-option groups that make up the bulk of its inputs (live: 70 inputs
+    and 61 option groups on RNA-seq become 8 questions). It states what it
+    withheld rather than dropping it silently.
+  - `list_featured_pipelines()` exposes the admin-curated catalog as the
+    starting point for discovery, instead of the full process list.
+  - `get_started()` returns the tool chain for the three journeys people arrive
+    with: starting an analysis, diagnosing a failure, finding results.
+
 - **Better failure diagnosis from chat** — `get_run_log` now returns the log
   that actually carries the failure. On real cluster (LSF) runs the backend
   returns no `.command.*` files and `err.log` is a fixed 42-byte job-starter
@@ -23,6 +40,11 @@
   (stored HTML stripped), keeps each sample input's `vmetaCollectionId` so
   samples can be re-pointed, and handles the dict-shaped `inputs` that external
   (nf-core/Nextflow) pipelines return instead of a list.
+
+### Fixed
+- `list_runs` no longer advertises `pipelineId` as a sort field. The backend
+  excludes it from its own whitelist, so any model that followed the tool
+  contract got a hard 400; it is now aliased to `pipelineName`.
 
 ## [1.2.2] - 2026-03-06
 
