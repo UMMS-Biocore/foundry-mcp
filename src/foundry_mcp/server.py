@@ -3057,8 +3057,12 @@ _RECIPES = [
         "steps": [
             "get_run(run_id='<id>') — confirm the status and which attempt is "
             "current.",
+            "watch_run(run_id='<id>') — how far it got and which step failed, "
+            "with the exit code.",
             "get_run_log(run_id='<id>') — returns the log that actually carries "
-            "the failure, already tailed to the end where errors live.",
+            "the failure, already tailed to the end where errors live. If it "
+            "reports the logs were cleaned up, they are gone for good — say so "
+            "rather than suggesting the user wait.",
             "Read the error to the user in plain language, and say which step "
             "of the pipeline it came from.",
             "If a setting caused it: plan_run(pipeline_id=...) to see the "
