@@ -1712,6 +1712,127 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Recipes
+# ---------------------------------------------------------------------------
+
+# These were specced as MCP `prompts`. FastMCP serves prompts and nginx cannot
+# block them (prompts/list is a JSON-RPC method inside the same POST body as
+# tools/list, which demonstrably works), but whether the claude.ai connector UI
+# *renders* prompts to a user is unconfirmed — and a recipe nobody can see helps
+# nobody. Tools are surfaced for certain, so the recipes live in one. If prompts
+# turn out to be surfaced, these same recipes can also be registered with
+# @mcp.prompt() without changing anything here.
+_RECIPES = [
+    {
+        "id": "start_an_analysis",
+        "name": "Start a new analysis from a scientific goal",
+        "when": "The user describes an experiment or a question rather than "
+                "naming a pipeline — e.g. 'I have mouse RNA-seq and want "
+                "differential expression'.",
+        "steps": [
+            "recommend_pipeline(goal='<the user's own words>') — returns the "
+            "best-fitting pipelines, why each was suggested, and a working past "
+            "run to clone.",
+            "plan_run(pipeline_id=<chosen>) — shows only the handful of "
+            "decisions that matter. Ask the user about THOSE, not about "
+            "reference paths or process options.",
+            "get_run_details(run_id='<example run>', verbose=True) — the full "
+            "editable config that update_run needs.",
+            "duplicate_run(run_id='<example run>', project_id=..., "
+            "pipeline_id=...) — clone the working run.",
+            "update_run(...) on the NEW run to apply the user's answers.",
+            "initiate_run(run_id='<new run>') — launching uses HPC compute, so "
+            "confirm with the user before this step.",
+        ],
+    },
+    {
+        "id": "diagnose_a_failure",
+        "name": "Work out why a run failed",
+        "when": "A run shows as Failed, or the user says a run did not work.",
+        "steps": [
+            "get_run(run_id='<id>') — confirm the status and which attempt is "
+            "current.",
+            "get_run_log(run_id='<id>') — returns the log that actually carries "
+            "the failure, already tailed to the end where errors live.",
+            "Read the error to the user in plain language, and say which step "
+            "of the pipeline it came from.",
+            "If a setting caused it: plan_run(pipeline_id=...) to see the "
+            "changeable decisions, then update_run and initiate_run to retry.",
+        ],
+    },
+    {
+        "id": "find_my_results",
+        "name": "Show me my recent results",
+        "when": "The user asks what finished, what came out of a run, or wants "
+                "to see outputs.",
+        "steps": [
+            "list_runs(take=10) — most recent first; status tells you what "
+            "completed.",
+            "get_all_report_paths(report_id='<run id>') — the run id IS the "
+            "report id.",
+            "fetch_report(report_id='<run id>') — the report contents.",
+            "list_files / load_file / download_file for specific outputs, and "
+            "list_apps + launch_app to open an interactive viewer.",
+        ],
+    },
+]
+
+_RECIPE_TOPICS = {
+    "start_an_analysis": ("start", "new", "begin", "analys", "launch", "run a",
+                          "pipeline", "goal"),
+    "diagnose_a_failure": ("fail", "error", "broke", "wrong", "debug",
+                           "diagnose", "crash", "log"),
+    "find_my_results": ("result", "output", "report", "finished", "done",
+                        "download", "app"),
+}
+
+
+@mcp.tool()
+def get_started(topic: str = "") -> str:
+    """
+    How to use Foundry Connect end to end. Call this FIRST when a user wants to
+    do something scientific with Foundry but has not named a specific run or
+    pipeline — it returns the tool chain for the three journeys people arrive
+    with: starting an analysis from a goal, working out why a run failed, and
+    finding results.
+
+    Args:
+        topic: Optional. Narrow to one journey, e.g. "start", "failed",
+            "results". An unrecognised topic returns all of them.
+    """
+    try:
+        matched = None
+        if topic and topic.strip():
+            lowered = topic.strip().lower()
+            for recipe_id, keywords in _RECIPE_TOPICS.items():
+                if any(k in lowered for k in keywords):
+                    matched = recipe_id
+                    break
+
+        recipes = ([r for r in _RECIPES if r["id"] == matched]
+                   if matched else list(_RECIPES))
+        summary = (
+            f"Recipe: {recipes[0]['name']}."
+            if matched
+            else f"All {len(recipes)} Foundry Connect recipes."
+        )
+        result = envelope(
+            summary=summary,
+            data={"recipes": recipes},
+            next_steps=[
+                "Follow the steps of whichever recipe matches what the user "
+                "asked for; each step names the exact tool to call.",
+                "Launching a run uses HPC compute — always confirm with the "
+                "user before initiate_run.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error building the getting-started recipes: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Turning a pipeline's inputs into answerable decisions
 # ---------------------------------------------------------------------------
 
