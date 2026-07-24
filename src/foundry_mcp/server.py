@@ -1302,6 +1302,129 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
 
 
 # ============================================================================
+# Pipeline Discovery Tools
+# ============================================================================
+
+_PIPELINE_LIST_ENDPOINT = "/api/pipeline/v1/"
+
+# PipelineViewType.Released. The backend turns this into
+# `pin = 'true' AND perms = Public` and orders pinned-first, then pinOrder, then
+# newest — i.e. the admin-curated catalog, already ranked. NOTE the other view
+# types (2 = MyPipelines, 3 = SharedWithMe) are ANDed together server-side, so
+# passing "1,2" matches nothing; the parameter is single-valued in practice
+# despite its "comma separated" description.
+_PIPELINE_VIEW_RELEASED = "1"
+
+# The route's Joi schema is take: min(1).max(100); out of range is a 400.
+_PIPELINE_TAKE_MIN = 1
+_PIPELINE_TAKE_MAX = 100
+
+_PIPELINE_SUMMARY_CHARS = 300
+
+
+def _truncate_summary(text, limit: int = _PIPELINE_SUMMARY_CHARS) -> str:
+    """Shorten a pipeline blurb to `limit` chars, cutting between words so a
+    scientist never reads a half-word."""
+    if not text or len(text) <= limit:
+        return text or ""
+    clipped = text[: limit - 1]
+    spaced = clipped.rsplit(" ", 1)[0]
+    return (spaced or clipped).rstrip() + "…"
+
+
+def _compact_pipeline(row):
+    """Reduce a raw pipeline-list row to what a scientist needs to choose.
+
+    Drops the window-function `totalCount` leak, the `pin`/`pinOrder` curation
+    machinery, and `aiEntity`. Summaries arrive HTML-encoded from this endpoint
+    (unlike GET /pipeline/v1/{id}, which decodes), so decode them here.
+    """
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "summary": _truncate_summary(_strip_html(row.get("summary"))),
+        "version": row.get("version"),
+        "tags": [t.get("name") for t in (row.get("tags") or []) if t.get("name")],
+    }
+
+
+def _fetch_featured_pipelines(via_client, search: str = "", limit: int = 20):
+    """Fetch the curated (Released) pipeline catalog. Returns (rows, total)."""
+    take = max(_PIPELINE_TAKE_MIN, min(int(limit), _PIPELINE_TAKE_MAX))
+    params = {"type": _PIPELINE_VIEW_RELEASED, "take": take, "skip": 0}
+    if search and search.strip():
+        params["searchKeyword"] = search.strip()
+    response = via_client.call(
+        method="GET", endpoint=_PIPELINE_LIST_ENDPOINT, params=params
+    )
+    if isinstance(response, list):
+        return response, len(response)
+    rows = response.get("data", []) if isinstance(response, dict) else []
+    total = response.get("total", len(rows)) if isinstance(response, dict) else len(rows)
+    return rows, total
+
+
+@mcp.tool()
+def list_featured_pipelines(search: str = "", limit: int = 20) -> str:
+    """
+    Show the curated, ready-to-run pipelines — the right starting point when a
+    scientist does not already know which pipeline they want. This is a short
+    admin-blessed catalog (RNA-seq, ATAC-seq, ChIP-seq, single-cell, variant
+    calling, ...), NOT the full pipeline list, and it is already ranked.
+
+    Prefer this over list_all_processes for discovery. If the user describes a
+    GOAL rather than a pipeline name ("I want differential expression from mouse
+    RNA-seq"), call recommend_pipeline(goal) instead.
+
+    Args:
+        search: Optional keyword matched against pipeline name and description.
+        limit: How many to return (1-100, default 20).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing featured pipelines (search: '{search}', limit: {limit})")
+        rows, total = _fetch_featured_pipelines(via_client, search, limit)
+        pipelines = [_compact_pipeline(row) for row in rows]
+
+        if search and not pipelines:
+            result = envelope(
+                summary=(
+                    f"No curated pipeline matches '{search}'. The catalog is "
+                    "searched by name and description only."
+                ),
+                data={"pipelines": [], "total": total},
+                next_steps=[
+                    "Call list_featured_pipelines() without a search term to "
+                    "browse the whole curated catalog.",
+                    "Describe the experiment instead and call "
+                    "recommend_pipeline(goal) — it matches on intent, not spelling.",
+                ],
+            )
+            return json.dumps(result, indent=2)
+
+        scope = f" matching '{search}'" if search else ""
+        shown = (
+            f"Showing {len(pipelines)} of {total}"
+            if total > len(pipelines)
+            else f"{len(pipelines)}"
+        )
+        result = envelope(
+            summary=f"{shown} curated pipelines{scope}.",
+            data={"pipelines": pipelines, "total": total},
+            next_steps=[
+                "Not sure which one fits? Describe the experiment and call "
+                "recommend_pipeline(goal).",
+                "Once a pipeline is chosen, call plan_run(pipeline_id) to see "
+                "the handful of decisions that actually need answering.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing featured pipelines: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
 
