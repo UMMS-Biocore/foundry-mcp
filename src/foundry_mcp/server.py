@@ -1930,6 +1930,190 @@ def summarize_results(run_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+# --- Grouping a run's outputs into something readable ----------------------
+
+# Ordered: the first rule whose test matches wins, so the specific ones lead.
+_RESULT_GROUPS = (
+    ("Differential expression", ("deseq2_results", "_des.html", "limmavoom",
+                                 "sig_deseq2", "all_deseq2")),
+    ("Quality control", ("multiqc", "overall_summary", "fastqc", "rseqc",
+                         "_qc.", "metrics")),
+    ("Quantification", ("expression", "counts", "count.tsv", "abundance",
+                        "quant", "tpm", "fpkm")),
+    ("Alignments and coverage", (".bam", ".bai", ".bw", ".bigwig", ".tdf",
+                                 ".cram")),
+    ("Single-cell objects", (".h5ad", ".rds", ".loom", ".h5")),
+)
+_RESULT_GROUP_OTHER = "Other outputs"
+
+# Intermediates a scientist never asks for: the notebook source a report was
+# rendered from, and the inputs directory (what went IN, not a result).
+_RESULT_HIDE_EXTENSIONS = ("rmd", "nf", "config", "log", "yaml", "yml")
+
+_APP_RULES = (
+    # (app name fragment, matching file suffixes, why)
+    ("gsea", ("deseq2_results.tsv",),
+     "differential-expression results can be explored as gene sets"),
+    ("cellxgene", (".h5ad",), "single-cell objects open directly"),
+    ("igv", (".bam", ".bw", ".bigwig", ".tdf", ".cram"),
+     "alignments and coverage tracks can be browsed against the genome"),
+)
+
+
+def _human_size(num_bytes) -> str:
+    try:
+        size = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _is_intermediate(row) -> bool:
+    path = (row.get("file_path") or "").lower()
+    extension = (row.get("extension") or "").lower()
+    return "/inputs/" in path or extension in _RESULT_HIDE_EXTENSIONS
+
+
+def _classify_result(row) -> str:
+    haystack = (row.get("file_path") or "").lower()
+    for group, needles in _RESULT_GROUPS:
+        if any(needle in haystack for needle in needles):
+            return group
+    return _RESULT_GROUP_OTHER
+
+
+@mcp.tool()
+def list_results(run_id: str) -> str:
+    """
+    List a finished run's outputs grouped by what they ARE — differential
+    expression, quality control, quantification, alignments — with readable
+    sizes, instead of a flat list of route-paths.
+
+    Each entry carries the exact `file_path` to hand to load_file or
+    download_file. Intermediates (notebook sources, the inputs directory) are
+    hidden and counted.
+
+    Args:
+        run_id: The finished run (same as the report id).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing results for run {run_id}")
+        _report, rows = _report_files(via_client, run_id)
+
+        grouped, hidden = {}, 0
+        for row in rows:
+            if _is_intermediate(row):
+                hidden += 1
+                continue
+            grouped.setdefault(_classify_result(row), []).append({
+                "name": row.get("name"),
+                "file_path": row.get("file_path"),
+                "size": _human_size(row.get("fileSize")),
+            })
+
+        order = [g for g, _ in _RESULT_GROUPS] + [_RESULT_GROUP_OTHER]
+        groups = [{"group": g, "files": grouped[g]} for g in order if g in grouped]
+        shown = sum(len(g["files"]) for g in groups)
+
+        result = envelope(
+            summary=(
+                f"Run {run_id} produced {shown} output file(s) across "
+                f"{len(groups)} group(s); {hidden} intermediate file(s) hidden."
+            ),
+            data={"run_id": run_id, "groups": groups,
+                  "hidden_intermediate_files": hidden},
+            next_steps=[
+                f"For the actual findings rather than the file list, call "
+                f"summarize_results(run_id='{run_id}').",
+                f"To open results in a viewer, call suggest_apps(run_id='{run_id}').",
+                "Use a file's `file_path` verbatim with load_file or "
+                "download_file.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing results for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+def _installed_apps(via_client):
+    """The apps this instance actually has, as [{id, name}]."""
+    response = via_client.call(method="GET", endpoint="/api/app/v1")
+    if isinstance(response, dict):
+        response = response.get("data", [])
+    return [a for a in (response or []) if isinstance(a, dict) and a.get("id")]
+
+
+@mcp.tool()
+def suggest_apps(run_id: str) -> str:
+    """
+    Recommend which interactive app to open a run's results in, and with which
+    file — differential expression into GSEA Explorer, single-cell objects into
+    Cellxgene, alignments and coverage into IGV.
+
+    Only apps actually installed on this instance are suggested, so a
+    recommendation never points at an app that is not there. Launching is a
+    separate, explicit step via launch_app.
+
+    Args:
+        run_id: The finished run (same as the report id).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Suggesting apps for run {run_id}")
+        _report, rows = _report_files(via_client, run_id)
+        apps = _installed_apps(via_client)
+
+        suggestions = []
+        for fragment, suffixes, reason in _APP_RULES:
+            app = next((a for a in apps
+                        if fragment in (a.get("name") or "").lower()), None)
+            if not app:
+                continue
+            matches = [r.get("file_path") for r in rows
+                       if not _is_intermediate(r)
+                       and (r.get("file_path") or "").lower().endswith(suffixes)]
+            if not matches:
+                continue
+            suggestions.append({
+                "app_id": app["id"], "app_name": app.get("name"),
+                "reason": reason, "files": matches,
+            })
+
+        if not suggestions:
+            summary = (
+                f"Run {run_id} has no outputs matching an app installed on this "
+                f"instance, so there is no viewer to suggest.")
+            next_steps = [
+                f"Call list_results(run_id='{run_id}') to see what the run "
+                f"produced, and list_apps() for what is installed.",
+            ]
+        else:
+            names = ", ".join(s["app_name"] for s in suggestions)
+            summary = (f"Run {run_id} has results that open in: {names}.")
+            next_steps = [
+                f"To open one, call launch_app(app_id='{suggestions[0]['app_id']}') "
+                f"and point it at the file listed above.",
+                "Confirm with the user first — launching an app starts a "
+                "container.",
+            ]
+
+        result = envelope(
+            summary=summary,
+            data={"run_id": run_id, "suggestions": suggestions},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error suggesting apps for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # Getting sample data in
 # ---------------------------------------------------------------------------
