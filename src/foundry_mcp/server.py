@@ -1587,11 +1587,14 @@ def _score_pipeline(row, hints, tokens):
     return score, "; ".join(parts) or "keyword overlap"
 
 
-def _find_example_run(via_client, pipeline_id):
+def _find_example_run(via_client, pipeline_id, strict: bool = False):
     """The most recent SUCCESSFUL run on a pipeline — the thing worth cloning.
 
-    Best-effort: a scientist is better served by a recommendation with no
-    example than by no recommendation at all, so failures degrade to None.
+    Best-effort by default: a scientist is better served by a recommendation
+    with no example than by no recommendation at all, so failures degrade to
+    None. Pass strict=True where the lookup IS the input rather than a garnish
+    — swallowing an outage there would report "this pipeline has no successful
+    run", blaming the data for an infrastructure failure.
     """
     try:
         response = via_client.call(
@@ -1610,6 +1613,8 @@ def _find_example_run(via_client, pipeline_id):
         return {"id": run.get("id"), "name": run.get("name"),
                 "dateCreated": run.get("dateCreated")}
     except Exception as e:
+        if strict:
+            raise
         logger.warning(f"No example run for pipeline {pipeline_id}: {e}")
         return None
 
@@ -1703,6 +1708,241 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error recommending a pipeline for '{goal}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Turning a pipeline's inputs into answerable decisions
+# ---------------------------------------------------------------------------
+
+# Live run 12194 (RNA-seq Pipeline) has 70 inputs and 61 process-option groups.
+# Roughly 20 inputs are reference/index locations an admin set once, ~46 are
+# run_* step switches, and a handful are the actual experiment. Only the last
+# group is a question for a bench scientist.
+_PLAN_MAX_DECISIONS = 8
+_PLAN_STEP_PREFIX = "run_"
+_PLAN_MAX_LISTED_STEPS = 12
+
+# Inputs whose value is a path AND whose name says "this is the experimental
+# design" — the one class of path that must never be hidden as a reference.
+_PLAN_DESIGN_HINTS = ("group", "compare", "design", "metadata", "samplesheet",
+                      "sample_sheet", "contrast")
+
+_PLAN_GENOME_HINTS = ("genome_build", "build", "species", "organism", "assembly")
+_PLAN_LAYOUT_HINTS = ("mate", "paired", "single_end", "read_type", "readtype")
+
+# Curated wording for the inputs that recur across the catalog. Everything else
+# falls back to a humanized version of the variable name.
+_PLAN_LABELS = {
+    "reads": "Which samples to analyse",
+    "mate": "Are the reads single-end or paired-end?",
+    "genome_build": "Which genome build to align against",
+    "groups_file": "Sample groups — which sample belongs to which condition",
+    "compare_file": "Which comparisons to make (e.g. treated vs control)",
+    "gtf_type": "Which gene annotation source to use",
+}
+
+# Tokens that read badly in title case.
+_PLAN_ACRONYMS = {"gtf", "bed", "rna", "dna", "umi", "tsv", "csv", "bam", "vcf",
+                  "qc", "id", "utr", "tdf", "igv", "sam", "bw"}
+
+_YES_NO = ("yes", "no")
+
+
+def _is_reference_value(value) -> bool:
+    """True for values that point at admin-managed data on disk or the web."""
+    return isinstance(value, str) and (
+        value.startswith("/") or value.startswith("http://")
+        or value.startswith("https://")
+    )
+
+
+def _is_design_input(name: str) -> bool:
+    lowered = (name or "").lower()
+    return any(hint in lowered for hint in _PLAN_DESIGN_HINTS)
+
+
+def _humanize_input_name(name: str) -> str:
+    """Turn `replace_geneID_with_geneName` into something readable."""
+    words = [w for w in re.split(r"[_\s]+", name or "") if w]
+    if not words:
+        return name or ""
+    out = []
+    for i, word in enumerate(words):
+        if word.lower() in _PLAN_ACRONYMS:
+            out.append(word.upper())
+        elif i == 0:
+            out.append(word[0].upper() + word[1:])
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
+def _decision_for(inp):
+    """Build one decision entry from a run input, or None if it is plumbing."""
+    name, value = inp["name"], inp["value"]
+
+    if inp["type"] == "vmetaCollection":
+        entry = {
+            "label": _PLAN_LABELS.get(name, "Which samples to analyse"),
+            "input": name, "kind": "samples", "current": value, "allowed": None,
+        }
+        if inp.get("vmetaCollectionId"):
+            entry["vmetaCollectionId"] = inp["vmetaCollectionId"]
+        return entry
+
+    lowered = (name or "").lower()
+    if _is_design_input(name):
+        kind = "design"
+    elif _is_reference_value(value):
+        return None  # admin-managed reference or index location
+    elif any(hint in lowered for hint in _PLAN_GENOME_HINTS):
+        kind = "genome"
+    elif any(hint in lowered for hint in _PLAN_LAYOUT_HINTS):
+        kind = "reads_layout"
+    else:
+        kind = "setting"
+
+    allowed = list(_YES_NO) if str(value).lower() in _YES_NO else None
+    return {
+        "label": _PLAN_LABELS.get(name, _humanize_input_name(name)),
+        "input": name, "kind": kind, "current": value, "allowed": allowed,
+    }
+
+
+# Samples first, then the experimental design, then what to align against, then
+# read layout, then the aggregated step switches, then everything else.
+_PLAN_KIND_ORDER = {"samples": 0, "design": 1, "genome": 2, "reads_layout": 3,
+                    "steps": 4, "setting": 5}
+
+
+def _plan_decisions(details):
+    """Reduce a run's inputs to the decisions worth asking about.
+
+    Returns (decisions, stats). Nothing is dropped silently: the stats say how
+    many reference paths were hidden and how many settings did not fit.
+    """
+    step_states = {}
+    candidates = []
+    hidden_references = 0
+
+    for inp in _iter_run_inputs(details.get("inputs") or []):
+        name = inp["name"] or ""
+        if name.startswith(_PLAN_STEP_PREFIX) and inp["type"] != "vmetaCollection":
+            step_states[name[len(_PLAN_STEP_PREFIX):]] = str(inp["value"]).lower()
+            continue
+        decision = _decision_for(inp)
+        if decision is None:
+            hidden_references += 1
+        else:
+            candidates.append(decision)
+
+    if step_states:
+        enabled = [s for s, v in step_states.items() if v in ("yes", "true", "1")]
+        candidates.append({
+            "label": "Which analysis steps to run",
+            "kind": "steps",
+            "current": f"{len(enabled)} of {len(step_states)} steps enabled",
+            "enabled": [s.replace("_", " ") for s in enabled[:_PLAN_MAX_LISTED_STEPS]],
+            "more_enabled": max(0, len(enabled) - _PLAN_MAX_LISTED_STEPS),
+            "disabled_count": len(step_states) - len(enabled),
+            "allowed": list(_YES_NO),
+        })
+
+    candidates.sort(key=lambda d: _PLAN_KIND_ORDER.get(d["kind"], 9))
+    decisions = candidates[:_PLAN_MAX_DECISIONS]
+    stats = {
+        "hidden_reference_paths": hidden_references,
+        "further_settings_not_shown": max(0, len(candidates) - len(decisions)),
+        "process_option_groups": len(details.get("processOptions") or {}),
+    }
+    return decisions, stats
+
+
+@mcp.tool()
+def plan_run(pipeline_id: int, run_id: str = "") -> str:
+    """
+    Show the handful of decisions a scientist actually has to make to run a
+    pipeline — samples, experimental design, genome, which steps — with the
+    current value of each, taken from a real working run.
+
+    Use this after recommend_pipeline / list_featured_pipelines and BEFORE
+    duplicate_run. It deliberately hides the reference and index paths an admin
+    set once and the process-option groups, which together are the bulk of a
+    pipeline's inputs (live: 70 inputs and 61 option groups on RNA-seq) and are
+    not decisions a bench scientist should be asked to make.
+
+    Args:
+        pipeline_id: The pipeline to plan a run for.
+        run_id: Optional. Plan from this specific run instead of the most
+            recent successful one.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Planning a run for pipeline {pipeline_id} (run_id: '{run_id}')")
+
+        example = None
+        if run_id:
+            example = {"id": run_id, "name": None, "dateCreated": None}
+        else:
+            example = _find_example_run(via_client, pipeline_id, strict=True)
+            if not example:
+                result = envelope(
+                    summary=(
+                        f"Pipeline {pipeline_id} has no successful run to plan "
+                        "from, so there is no known-good configuration to show."
+                    ),
+                    data={"decisions": [], "pipeline": {"id": pipeline_id}},
+                    next_steps=[
+                        "Call list_runs(search_query=...) to look for a run on "
+                        "this pipeline in any state, then plan_run(run_id=...).",
+                        "Or pick a different pipeline with "
+                        "recommend_pipeline(goal) — one with a working example "
+                        "is far easier to adapt.",
+                    ],
+                )
+                return json.dumps(result, indent=2)
+
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{example['id']}/details"
+        )
+        decisions, stats = _plan_decisions(details)
+        pipeline = details.get("mainPipeline") or {}
+
+        data = {
+            "pipeline": {"id": pipeline.get("id", pipeline_id),
+                         "name": pipeline.get("name"),
+                         "version": pipeline.get("version")},
+            "based_on_run": {"id": example["id"],
+                             "name": example.get("name") or details.get("name"),
+                             "dateCreated": example.get("dateCreated")},
+            "decisions": decisions,
+        }
+        data.update(stats)
+
+        result = envelope(
+            summary=(
+                f"{len(decisions)} decision(s) to run '{pipeline.get('name')}', "
+                f"based on run {example['id']}. "
+                f"{stats['hidden_reference_paths']} reference/index paths and "
+                f"{stats['process_option_groups']} process-option groups are "
+                "hidden — they are already set correctly."
+            ),
+            data=data,
+            next_steps=[
+                "Confirm or change the values above with the user first.",
+                f"Then: duplicate_run(run_id='{example['id']}', project_id=..., "
+                f"pipeline_id={pipeline.get('id', pipeline_id)}) -> update_run "
+                "on the new run to apply the answers -> initiate_run to launch.",
+                "Call get_run_details(run_id='%s', verbose=True) for the full "
+                "editable config that update_run needs." % example["id"],
+                "Launching a run uses HPC compute — confirm with the user "
+                "before initiate_run.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error planning a run for pipeline {pipeline_id}: {e}")
         return json.dumps({"error": str(e)})
 
 
