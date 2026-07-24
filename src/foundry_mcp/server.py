@@ -1432,6 +1432,280 @@ def list_featured_pipelines(search: str = "", limit: int = 20) -> str:
         return json.dumps({"error": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# Goal -> pipeline matching
+# ---------------------------------------------------------------------------
+
+# Words that carry no signal because they appear in almost every goal or almost
+# every pipeline blurb. "seq" is here because every entry in the catalog is
+# some flavour of -seq.
+_GOAL_STOPWORDS = frozenset("""
+a about all also an analyse analysis analyze analyzing am and any anything are
+as at be before between but by check could data dataset datasets did do does
+doing done else find for from get got had has have how i if in into is it its
+just like look make me my need no of on or our out over please pipeline
+pipelines ran run running runs sample samples seq sequencing set should show so
+some study than that the their them then there these they this to up us use
+used using want was we well what when where whether which while will with
+within would you your workflow workflows experiment experiments
+""".split())
+
+# Phrases a bench scientist actually says, mapped to terms that really occur in
+# the curated catalog's names and blurbs. This is the domain knowledge the
+# backend's substring search does not have: nothing in the catalog contains the
+# words "chromatin accessibility", yet that is exactly what ATAC-seq measures.
+_GOAL_HINTS = (
+    (("differential expression", "differentially expressed", "differential gene",
+      "deseq", "edger", "de genes", "degs", "upregulated", "downregulated",
+      "fold change"),
+     ("rna seq", "differential", "expression", "deseq")),
+    (("single cell", "scrna", "10x", "cell ranger", "cellranger", "cell atlas"),
+     ("single cell", "cell ranger", "10x", "scrna")),
+    (("chromatin accessibility", "open chromatin", "accessible chromatin", "atac"),
+     ("atac", "open chromatin")),
+    (("transcription factor", "histone", "peak calling", "binding site", "bind",
+      "chip seq", "chipseq", "cut and tag", "cut and run", "occupancy"),
+     ("chip seq", "peaks", "cut and tag")),
+    (("variant", "snps", "snp", "mutation", "germline", "somatic", "indel",
+      "genotyp"),
+     ("variant calling", "variants", "gatk")),
+    (("methylation", "bisulfite", "methylome"), ("methyl",)),
+    (("quality", "qc", "fastq", "contamination", "adapter"),
+     ("fastqc", "quality control")),
+    (("crispr", "knockout screen", "guide rna", "sgrna", "mageck"),
+     ("crispr", "mageck", "screen")),
+    (("de novo", "transcriptome assembly", "assemble"), ("trinity", "de novo")),
+    (("ribosome profiling", "ribo seq", "riboseq", "translation"),
+     ("riboseq", "ribo seq")),
+    (("alternative splicing", "splicing", "isoform"), ("splic", "isoform")),
+    (("microbiome", "16s", "metagenom", "taxonomic"), ("metagenom", "16s")),
+    (("bulk rna", "rna seq", "rnaseq", "transcriptom", "gene expression"),
+     ("rna seq", "expression")),
+)
+
+# A hint term found in the NAME is near-proof; in the blurb it is suggestive.
+# Literal words from the user's own goal rank below curated domain knowledge.
+_SCORE_HINT_IN_NAME = 8
+_SCORE_HINT_IN_SUMMARY = 3
+_SCORE_TOKEN_IN_NAME = 4
+_SCORE_TOKEN_IN_TAG = 2
+_SCORE_TOKEN_IN_SUMMARY = 1
+
+# Below this, a "match" is one incidental word in a blurb. Saying "nothing fits"
+# is more useful to a scientist than confidently naming the wrong pipeline.
+_RECOMMEND_MIN_SCORE = 4
+_RECOMMEND_MAX = 5
+
+
+def _normalize_words(text) -> str:
+    """Reduce text to space-delimited lowercase words, padded with spaces so
+    callers can test for a leading word boundary."""
+    return " " + " ".join(re.findall(r"[a-z0-9]+", (text or "").lower())) + " "
+
+
+# Below this length a term must match a whole word. Live regression: the
+# 3-letter token "ran" (from "I ran a CRISPR screen") prefix-matched "Ranger"
+# and put Cell Ranger in the results.
+_SUFFIX_MATCH_MIN_LEN = 4
+
+
+def _matches_word(padded_haystack: str, term: str) -> bool:
+    """True when `term` occurs in `padded_haystack` starting on a word boundary.
+
+    Longer terms may match a prefix ("variant" hits "variants", "methyl" hits
+    "methylation") — that suffix tolerance is what makes plain-language goals
+    work at all. Nothing may match a SUFFIX, and that asymmetry is load-bearing:
+    plain substring matching ranks "tRNA-Seq Pipeline" as a top hit for an
+    RNA-seq goal, because "rna-seq" is literally inside "tRNA-Seq".
+    """
+    normalized = _normalize_words(term)
+    needle = (
+        normalized.rstrip()
+        if len(term) >= _SUFFIX_MATCH_MIN_LEN
+        else normalized
+    )
+    return needle in padded_haystack
+
+
+def _goal_terms(goal: str):
+    """Split a stated goal into (hint terms, literal tokens).
+
+    Hint terms come from the domain map above and encode what an assay actually
+    measures; tokens are the user's own words minus filler.
+    """
+    padded_goal = _normalize_words(goal)
+    hints = []
+    for triggers, terms in _GOAL_HINTS:
+        if any(_matches_word(padded_goal, t) for t in triggers):
+            hints.extend(t for t in terms if t not in hints)
+    tokens = [
+        w for w in dict.fromkeys(padded_goal.split())
+        if w not in _GOAL_STOPWORDS and len(w) > 1
+    ]
+    return hints, tokens
+
+
+def _score_pipeline(row, hints, tokens):
+    """Score one pipeline against a goal. Returns (score, reason).
+
+    Deliberately transparent: every point traces to a named term, so the model
+    can tell the scientist WHY a pipeline was suggested instead of asserting it.
+    """
+    name = _normalize_words(row.get("name"))
+    summary = _normalize_words(_strip_html(row.get("summary")))
+    tags = _normalize_words(" ".join(
+        t.get("name") or "" for t in (row.get("tags") or [])))
+
+    score = 0
+    name_hits, summary_hits = [], []
+
+    for term in hints:
+        if _matches_word(name, term):
+            score += _SCORE_HINT_IN_NAME
+            name_hits.append(term)
+        elif _matches_word(summary, term):
+            score += _SCORE_HINT_IN_SUMMARY
+            summary_hits.append(term)
+
+    for token in tokens:
+        if _matches_word(name, token):
+            score += _SCORE_TOKEN_IN_NAME
+            if token not in name_hits:
+                name_hits.append(token)
+        elif _matches_word(summary, token):
+            score += _SCORE_TOKEN_IN_SUMMARY
+            if token not in summary_hits:
+                summary_hits.append(token)
+        if _matches_word(tags, token):
+            score += _SCORE_TOKEN_IN_TAG
+
+    parts = []
+    if name_hits:
+        parts.append("name matches " + ", ".join(name_hits[:4]))
+    if summary_hits:
+        parts.append("description mentions " + ", ".join(summary_hits[:4]))
+    return score, "; ".join(parts) or "keyword overlap"
+
+
+def _find_example_run(via_client, pipeline_id):
+    """The most recent SUCCESSFUL run on a pipeline — the thing worth cloning.
+
+    Best-effort: a scientist is better served by a recommendation with no
+    example than by no recommendation at all, so failures degrade to None.
+    """
+    try:
+        response = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/list",
+            params={
+                "take": 1, "skip": 0, "sort": "dateCreated", "order": "desc",
+                "filter": f"pipelineId:eq={pipeline_id},status:eq=NextSuc",
+            },
+            data={},
+        )
+        rows = response.get("data", []) if isinstance(response, dict) else response
+        if not rows:
+            return None
+        run = rows[0]
+        return {"id": run.get("id"), "name": run.get("name"),
+                "dateCreated": run.get("dateCreated")}
+    except Exception as e:
+        logger.warning(f"No example run for pipeline {pipeline_id}: {e}")
+        return None
+
+
+@mcp.tool()
+def recommend_pipeline(goal: str, limit: int = 3) -> str:
+    """
+    Suggest which curated pipeline fits a stated scientific GOAL, with a reason
+    for each and a working past run to clone. Use this whenever the user
+    describes what they want to LEARN rather than naming a pipeline — e.g.
+    "I have mouse RNA-seq and want differential expression", "where does my
+    transcription factor bind", "I want to look at chromatin accessibility".
+
+    Understands assay language the catalog never spells out (chromatin
+    accessibility -> ATAC-seq, SNPs -> variant calling). If nothing plausibly
+    matches it says so rather than guessing.
+
+    Args:
+        goal: The experiment or question, in the scientist's own words.
+        limit: How many suggestions to return (1-5, default 3).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Recommending a pipeline for goal: '{goal}'")
+        hints, tokens = _goal_terms(goal)
+
+        # Score the whole curated catalog locally. Server-side search cannot do
+        # this job: it is substring-only and orders by pin position, not
+        # relevance (live, searchKeyword=atac ranks Cell Ranger Count above
+        # ATAC-seq Pipeline).
+        rows, _total = _fetch_featured_pipelines(via_client, limit=_PIPELINE_TAKE_MAX)
+
+        scored = []
+        if hints or tokens:
+            for row in rows:
+                score, reason = _score_pipeline(row, hints, tokens)
+                if score >= _RECOMMEND_MIN_SCORE:
+                    scored.append((score, row, reason))
+        scored.sort(key=lambda s: s[0], reverse=True)
+        top = scored[: max(1, min(int(limit), _RECOMMEND_MAX))]
+
+        if not top:
+            result = envelope(
+                summary=(
+                    f"No curated pipeline clearly matches '{goal}', so here is "
+                    "nothing rather than a bad guess."
+                ),
+                data={"recommendations": [], "goal": goal},
+                next_steps=[
+                    "Call list_featured_pipelines() to browse the curated "
+                    "catalog and pick by eye.",
+                    "Or restate the goal in terms of the assay or measurement "
+                    "— e.g. 'differential expression from bulk RNA-seq', "
+                    "'open chromatin', 'where a transcription factor binds'.",
+                ],
+            )
+            return json.dumps(result, indent=2)
+
+        recommendations = []
+        for score, row, reason in top:
+            entry = _compact_pipeline(row)
+            entry["score"] = score
+            entry["reason"] = reason
+            entry["example_run"] = _find_example_run(via_client, row.get("id"))
+            recommendations.append(entry)
+
+        best = recommendations[0]
+        next_steps = [
+            f"Call plan_run(pipeline_id={best['id']}) to see the handful of "
+            "decisions that actually need answering."
+        ]
+        if best["example_run"]:
+            next_steps.append(
+                f"Run {best['example_run']['id']} is a working example on this "
+                f"pipeline — get_run_details(run_id='{best['example_run']['id']}', "
+                "verbose=True), then duplicate_run + update_run to adapt it."
+            )
+        next_steps.append(
+            "Launching a run uses HPC compute — confirm with the user before "
+            "initiate_run."
+        )
+
+        result = envelope(
+            summary=(
+                f"{len(recommendations)} pipeline(s) fit '{goal}'. "
+                f"Best match: '{best['name']}' — {best['reason']}."
+            ),
+            data={"recommendations": recommendations, "goal": goal},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error recommending a pipeline for '{goal}': {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Process/Pipeline Management Tools
 # ============================================================================
