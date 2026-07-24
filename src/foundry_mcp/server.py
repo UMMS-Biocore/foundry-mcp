@@ -616,9 +616,12 @@ def get_all_report_paths(report_id: str) -> str:
 
 # Valid run-list sort fields — must match the backend's runListAPIDbMap
 # (backend/src/types/run.ts). Any other value is rejected by the backend.
+# NOTE the route excludes pipelineId from the whitelist
+# (`Object.keys(runListAPIDbMap).filter(key => key !== "pipelineId")`), so it is
+# deliberately absent here and aliased to pipelineName below.
 RUN_LIST_SORT_FIELDS = {
     "id", "name", "status", "username", "dateCreated",
-    "pipelineId", "pipelineName", "summary", "dateCreatedLastRun", "schedulerId",
+    "pipelineName", "summary", "dateCreatedLastRun", "schedulerId",
 }
 
 # Common model-guessed sort aliases -> a valid field. Keys are normalized
@@ -634,6 +637,10 @@ RUN_LIST_SORT_ALIASES = {
     "date": "dateCreated",
     "lastrun": "dateCreatedLastRun",
     "recent": "dateCreatedLastRun",
+    # The backend rejects sorting by pipelineId; grouping by pipeline name is
+    # the same intent and is accepted.
+    "pipelineid": "pipelineName",
+    "pipeline": "pipelineName",
 }
 
 
@@ -703,7 +710,8 @@ def list_runs(
         take: Page size (default 10).
         skip: Offset for pagination (default 0).
         sort: Sort field. Valid values: id, name, status, username, dateCreated,
-            pipelineId, pipelineName, summary, dateCreatedLastRun, schedulerId.
+            pipelineName, summary, dateCreatedLastRun, schedulerId.
+            There is NO "pipelineId" sort — use "pipelineName".
             There is NO "dateModified"/"updatedAt" — use "dateCreated" for the most
             recent runs. Unrecognized values fall back to "dateCreated".
         order: "desc" (newest first, default) or "asc".
@@ -1298,6 +1306,764 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
         return json.dumps(started, indent=2)
     except Exception as e:
         logger.error(f"Error initiating run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
+# Pipeline Discovery Tools
+# ============================================================================
+
+_PIPELINE_LIST_ENDPOINT = "/api/pipeline/v1/"
+
+# PipelineViewType.Released. The backend turns this into
+# `pin = 'true' AND perms = Public` and orders pinned-first, then pinOrder, then
+# newest — i.e. the admin-curated catalog, already ranked. NOTE the other view
+# types (2 = MyPipelines, 3 = SharedWithMe) are ANDed together server-side, so
+# passing "1,2" matches nothing; the parameter is single-valued in practice
+# despite its "comma separated" description.
+_PIPELINE_VIEW_RELEASED = "1"
+
+# The route's Joi schema is take: min(1).max(100); out of range is a 400.
+_PIPELINE_TAKE_MIN = 1
+_PIPELINE_TAKE_MAX = 100
+
+_PIPELINE_SUMMARY_CHARS = 300
+
+
+def _truncate_summary(text, limit: int = _PIPELINE_SUMMARY_CHARS) -> str:
+    """Shorten a pipeline blurb to `limit` chars, cutting between words so a
+    scientist never reads a half-word."""
+    if not text or len(text) <= limit:
+        return text or ""
+    clipped = text[: limit - 1]
+    spaced = clipped.rsplit(" ", 1)[0]
+    return (spaced or clipped).rstrip() + "…"
+
+
+def _compact_pipeline(row):
+    """Reduce a raw pipeline-list row to what a scientist needs to choose.
+
+    Drops the window-function `totalCount` leak, the `pin`/`pinOrder` curation
+    machinery, and `aiEntity`. Summaries arrive HTML-encoded from this endpoint
+    (unlike GET /pipeline/v1/{id}, which decodes), so decode them here.
+    """
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "summary": _truncate_summary(_strip_html(row.get("summary"))),
+        "version": row.get("version"),
+        "tags": [t.get("name") for t in (row.get("tags") or []) if t.get("name")],
+    }
+
+
+def _fetch_featured_pipelines(via_client, search: str = "", limit: int = 20):
+    """Fetch the curated (Released) pipeline catalog. Returns (rows, total)."""
+    take = max(_PIPELINE_TAKE_MIN, min(int(limit), _PIPELINE_TAKE_MAX))
+    params = {"type": _PIPELINE_VIEW_RELEASED, "take": take, "skip": 0}
+    if search and search.strip():
+        params["searchKeyword"] = search.strip()
+    response = via_client.call(
+        method="GET", endpoint=_PIPELINE_LIST_ENDPOINT, params=params
+    )
+    if isinstance(response, list):
+        return response, len(response)
+    rows = response.get("data", []) if isinstance(response, dict) else []
+    total = response.get("total", len(rows)) if isinstance(response, dict) else len(rows)
+    return rows, total
+
+
+@mcp.tool()
+def list_featured_pipelines(search: str = "", limit: int = 20) -> str:
+    """
+    Show the curated, ready-to-run pipelines — the right starting point when a
+    scientist does not already know which pipeline they want. This is a short
+    admin-blessed catalog (RNA-seq, ATAC-seq, ChIP-seq, single-cell, variant
+    calling, ...), NOT the full pipeline list, and it is already ranked.
+
+    Prefer this over list_all_processes for discovery. If the user describes a
+    GOAL rather than a pipeline name ("I want differential expression from mouse
+    RNA-seq"), call recommend_pipeline(goal) instead.
+
+    Args:
+        search: Optional keyword matched against pipeline name and description.
+        limit: How many to return (1-100, default 20).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing featured pipelines (search: '{search}', limit: {limit})")
+        rows, total = _fetch_featured_pipelines(via_client, search, limit)
+        pipelines = [_compact_pipeline(row) for row in rows]
+
+        if search and not pipelines:
+            result = envelope(
+                summary=(
+                    f"No curated pipeline matches '{search}'. The catalog is "
+                    "searched by name and description only."
+                ),
+                data={"pipelines": [], "total": total},
+                next_steps=[
+                    "Call list_featured_pipelines() without a search term to "
+                    "browse the whole curated catalog.",
+                    "Describe the experiment instead and call "
+                    "recommend_pipeline(goal) — it matches on intent, not spelling.",
+                ],
+            )
+            return json.dumps(result, indent=2)
+
+        scope = f" matching '{search}'" if search else ""
+        shown = (
+            f"Showing {len(pipelines)} of {total}"
+            if total > len(pipelines)
+            else f"{len(pipelines)}"
+        )
+        result = envelope(
+            summary=f"{shown} curated pipelines{scope}.",
+            data={"pipelines": pipelines, "total": total},
+            next_steps=[
+                "Not sure which one fits? Describe the experiment and call "
+                "recommend_pipeline(goal).",
+                "Once a pipeline is chosen, call plan_run(pipeline_id) to see "
+                "the handful of decisions that actually need answering.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing featured pipelines: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Goal -> pipeline matching
+# ---------------------------------------------------------------------------
+
+# Words that carry no signal because they appear in almost every goal or almost
+# every pipeline blurb. "seq" is here because every entry in the catalog is
+# some flavour of -seq.
+_GOAL_STOPWORDS = frozenset("""
+a about all also an analyse analysis analyze analyzing am and any anything are
+as at be before between but by check could data dataset datasets did do does
+doing done else find for from get got had has have how i if in into is it its
+just like look make me my need no of on or our out over please pipeline
+pipelines ran run running runs sample samples seq sequencing set should show so
+some study than that the their them then there these they this to up us use
+used using want was we well what when where whether which while will with
+within would you your workflow workflows experiment experiments
+""".split())
+
+# Phrases a bench scientist actually says, mapped to terms that really occur in
+# the curated catalog's names and blurbs. This is the domain knowledge the
+# backend's substring search does not have: nothing in the catalog contains the
+# words "chromatin accessibility", yet that is exactly what ATAC-seq measures.
+_GOAL_HINTS = (
+    (("differential expression", "differentially expressed", "differential gene",
+      "deseq", "edger", "de genes", "degs", "upregulated", "downregulated",
+      "fold change"),
+     ("rna seq", "differential", "expression", "deseq")),
+    (("single cell", "scrna", "10x", "cell ranger", "cellranger", "cell atlas"),
+     ("single cell", "cell ranger", "10x", "scrna")),
+    (("chromatin accessibility", "open chromatin", "accessible chromatin", "atac"),
+     ("atac", "open chromatin")),
+    (("transcription factor", "histone", "peak calling", "binding site", "bind",
+      "chip seq", "chipseq", "cut and tag", "cut and run", "occupancy"),
+     ("chip seq", "peaks", "cut and tag")),
+    (("variant", "snps", "snp", "mutation", "germline", "somatic", "indel",
+      "genotyp"),
+     ("variant calling", "variants", "gatk")),
+    (("methylation", "bisulfite", "methylome"), ("methyl",)),
+    (("quality", "qc", "fastq", "contamination", "adapter"),
+     ("fastqc", "quality control")),
+    (("crispr", "knockout screen", "guide rna", "sgrna", "mageck"),
+     ("crispr", "mageck", "screen")),
+    (("de novo", "transcriptome assembly", "assemble"), ("trinity", "de novo")),
+    (("ribosome profiling", "ribo seq", "riboseq", "translation"),
+     ("riboseq", "ribo seq")),
+    (("alternative splicing", "splicing", "isoform"), ("splic", "isoform")),
+    (("microbiome", "16s", "metagenom", "taxonomic"), ("metagenom", "16s")),
+    (("bulk rna", "rna seq", "rnaseq", "transcriptom", "gene expression"),
+     ("rna seq", "expression")),
+)
+
+# A hint term found in the NAME is near-proof; in the blurb it is suggestive.
+# Literal words from the user's own goal rank below curated domain knowledge.
+_SCORE_HINT_IN_NAME = 8
+_SCORE_HINT_IN_SUMMARY = 3
+_SCORE_TOKEN_IN_NAME = 4
+_SCORE_TOKEN_IN_TAG = 2
+_SCORE_TOKEN_IN_SUMMARY = 1
+
+# Below this, a "match" is one incidental word in a blurb. Saying "nothing fits"
+# is more useful to a scientist than confidently naming the wrong pipeline.
+_RECOMMEND_MIN_SCORE = 4
+_RECOMMEND_MAX = 5
+
+
+def _normalize_words(text) -> str:
+    """Reduce text to space-delimited lowercase words, padded with spaces so
+    callers can test for a leading word boundary."""
+    return " " + " ".join(re.findall(r"[a-z0-9]+", (text or "").lower())) + " "
+
+
+# Below this length a term must match a whole word. Live regression: the
+# 3-letter token "ran" (from "I ran a CRISPR screen") prefix-matched "Ranger"
+# and put Cell Ranger in the results.
+_SUFFIX_MATCH_MIN_LEN = 4
+
+
+def _matches_word(padded_haystack: str, term: str) -> bool:
+    """True when `term` occurs in `padded_haystack` starting on a word boundary.
+
+    Longer terms may match a prefix ("variant" hits "variants", "methyl" hits
+    "methylation") — that suffix tolerance is what makes plain-language goals
+    work at all. Nothing may match a SUFFIX, and that asymmetry is load-bearing:
+    plain substring matching ranks "tRNA-Seq Pipeline" as a top hit for an
+    RNA-seq goal, because "rna-seq" is literally inside "tRNA-Seq".
+    """
+    normalized = _normalize_words(term)
+    needle = (
+        normalized.rstrip()
+        if len(term) >= _SUFFIX_MATCH_MIN_LEN
+        else normalized
+    )
+    return needle in padded_haystack
+
+
+def _goal_terms(goal: str):
+    """Split a stated goal into (hint terms, literal tokens).
+
+    Hint terms come from the domain map above and encode what an assay actually
+    measures; tokens are the user's own words minus filler.
+    """
+    padded_goal = _normalize_words(goal)
+    hints = []
+    for triggers, terms in _GOAL_HINTS:
+        if any(_matches_word(padded_goal, t) for t in triggers):
+            hints.extend(t for t in terms if t not in hints)
+    tokens = [
+        w for w in dict.fromkeys(padded_goal.split())
+        if w not in _GOAL_STOPWORDS and len(w) > 1
+    ]
+    return hints, tokens
+
+
+def _score_pipeline(row, hints, tokens):
+    """Score one pipeline against a goal. Returns (score, reason).
+
+    Deliberately transparent: every point traces to a named term, so the model
+    can tell the scientist WHY a pipeline was suggested instead of asserting it.
+    """
+    name = _normalize_words(row.get("name"))
+    summary = _normalize_words(_strip_html(row.get("summary")))
+    tags = _normalize_words(" ".join(
+        t.get("name") or "" for t in (row.get("tags") or [])))
+
+    score = 0
+    name_hits, summary_hits = [], []
+
+    for term in hints:
+        if _matches_word(name, term):
+            score += _SCORE_HINT_IN_NAME
+            name_hits.append(term)
+        elif _matches_word(summary, term):
+            score += _SCORE_HINT_IN_SUMMARY
+            summary_hits.append(term)
+
+    for token in tokens:
+        if _matches_word(name, token):
+            score += _SCORE_TOKEN_IN_NAME
+            if token not in name_hits:
+                name_hits.append(token)
+        elif _matches_word(summary, token):
+            score += _SCORE_TOKEN_IN_SUMMARY
+            if token not in summary_hits:
+                summary_hits.append(token)
+        if _matches_word(tags, token):
+            score += _SCORE_TOKEN_IN_TAG
+
+    parts = []
+    if name_hits:
+        parts.append("name matches " + ", ".join(name_hits[:4]))
+    if summary_hits:
+        parts.append("description mentions " + ", ".join(summary_hits[:4]))
+    return score, "; ".join(parts) or "keyword overlap"
+
+
+def _find_example_run(via_client, pipeline_id, strict: bool = False):
+    """The most recent SUCCESSFUL run on a pipeline — the thing worth cloning.
+
+    Best-effort by default: a scientist is better served by a recommendation
+    with no example than by no recommendation at all, so failures degrade to
+    None. Pass strict=True where the lookup IS the input rather than a garnish
+    — swallowing an outage there would report "this pipeline has no successful
+    run", blaming the data for an infrastructure failure.
+    """
+    try:
+        response = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/list",
+            params={
+                "take": 1, "skip": 0, "sort": "dateCreated", "order": "desc",
+                "filter": f"pipelineId:eq={pipeline_id},status:eq=NextSuc",
+            },
+            data={},
+        )
+        rows = response.get("data", []) if isinstance(response, dict) else response
+        if not rows:
+            return None
+        run = rows[0]
+        return {"id": run.get("id"), "name": run.get("name"),
+                "dateCreated": run.get("dateCreated")}
+    except Exception as e:
+        if strict:
+            raise
+        logger.warning(f"No example run for pipeline {pipeline_id}: {e}")
+        return None
+
+
+@mcp.tool()
+def recommend_pipeline(goal: str, limit: int = 3) -> str:
+    """
+    Suggest which curated pipeline fits a stated scientific GOAL, with a reason
+    for each and a working past run to clone. Use this whenever the user
+    describes what they want to LEARN rather than naming a pipeline — e.g.
+    "I have mouse RNA-seq and want differential expression", "where does my
+    transcription factor bind", "I want to look at chromatin accessibility".
+
+    Understands assay language the catalog never spells out (chromatin
+    accessibility -> ATAC-seq, SNPs -> variant calling). If nothing plausibly
+    matches it says so rather than guessing.
+
+    Args:
+        goal: The experiment or question, in the scientist's own words.
+        limit: How many suggestions to return (1-5, default 3).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Recommending a pipeline for goal: '{goal}'")
+        hints, tokens = _goal_terms(goal)
+
+        # Score the whole curated catalog locally. Server-side search cannot do
+        # this job: it is substring-only and orders by pin position, not
+        # relevance (live, searchKeyword=atac ranks Cell Ranger Count above
+        # ATAC-seq Pipeline).
+        rows, _total = _fetch_featured_pipelines(via_client, limit=_PIPELINE_TAKE_MAX)
+
+        scored = []
+        if hints or tokens:
+            for row in rows:
+                score, reason = _score_pipeline(row, hints, tokens)
+                if score >= _RECOMMEND_MIN_SCORE:
+                    scored.append((score, row, reason))
+        scored.sort(key=lambda s: s[0], reverse=True)
+        top = scored[: max(1, min(int(limit), _RECOMMEND_MAX))]
+
+        if not top:
+            result = envelope(
+                summary=(
+                    f"No curated pipeline clearly matches '{goal}', so here is "
+                    "nothing rather than a bad guess."
+                ),
+                data={"recommendations": [], "goal": goal},
+                next_steps=[
+                    "Call list_featured_pipelines() to browse the curated "
+                    "catalog and pick by eye.",
+                    "Or restate the goal in terms of the assay or measurement "
+                    "— e.g. 'differential expression from bulk RNA-seq', "
+                    "'open chromatin', 'where a transcription factor binds'.",
+                ],
+            )
+            return json.dumps(result, indent=2)
+
+        recommendations = []
+        for score, row, reason in top:
+            entry = _compact_pipeline(row)
+            entry["score"] = score
+            entry["reason"] = reason
+            entry["example_run"] = _find_example_run(via_client, row.get("id"))
+            recommendations.append(entry)
+
+        best = recommendations[0]
+        next_steps = [
+            f"Call plan_run(pipeline_id={best['id']}) to see the handful of "
+            "decisions that actually need answering."
+        ]
+        if best["example_run"]:
+            next_steps.append(
+                f"Run {best['example_run']['id']} is a working example on this "
+                f"pipeline — get_run_details(run_id='{best['example_run']['id']}', "
+                "verbose=True), then duplicate_run + update_run to adapt it."
+            )
+        next_steps.append(
+            "Launching a run uses HPC compute — confirm with the user before "
+            "initiate_run."
+        )
+
+        result = envelope(
+            summary=(
+                f"{len(recommendations)} pipeline(s) fit '{goal}'. "
+                f"Best match: '{best['name']}' — {best['reason']}."
+            ),
+            data={"recommendations": recommendations, "goal": goal},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error recommending a pipeline for '{goal}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Recipes
+# ---------------------------------------------------------------------------
+
+# These were specced as MCP `prompts`. FastMCP serves prompts and nginx cannot
+# block them (prompts/list is a JSON-RPC method inside the same POST body as
+# tools/list, which demonstrably works), but whether the claude.ai connector UI
+# *renders* prompts to a user is unconfirmed — and a recipe nobody can see helps
+# nobody. Tools are surfaced for certain, so the recipes live in one. If prompts
+# turn out to be surfaced, these same recipes can also be registered with
+# @mcp.prompt() without changing anything here.
+_RECIPES = [
+    {
+        "id": "start_an_analysis",
+        "name": "Start a new analysis from a scientific goal",
+        "when": "The user describes an experiment or a question rather than "
+                "naming a pipeline — e.g. 'I have mouse RNA-seq and want "
+                "differential expression'.",
+        "steps": [
+            "recommend_pipeline(goal='<the user's own words>') — returns the "
+            "best-fitting pipelines, why each was suggested, and a working past "
+            "run to clone.",
+            "plan_run(pipeline_id=<chosen>) — shows only the handful of "
+            "decisions that matter. Ask the user about THOSE, not about "
+            "reference paths or process options.",
+            "get_run_details(run_id='<example run>', verbose=True) — the full "
+            "editable config that update_run needs.",
+            "duplicate_run(run_id='<example run>', project_id=..., "
+            "pipeline_id=...) — clone the working run.",
+            "update_run(...) on the NEW run to apply the user's answers.",
+            "initiate_run(run_id='<new run>') — launching uses HPC compute, so "
+            "confirm with the user before this step.",
+        ],
+    },
+    {
+        "id": "diagnose_a_failure",
+        "name": "Work out why a run failed",
+        "when": "A run shows as Failed, or the user says a run did not work.",
+        "steps": [
+            "get_run(run_id='<id>') — confirm the status and which attempt is "
+            "current.",
+            "get_run_log(run_id='<id>') — returns the log that actually carries "
+            "the failure, already tailed to the end where errors live.",
+            "Read the error to the user in plain language, and say which step "
+            "of the pipeline it came from.",
+            "If a setting caused it: plan_run(pipeline_id=...) to see the "
+            "changeable decisions, then update_run and initiate_run to retry.",
+        ],
+    },
+    {
+        "id": "find_my_results",
+        "name": "Show me my recent results",
+        "when": "The user asks what finished, what came out of a run, or wants "
+                "to see outputs.",
+        "steps": [
+            "list_runs(take=10) — most recent first; status tells you what "
+            "completed.",
+            "get_all_report_paths(report_id='<run id>') — the run id IS the "
+            "report id.",
+            "fetch_report(report_id='<run id>') — the report contents.",
+            "list_files / load_file / download_file for specific outputs, and "
+            "list_apps + launch_app to open an interactive viewer.",
+        ],
+    },
+]
+
+_RECIPE_TOPICS = {
+    "start_an_analysis": ("start", "new", "begin", "analys", "launch", "run a",
+                          "pipeline", "goal"),
+    "diagnose_a_failure": ("fail", "error", "broke", "wrong", "debug",
+                           "diagnose", "crash", "log"),
+    "find_my_results": ("result", "output", "report", "finished", "done",
+                        "download", "app"),
+}
+
+
+@mcp.tool()
+def get_started(topic: str = "") -> str:
+    """
+    How to use Foundry Connect end to end. Call this FIRST when a user wants to
+    do something scientific with Foundry but has not named a specific run or
+    pipeline — it returns the tool chain for the three journeys people arrive
+    with: starting an analysis from a goal, working out why a run failed, and
+    finding results.
+
+    Args:
+        topic: Optional. Narrow to one journey, e.g. "start", "failed",
+            "results". An unrecognised topic returns all of them.
+    """
+    try:
+        matched = None
+        if topic and topic.strip():
+            lowered = topic.strip().lower()
+            for recipe_id, keywords in _RECIPE_TOPICS.items():
+                if any(k in lowered for k in keywords):
+                    matched = recipe_id
+                    break
+
+        recipes = ([r for r in _RECIPES if r["id"] == matched]
+                   if matched else list(_RECIPES))
+        summary = (
+            f"Recipe: {recipes[0]['name']}."
+            if matched
+            else f"All {len(recipes)} Foundry Connect recipes."
+        )
+        result = envelope(
+            summary=summary,
+            data={"recipes": recipes},
+            next_steps=[
+                "Follow the steps of whichever recipe matches what the user "
+                "asked for; each step names the exact tool to call.",
+                "Launching a run uses HPC compute — always confirm with the "
+                "user before initiate_run.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error building the getting-started recipes: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Turning a pipeline's inputs into answerable decisions
+# ---------------------------------------------------------------------------
+
+# Live run 12194 (RNA-seq Pipeline) has 70 inputs and 61 process-option groups.
+# Roughly 20 inputs are reference/index locations an admin set once, ~46 are
+# run_* step switches, and a handful are the actual experiment. Only the last
+# group is a question for a bench scientist.
+_PLAN_MAX_DECISIONS = 8
+_PLAN_STEP_PREFIX = "run_"
+_PLAN_MAX_LISTED_STEPS = 12
+
+# Inputs whose value is a path AND whose name says "this is the experimental
+# design" — the one class of path that must never be hidden as a reference.
+_PLAN_DESIGN_HINTS = ("group", "compare", "design", "metadata", "samplesheet",
+                      "sample_sheet", "contrast")
+
+_PLAN_GENOME_HINTS = ("genome_build", "build", "species", "organism", "assembly")
+_PLAN_LAYOUT_HINTS = ("mate", "paired", "single_end", "read_type", "readtype")
+
+# Curated wording for the inputs that recur across the catalog. Everything else
+# falls back to a humanized version of the variable name.
+_PLAN_LABELS = {
+    "reads": "Which samples to analyse",
+    "mate": "Are the reads single-end or paired-end?",
+    "genome_build": "Which genome build to align against",
+    "groups_file": "Sample groups — which sample belongs to which condition",
+    "compare_file": "Which comparisons to make (e.g. treated vs control)",
+    "gtf_type": "Which gene annotation source to use",
+}
+
+# Tokens that read badly in title case.
+_PLAN_ACRONYMS = {"gtf", "bed", "rna", "dna", "umi", "tsv", "csv", "bam", "vcf",
+                  "qc", "id", "utr", "tdf", "igv", "sam", "bw"}
+
+_YES_NO = ("yes", "no")
+
+
+def _is_reference_value(value) -> bool:
+    """True for values that point at admin-managed data on disk or the web."""
+    return isinstance(value, str) and (
+        value.startswith("/") or value.startswith("http://")
+        or value.startswith("https://")
+    )
+
+
+def _is_design_input(name: str) -> bool:
+    lowered = (name or "").lower()
+    return any(hint in lowered for hint in _PLAN_DESIGN_HINTS)
+
+
+def _humanize_input_name(name: str) -> str:
+    """Turn `replace_geneID_with_geneName` into something readable."""
+    words = [w for w in re.split(r"[_\s]+", name or "") if w]
+    if not words:
+        return name or ""
+    out = []
+    for i, word in enumerate(words):
+        if word.lower() in _PLAN_ACRONYMS:
+            out.append(word.upper())
+        elif i == 0:
+            out.append(word[0].upper() + word[1:])
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
+def _decision_for(inp):
+    """Build one decision entry from a run input, or None if it is plumbing."""
+    name, value = inp["name"], inp["value"]
+
+    if inp["type"] == "vmetaCollection":
+        entry = {
+            "label": _PLAN_LABELS.get(name, "Which samples to analyse"),
+            "input": name, "kind": "samples", "current": value, "allowed": None,
+        }
+        if inp.get("vmetaCollectionId"):
+            entry["vmetaCollectionId"] = inp["vmetaCollectionId"]
+        return entry
+
+    lowered = (name or "").lower()
+    if _is_design_input(name):
+        kind = "design"
+    elif _is_reference_value(value):
+        return None  # admin-managed reference or index location
+    elif any(hint in lowered for hint in _PLAN_GENOME_HINTS):
+        kind = "genome"
+    elif any(hint in lowered for hint in _PLAN_LAYOUT_HINTS):
+        kind = "reads_layout"
+    else:
+        kind = "setting"
+
+    allowed = list(_YES_NO) if str(value).lower() in _YES_NO else None
+    return {
+        "label": _PLAN_LABELS.get(name, _humanize_input_name(name)),
+        "input": name, "kind": kind, "current": value, "allowed": allowed,
+    }
+
+
+# Samples first, then the experimental design, then what to align against, then
+# read layout, then the aggregated step switches, then everything else.
+_PLAN_KIND_ORDER = {"samples": 0, "design": 1, "genome": 2, "reads_layout": 3,
+                    "steps": 4, "setting": 5}
+
+
+def _plan_decisions(details):
+    """Reduce a run's inputs to the decisions worth asking about.
+
+    Returns (decisions, stats). Nothing is dropped silently: the stats say how
+    many reference paths were hidden and how many settings did not fit.
+    """
+    step_states = {}
+    candidates = []
+    hidden_references = 0
+
+    for inp in _iter_run_inputs(details.get("inputs") or []):
+        name = inp["name"] or ""
+        if name.startswith(_PLAN_STEP_PREFIX) and inp["type"] != "vmetaCollection":
+            step_states[name[len(_PLAN_STEP_PREFIX):]] = str(inp["value"]).lower()
+            continue
+        decision = _decision_for(inp)
+        if decision is None:
+            hidden_references += 1
+        else:
+            candidates.append(decision)
+
+    if step_states:
+        enabled = [s for s, v in step_states.items() if v in ("yes", "true", "1")]
+        candidates.append({
+            "label": "Which analysis steps to run",
+            "kind": "steps",
+            "current": f"{len(enabled)} of {len(step_states)} steps enabled",
+            "enabled": [s.replace("_", " ") for s in enabled[:_PLAN_MAX_LISTED_STEPS]],
+            "more_enabled": max(0, len(enabled) - _PLAN_MAX_LISTED_STEPS),
+            "disabled_count": len(step_states) - len(enabled),
+            "allowed": list(_YES_NO),
+        })
+
+    candidates.sort(key=lambda d: _PLAN_KIND_ORDER.get(d["kind"], 9))
+    decisions = candidates[:_PLAN_MAX_DECISIONS]
+    stats = {
+        "hidden_reference_paths": hidden_references,
+        "further_settings_not_shown": max(0, len(candidates) - len(decisions)),
+        "process_option_groups": len(details.get("processOptions") or {}),
+    }
+    return decisions, stats
+
+
+@mcp.tool()
+def plan_run(pipeline_id: int, run_id: str = "") -> str:
+    """
+    Show the handful of decisions a scientist actually has to make to run a
+    pipeline — samples, experimental design, genome, which steps — with the
+    current value of each, taken from a real working run.
+
+    Use this after recommend_pipeline / list_featured_pipelines and BEFORE
+    duplicate_run. It deliberately hides the reference and index paths an admin
+    set once and the process-option groups, which together are the bulk of a
+    pipeline's inputs (live: 70 inputs and 61 option groups on RNA-seq) and are
+    not decisions a bench scientist should be asked to make.
+
+    Args:
+        pipeline_id: The pipeline to plan a run for.
+        run_id: Optional. Plan from this specific run instead of the most
+            recent successful one.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Planning a run for pipeline {pipeline_id} (run_id: '{run_id}')")
+
+        example = None
+        if run_id:
+            example = {"id": run_id, "name": None, "dateCreated": None}
+        else:
+            example = _find_example_run(via_client, pipeline_id, strict=True)
+            if not example:
+                result = envelope(
+                    summary=(
+                        f"Pipeline {pipeline_id} has no successful run to plan "
+                        "from, so there is no known-good configuration to show."
+                    ),
+                    data={"decisions": [], "pipeline": {"id": pipeline_id}},
+                    next_steps=[
+                        "Call list_runs(search_query=...) to look for a run on "
+                        "this pipeline in any state, then plan_run(run_id=...).",
+                        "Or pick a different pipeline with "
+                        "recommend_pipeline(goal) — one with a working example "
+                        "is far easier to adapt.",
+                    ],
+                )
+                return json.dumps(result, indent=2)
+
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{example['id']}/details"
+        )
+        decisions, stats = _plan_decisions(details)
+        pipeline = details.get("mainPipeline") or {}
+
+        data = {
+            "pipeline": {"id": pipeline.get("id", pipeline_id),
+                         "name": pipeline.get("name"),
+                         "version": pipeline.get("version")},
+            "based_on_run": {"id": example["id"],
+                             "name": example.get("name") or details.get("name"),
+                             "dateCreated": example.get("dateCreated")},
+            "decisions": decisions,
+        }
+        data.update(stats)
+
+        result = envelope(
+            summary=(
+                f"{len(decisions)} decision(s) to run '{pipeline.get('name')}', "
+                f"based on run {example['id']}. "
+                f"{stats['hidden_reference_paths']} reference/index paths and "
+                f"{stats['process_option_groups']} process-option groups are "
+                "hidden — they are already set correctly."
+            ),
+            data=data,
+            next_steps=[
+                "Confirm or change the values above with the user first.",
+                f"Then: duplicate_run(run_id='{example['id']}', project_id=..., "
+                f"pipeline_id={pipeline.get('id', pipeline_id)}) -> update_run "
+                "on the new run to apply the answers -> initiate_run to launch.",
+                "Call get_run_details(run_id='%s', verbose=True) for the full "
+                "editable config that update_run needs." % example["id"],
+                "Launching a run uses HPC compute — confirm with the user "
+                "before initiate_run.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error planning a run for pipeline {pipeline_id}: {e}")
         return json.dumps({"error": str(e)})
 
 

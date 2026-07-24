@@ -30,6 +30,14 @@ class TestNormalizeRunSort:
         assert server._normalize_run_sort("bogus") == "dateCreated"
         assert server._normalize_run_sort("") == "dateCreated"
 
+    def test_pipelineid_is_not_advertised_as_sortable(self):
+        """The run-list route builds its sort whitelist as
+        `Object.keys(runListAPIDbMap).filter(key => key !== "pipelineId")`, so
+        sorting by pipelineId is a hard 400 (verified live). Offering it in the
+        tool contract sent models straight into that error."""
+        assert "pipelineId" not in server.RUN_LIST_SORT_FIELDS
+        assert server._normalize_run_sort("pipelineId") == "pipelineName"
+
 
 class TestListRunsSort:
     def test_invalid_sort_is_normalized_before_request(self):
