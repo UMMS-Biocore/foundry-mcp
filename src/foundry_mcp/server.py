@@ -1712,6 +1712,209 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Getting sample data in
+# ---------------------------------------------------------------------------
+
+# Extensions stripped when deriving a sample name, longest first so that
+# ".fastq.gz" wins over ".gz".
+_FASTQ_EXTENSIONS = (".fastq.gz", ".fq.gz", ".fastq", ".fq", ".gz")
+
+# The mate markers seen in the wild. Each pattern must capture the sample stem
+# in group 1 and the mate number in group 2. `.1.` / `_1.` are last because
+# they are the loosest and would otherwise swallow "_R1_".
+_MATE_PATTERNS = (
+    re.compile(r"^(.*)_R([12])_\d+$"),   # sampleA_R1_001
+    re.compile(r"^(.*)_R([12])$"),       # sampleA_R1
+    re.compile(r"^(.*)\.R([12])$"),      # sampleA.R1
+    re.compile(r"^(.*)_([12])$"),        # sampleB_1
+    re.compile(r"^(.*)\.([12])$"),       # exper_rep3.1
+)
+
+
+def _strip_fastq_extension(basename: str) -> str:
+    lowered = basename.lower()
+    for ext in _FASTQ_EXTENSIONS:
+        if lowered.endswith(ext):
+            return basename[: -len(ext)]
+    return basename
+
+
+def _split_mate(path: str):
+    """Return (directory, sample_stem, mate_number|None) for a fastq path."""
+    directory, _, basename = path.rpartition("/")
+    stem = _strip_fastq_extension(basename)
+    for pattern in _MATE_PATTERNS:
+        match = pattern.match(stem)
+        if match:
+            return directory, match.group(1), match.group(2)
+    return directory, stem, None
+
+
+def _pair_fastqs(files):
+    """Group fastq paths into dataset rows, pairing R1/R2 automatically.
+
+    Returns (rows, unpaired_sample_names). A file whose mate is absent still
+    becomes a row — dropping data silently would be worse — but its name is
+    reported, because a lone R1 is much more often a forgotten file than a
+    deliberate single-end run.
+    """
+    grouped = {}
+    for path in files:
+        path = (path or "").strip()
+        if not path:
+            continue
+        directory, stem, mate = _split_mate(path)
+        # Key on the directory too: the same basename in two directories is two
+        # samples, not a pair.
+        entry = grouped.setdefault((directory, stem), {})
+        entry[mate or "single"] = path
+
+    rows, unpaired = [], []
+    for (_directory, stem), mates in sorted(grouped.items(), key=lambda kv: kv[0][1]):
+        first = mates.get("1") or mates.get("single")
+        second = mates.get("2")
+        if second and not mates.get("1"):
+            # An R2 with no R1 — treat the file we have as the primary read.
+            first, second = second, None
+        if first and second:
+            rows.append({"name": stem, "file1": first, "file2": second,
+                         "file_layout": "pair"})
+        else:
+            if mates.get("1") or mates.get("2"):
+                unpaired.append(stem)
+            rows.append({"name": stem, "file1": first, "file2": "",
+                         "file_layout": "single"})
+    return rows, unpaired
+
+
+def _resolve_canvas_id(via_client):
+    """Pick a study-tracker canvas to attach dataset rows to."""
+    response = via_client.call(
+        method="POST", endpoint="/api/v1/vmeta/canvas/search", data={}
+    )
+    rows = response.get("data", []) if isinstance(response, dict) else response
+    for row in rows or []:
+        if row.get("_id"):
+            return row["_id"]
+    return None
+
+
+@mcp.tool()
+def prepare_samples(name: str, files: list, canvas_id: str = "") -> str:
+    """
+    Build a sample dataset from a list of fastq paths in ONE call, pairing
+    R1/R2 automatically. Returns the dataset id as `vmetaCollectionId`, ready
+    to set as a run's sample input.
+
+    Handles the naming conventions that occur in practice — `_R1_001`, `_R1`,
+    `_1`, `.1.` — derives the sample name by stripping the mate marker and
+    extension, and reports any read whose mate is missing rather than silently
+    treating it as single-end.
+
+    Args:
+        name: Dataset name (must be non-empty).
+        files: Absolute paths to the fastq files, R1 and R2 together.
+        canvas_id: Optional study-tracker canvas; resolved automatically if
+            omitted.
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        if not files:
+            raise ValueError(
+                "No files given — pass the absolute paths of the fastq files")
+
+        rows, unpaired = _pair_fastqs(files)
+        if not rows:
+            raise ValueError("No usable file paths were found in `files`")
+
+        # Invariant: every path handed in must end up in exactly one row. This
+        # is what catches ambiguous naming — e.g. a_R1/a_R2 alongside a bare
+        # a.fastq.gz all reduce to the sample "a", and without this check the
+        # odd one out is silently dropped and the run quietly analyses less
+        # data than the scientist believes.
+        given = [f.strip() for f in files if f and f.strip()]
+        used = {r["file1"] for r in rows} | {r["file2"] for r in rows if r["file2"]}
+        dropped = [f for f in given if f not in used]
+        if dropped:
+            raise ValueError(
+                f"These files could not be assigned to a distinct sample: "
+                f"{', '.join(dropped)}. They collapse to the same sample name as "
+                f"another file. Rename them so each sample is unambiguous — "
+                f"otherwise they would be silently left out of the analysis."
+            )
+
+        via_client = get_client()
+        resolved_canvas = canvas_id.strip() if canvas_id else _resolve_canvas_id(via_client)
+        if not resolved_canvas:
+            raise ValueError(
+                "No study-tracker canvas is available to attach samples to. "
+                "Pass canvas_id explicitly (search_canvas lists them).")
+
+        logger.info(f"Creating dataset '{name}' with {len(rows)} sample(s)")
+        created = via_client.call(
+            method="POST", endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name.strip()},
+        )
+        payload = created.get("data", created) if isinstance(created, dict) else {}
+        dataset_id = payload.get("_id") or payload.get("id")
+        if not dataset_id:
+            raise ValueError(f"Dataset creation returned no id: {created}")
+
+        added, failed = [], []
+        for row in rows:
+            file_row = {"name": row["name"], "file1": row["file1"],
+                        "file2": row["file2"], "file3": "", "file4": "",
+                        "file_layout": row["file_layout"]}
+            try:
+                via_client.call(
+                    method="POST",
+                    endpoint=f"/api/v1/vmeta/dataset/{dataset_id}/addFile",
+                    data={"canvasId": resolved_canvas, "file": file_row},
+                )
+                added.append(row["name"])
+            except Exception as e:
+                logger.error(f"Could not add sample '{row['name']}': {e}")
+                failed.append(row["name"])
+
+        if failed:
+            raise ValueError(
+                f"Dataset '{name}' was created ({dataset_id}) but "
+                f"{len(failed)} sample(s) could not be attached: "
+                f"{', '.join(failed)}. The dataset is NOT ready to use; add the "
+                f"missing samples or delete it and retry."
+            )
+
+        paired = sum(1 for r in rows if r["file_layout"] == "pair")
+        next_steps = [
+            f"Set this dataset on a run: update_run(...) with the sample "
+            f"input's vmetaCollectionId = '{dataset_id}'.",
+            "Then preflight_run(run_id=...) before launching.",
+        ]
+        if unpaired:
+            next_steps.insert(0, (
+                f"Check {', '.join(unpaired)} — a mate file was expected but "
+                f"not found, so it was added as single-end. If the R2 exists, "
+                f"re-run prepare_samples with it included."))
+
+        result = envelope(
+            summary=(
+                f"Dataset '{name}' created with {len(added)} sample(s) "
+                f"({paired} paired-end, {len(added) - paired} single-end)."
+            ),
+            data={"vmetaCollectionId": dataset_id, "name": name.strip(),
+                  "sample_count": len(added), "paired": paired,
+                  "unpaired": unpaired,
+                  "samples": [r["name"] for r in rows]},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error preparing samples for '{name}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Pre-flight: catch what would otherwise waste cluster time
 # ---------------------------------------------------------------------------
 
