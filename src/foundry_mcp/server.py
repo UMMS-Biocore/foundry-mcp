@@ -33,7 +33,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 # Import from our modules
 from .client import get_client
 from .config import (
-    set_credentials, validate_credentials, get_fixed_hostname,
+    set_credentials, validate_credentials, get_fixed_hostname, get_credentials,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
 )
 from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
@@ -1911,6 +1911,214 @@ def prepare_samples(name: str, files: list, canvas_id: str = "") -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error preparing samples for '{name}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Sample sheets
+# ---------------------------------------------------------------------------
+
+# Both layouts were read off the cluster from live run 12194, not guessed.
+_GROUPS_SHEET_NAME = "metadata.tsv"
+_COMPARISONS_SHEET_NAME = "comparisons.tsv"
+_GROUPS_HEADER = "sample_name\tgroup"
+_COMPARISONS_HEADER = "controls\ttreats\tnames"
+
+
+def _normalize_groups(groups):
+    """Accept {sample: group} or [[sample, group], ...] and return an ordered
+    dict. Insertion order is preserved so a scientist gets their own ordering
+    back rather than an alphabetised one."""
+    if isinstance(groups, dict):
+        pairs = list(groups.items())
+    else:
+        pairs = []
+        for row in groups or []:
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                pairs.append((row[0], row[1]))
+            elif isinstance(row, dict) and "sample" in row:
+                pairs.append((row["sample"], row.get("group")))
+    return {str(s).strip(): str(g).strip() for s, g in pairs if str(s).strip()}
+
+
+def _render_groups_tsv(groups) -> str:
+    mapping = _normalize_groups(groups)
+    lines = [_GROUPS_HEADER]
+    lines.extend(f"{sample}\t{group}" for sample, group in mapping.items())
+    return "\n".join(lines) + "\n"
+
+
+def _render_comparisons_tsv(comparisons) -> str:
+    lines = [_COMPARISONS_HEADER]
+    for row in comparisons or []:
+        control, treat = str(row[0]).strip(), str(row[1]).strip()
+        name = (str(row[2]).strip() if len(row) > 2 and row[2]
+                else f"{control}_vs_{treat}")
+        lines.append(f"{control}\t{treat}\t{name}")
+    return "\n".join(lines) + "\n"
+
+
+def _upload_run_file(run_id, run_uuid, file_name, content, remote_dir):
+    """POST a small text file to a run's upload area.
+
+    Deliberately a raw multipart request rather than the SDK's
+    upload_report_file: that derives its attempt id from the run's existing
+    report paths, which a run that has never launched does not have — and a
+    never-launched run is exactly when a sample sheet is needed.
+    """
+    hostname, token = get_credentials()
+    url = f"{hostname.rstrip('/')}/api/v1/run/{run_id}/reports/upload/{run_uuid}"
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": (file_name, content.encode("utf-8"), "text/tab-separated-values")},
+        data={"dir": remote_dir},
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Upload of {file_name} failed ({response.status_code}): "
+            f"{response.text[:200]}"
+        )
+    return True
+
+
+def _upload_report_enabled(via_client) -> bool:
+    """The upload route sits behind the per-user UPLOAD_REPORT feature flag."""
+    try:
+        flags = via_client.call(
+            method="GET", endpoint="/api/configurations/v1/user")
+        return bool((flags or {}).get("UPLOAD_REPORT"))
+    except Exception as e:
+        logger.info(f"Could not read feature flags, assuming upload is off: {e}")
+        return False
+
+
+@mcp.tool()
+def make_sample_sheet(
+    run_id: str,
+    groups: dict,
+    comparisons: list = None,
+    allow_single_replicate: bool = False,
+) -> str:
+    """
+    Build the experimental-design sheets a differential-expression run needs,
+    and place them where the run expects them.
+
+    `groups` says which sample belongs to which condition; `comparisons` says
+    which conditions to contrast. Returns the absolute paths to set as the run's
+    `groups_file` and `compare_file` inputs, and always returns the sheet text
+    itself so nothing is a black box.
+
+    Args:
+        run_id: The run these sheets belong to.
+        groups: {sample_name: group}, or [[sample_name, group], ...].
+        comparisons: [[control, treated], ...]; a third element names the
+            comparison, otherwise it is "<control>_vs_<treated>".
+        allow_single_replicate: Permit a group with only one sample. Off by
+            default because differential expression cannot test such a group.
+    """
+    try:
+        mapping = _normalize_groups(groups)
+        if not mapping:
+            raise ValueError(
+                "No groups given — pass {sample_name: group} naming which "
+                "sample belongs to which condition.")
+
+        counts = {}
+        for group in mapping.values():
+            counts[group] = counts.get(group, 0) + 1
+        thin = sorted(g for g, n in counts.items() if n < _PREFLIGHT_MIN_REPLICATES)
+        if thin and not allow_single_replicate:
+            raise ValueError(
+                f"Group(s) with only one sample: {', '.join(thin)}. Differential "
+                f"expression cannot test a group without replicates. Add more "
+                f"samples, merge the group, or pass allow_single_replicate=True "
+                f"if you really mean it."
+            )
+
+        for row in comparisons or []:
+            unknown = [str(g).strip() for g in row[:2]
+                       if str(g).strip() not in counts]
+            if unknown:
+                raise ValueError(
+                    f"Comparison names a group that is not in `groups`: "
+                    f"{', '.join(unknown)}. Known groups: "
+                    f"{', '.join(sorted(counts))}."
+                )
+
+        via_client = get_client()
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+        launch_dir = (details.get("launchDirectory") or "").rstrip("/")
+        if not launch_dir:
+            raise ValueError(
+                f"Run {run_id} has no launch directory, so there is nowhere to "
+                f"put the sheets. Check the run's compute environment.")
+        run_uuid = details.get("runUUID")
+
+        remote_dir = f"foundryUploads/run{run_id}"
+        base = f"{launch_dir}/{remote_dir}"
+        groups_tsv = _render_groups_tsv(mapping)
+        comparisons_tsv = _render_comparisons_tsv(comparisons) if comparisons else None
+
+        sheets = [(_GROUPS_SHEET_NAME, groups_tsv)]
+        if comparisons_tsv:
+            sheets.append((_COMPARISONS_SHEET_NAME, comparisons_tsv))
+
+        uploaded = _upload_report_enabled(via_client)
+        if uploaded:
+            for file_name, content in sheets:
+                _upload_run_file(
+                    run_id=run_id, run_uuid=run_uuid, file_name=file_name,
+                    content=content, remote_dir=remote_dir,
+                )
+
+        groups_path = f"{base}/{_GROUPS_SHEET_NAME}"
+        compare_path = f"{base}/{_COMPARISONS_SHEET_NAME}" if comparisons_tsv else None
+
+        data = {
+            "uploaded": uploaded,
+            "groups_file": groups_path,
+            "compare_file": compare_path,
+            "groups_tsv": groups_tsv,
+            "comparisons_tsv": comparisons_tsv,
+            "group_counts": counts,
+        }
+
+        if uploaded:
+            summary = (
+                f"Wrote {len(sheets)} sheet(s) for run {run_id}: "
+                f"{len(mapping)} samples across {len(counts)} group(s)."
+            )
+            next_steps = [
+                f"Set the paths on the run: update_run(...) with "
+                f"groups_file='{groups_path}'"
+                + (f" and compare_file='{compare_path}'" if compare_path else "")
+                + ".",
+                f"Then preflight_run(run_id='{run_id}') before launching.",
+            ]
+        else:
+            summary = (
+                f"Generated {len(sheets)} sheet(s) for run {run_id} but did NOT "
+                f"upload them — the UPLOAD_REPORT feature is not enabled for "
+                f"this user."
+            )
+            next_steps = [
+                "Save the `groups_tsv` (and `comparisons_tsv`) content below "
+                f"and upload it to the run's Uploads area as "
+                f"{_GROUPS_SHEET_NAME}"
+                + (f" / {_COMPARISONS_SHEET_NAME}" if compare_path else "")
+                + ", or ask an admin to enable UPLOAD_REPORT.",
+                f"Then set groups_file='{groups_path}'"
+                + (f" and compare_file='{compare_path}'" if compare_path else "")
+                + " with update_run, and preflight_run before launching.",
+            ]
+
+        result = envelope(summary=summary, data=data, next_steps=next_steps)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error making sample sheets for run {run_id}: {e}")
         return json.dumps({"error": str(e)})
 
 
