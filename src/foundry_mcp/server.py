@@ -1712,6 +1712,301 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pre-flight: catch what would otherwise waste cluster time
+# ---------------------------------------------------------------------------
+
+# Values that mean "nothing here" once they reach the pipeline.
+_PREFLIGHT_PLACEHOLDERS = ("", "NO_FILE", "NA", "None", "null")
+
+# Statuses that mean the run has never shipped its upload tarball to the
+# cluster, so a path under its own foundryUploads/ legitimately does not exist
+# yet. Failing there would cry wolf on every freshly duplicated run.
+_PREFLIGHT_UNLAUNCHED = ("init", "Waiting", "NotSubmitted", "")
+
+_PREFLIGHT_MIN_REPLICATES = 2
+
+
+def _preflight_check(check_id, status, detail, fix="", **extra):
+    check = {"id": check_id, "status": status, "detail": detail, "fix": fix}
+    check.update(extra)
+    return check
+
+
+def _read_cluster_file(via_client, run_id, path, cluster_id, run_uuid):
+    """Read a file from the run's compute environment. Returns None if absent."""
+    try:
+        body = {"path": path, "profileClusterId": cluster_id}
+        if run_uuid:
+            body["runUUID"] = run_uuid
+        response = via_client.call(
+            method="POST", endpoint=f"/api/v1/run/{run_id}/uploaded-file",
+            data=body,
+        )
+        if isinstance(response, dict):
+            # A JSON body here is the error envelope, not file contents.
+            return None
+        return response
+    except Exception as e:
+        logger.info(f"Pre-flight could not read {path}: {e}")
+        return None
+
+
+def _parse_groups_sheet(text):
+    """Parse a `sample_name<TAB>group` sheet into {sample: group}.
+
+    Tolerates comma separation and a missing header — a scientist pasting a
+    sheet should not be defeated by punctuation.
+    """
+    mapping = {}
+    for i, line in enumerate((text or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"[\t,]", line)
+        if len(parts) < 2:
+            continue
+        sample, group = parts[0].strip(), parts[1].strip()
+        if i == 0 and sample.lower() in ("sample_name", "sample", "name"):
+            continue
+        if sample:
+            mapping[sample] = group
+    return mapping
+
+
+def _preflight_dataset(via_client, sample_inputs):
+    """Resolve each sample input's dataset and return (check, sample_names)."""
+    if not sample_inputs:
+        return _preflight_check(
+            "samples", "fail", "No sample dataset is attached to this run.",
+            "Build one with prepare_samples(...), then set it with update_run.",
+        ), set()
+
+    names, empty = set(), []
+    for inp in sample_inputs:
+        dataset_id = inp.get("vmetaCollectionId")
+        if not dataset_id:
+            empty.append(inp["name"])
+            continue
+        try:
+            response = via_client.call(
+                method="POST",
+                endpoint=f"/api/v1/vmeta/dataset/{dataset_id}/files/search",
+                data={},
+            )
+            rows = response.get("data", []) if isinstance(response, dict) else []
+        except Exception as e:
+            logger.warning(f"Pre-flight could not read dataset {dataset_id}: {e}")
+            rows = []
+        if not rows:
+            empty.append(inp["name"])
+        names.update(r.get("name") for r in rows if r.get("name"))
+
+    if empty:
+        return _preflight_check(
+            "samples", "fail",
+            f"Sample dataset for {', '.join(empty)} has no files.",
+            "Add samples with prepare_samples(...) or pick a dataset that has "
+            "them, then update_run.",
+        ), names
+    return _preflight_check(
+        "samples", "pass", f"{len(names)} sample(s) attached."), names
+
+
+@mcp.tool()
+def preflight_run(run_id: str) -> str:
+    """
+    Check a run for the mistakes that waste cluster time, BEFORE launching it.
+
+    Verifies the sample dataset has files, that every sample-sheet path really
+    exists on the compute environment, that the sheet's sample names match the
+    dataset, that each group has replicates, and that no required input is
+    empty. Call this between update_run and initiate_run — every problem it
+    finds is one that would otherwise surface as a failed or silently-skipped
+    job after the queue time has already been spent.
+
+    Args:
+        run_id: The run to check.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Pre-flighting run {run_id}")
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details"
+        )
+
+        run_env = details.get("runEnvironment") or {}
+        cluster_id = run_env.get("selectedId")
+        run_uuid = details.get("runUUID")
+        launch_dir = (details.get("launchDirectory") or "").rstrip("/")
+        own_uploads = f"{launch_dir}/foundryUploads/run{run_id}" if launch_dir else None
+
+        # Has this run ever shipped its uploads to the cluster?
+        launched = True
+        try:
+            listing = via_client.call(
+                method="POST", endpoint="/api/v1/run/list",
+                params={"take": 1, "skip": 0, "sort": "dateCreated",
+                        "order": "desc", "filter": f"id:eq={run_id}"},
+                data={},
+            )
+            rows = listing.get("data", []) if isinstance(listing, dict) else []
+            if rows:
+                launched = rows[0].get("status") not in _PREFLIGHT_UNLAUNCHED
+        except Exception as e:
+            logger.info(f"Pre-flight could not read run status: {e}")
+
+        inputs = list(_iter_run_inputs(details.get("inputs") or []))
+        sample_inputs = [i for i in inputs if i["type"] == "vmetaCollection"]
+
+        checks = []
+        dataset_check, dataset_names = _preflight_dataset(via_client, sample_inputs)
+        checks.append(dataset_check)
+
+        # Empty / placeholder values.
+        blanks = [i["name"] for i in inputs
+                  if isinstance(i["value"], str)
+                  and i["value"].strip() in _PREFLIGHT_PLACEHOLDERS]
+        checks.append(
+            _preflight_check(
+                "empty_inputs", "fail",
+                f"{len(blanks)} input(s) have no value: {', '.join(blanks)}.",
+                "Set them with update_run — the pipeline treats these as "
+                "missing and may skip steps rather than fail loudly.",
+            ) if blanks else
+            _preflight_check("empty_inputs", "pass", "All inputs have values.")
+        )
+
+        # Genome build.
+        build = next((i for i in inputs
+                      if "genome_build" in (i["name"] or "").lower()), None)
+        checks.append(
+            _preflight_check("genome", "pass",
+                             f"Genome build is '{build['value']}'.")
+            if build and str(build["value"]).strip()
+            else _preflight_check(
+                "genome", "warn", "No genome build is set on this run.",
+                "Confirm the pipeline does not need one, or set it with "
+                "update_run.")
+        )
+
+        # Design-file paths, read from the run's own compute environment.
+        sheets = {}
+        for inp in inputs:
+            value = inp["value"]
+            if not _is_design_input(inp["name"]) or not isinstance(value, str):
+                continue
+            if value.strip() in _PREFLIGHT_PLACEHOLDERS:
+                continue
+            contents = _read_cluster_file(
+                via_client, run_id, value, cluster_id, run_uuid)
+            if contents is not None:
+                sheets[inp["name"]] = contents
+                checks.append(_preflight_check(
+                    "design_file", "pass", f"{inp['name']} exists.",
+                    input=inp["name"]))
+                continue
+            pending = (not launched and own_uploads
+                       and value.startswith(own_uploads))
+            if pending:
+                checks.append(_preflight_check(
+                    "design_file", "warn",
+                    f"{inp['name']} is not on the cluster yet ({value}).",
+                    "Expected — this run has not launched, so its uploads have "
+                    "not shipped. It will be sent with the run.",
+                    input=inp["name"]))
+            else:
+                checks.append(_preflight_check(
+                    "design_file", "fail",
+                    f"{inp['name']} points at a path that does not exist: "
+                    f"{value}.",
+                    "Re-supply the file with make_sample_sheet(...) — this is "
+                    "what happens when a run is duplicated after its original "
+                    "run directory was cleaned up, and it makes downstream "
+                    "steps silently skip.",
+                    input=inp["name"]))
+
+        # Sample names + replicates, from whichever sheet carries groups.
+        groups = {}
+        for name, text in sheets.items():
+            if "group" in name.lower():
+                groups = _parse_groups_sheet(text)
+                break
+
+        if groups and dataset_names:
+            unknown = sorted(set(groups) - dataset_names)
+            ungrouped = sorted(dataset_names - set(groups))
+            if unknown:
+                checks.append(_preflight_check(
+                    "sample_names_match", "fail",
+                    f"{len(unknown)} sample(s) in the sheet are not in the "
+                    f"dataset: {', '.join(unknown)}.",
+                    "Fix the names so they match the dataset exactly — the "
+                    "pipeline matches on the name string."))
+            elif ungrouped:
+                checks.append(_preflight_check(
+                    "sample_names_match", "warn",
+                    f"{len(ungrouped)} sample(s) have no group and will be "
+                    f"left out: {', '.join(ungrouped)}.",
+                    "Add them to the groups sheet, or confirm you meant to "
+                    "exclude them."))
+            else:
+                checks.append(_preflight_check(
+                    "sample_names_match", "pass",
+                    "Sheet and dataset sample names match."))
+
+        if groups:
+            counts = {}
+            for group in groups.values():
+                counts[group] = counts.get(group, 0) + 1
+            thin = sorted(g for g, n in counts.items()
+                          if n < _PREFLIGHT_MIN_REPLICATES)
+            checks.append(
+                _preflight_check(
+                    "replicates", "warn",
+                    f"Group(s) with only one sample: {', '.join(thin)}.",
+                    "Differential expression needs replicates; with one sample "
+                    "a group cannot be tested.")
+                if thin else
+                _preflight_check("replicates", "pass",
+                                 f"{len(counts)} group(s), all replicated.")
+            )
+
+        failures = sum(1 for c in checks if c["status"] == "fail")
+        warnings = sum(1 for c in checks if c["status"] == "warn")
+        ok = failures == 0
+
+        if ok:
+            summary = (f"Run {run_id} looks ready to launch "
+                       f"({len(checks)} checks, {warnings} warning(s)).")
+            next_steps = [
+                "Review any warnings with the user.",
+                f"Then initiate_run(run_id='{run_id}') — this uses HPC "
+                "compute, so confirm first.",
+            ]
+        else:
+            summary = (f"Run {run_id} is NOT ready: {failures} problem(s) that "
+                       f"would waste cluster time.")
+            next_steps = [
+                "Fix the failing checks above before launching — each one "
+                "lists how.",
+                "Then call preflight_run again; only launch once it passes.",
+            ]
+
+        result = envelope(
+            summary=summary,
+            data={"ok": ok, "failures": failures, "warnings": warnings,
+                  "run": {"id": run_id, "name": details.get("name"),
+                          "launched": launched},
+                  "checks": checks},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error pre-flighting run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Recipes
 # ---------------------------------------------------------------------------
 
