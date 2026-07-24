@@ -997,13 +997,37 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
 
         name, content = _pick_diagnostic_log(logs)
         if not name:
+            # Distinguish "not written yet" from "gone for good". Telling
+            # someone whose run failed a month ago to try again shortly is
+            # actively misleading — live on staging, 8 of 8 failed runs have a
+            # 4-byte log.txt and nothing else, their run directories long since
+            # cleaned up.
+            status = _fetch_run_status(via_client, run_id)
+            if status in _TERMINAL_RUN_STATUSES:
+                result = envelope(
+                    summary=(
+                        f"Run {run_id} finished ({_human_run_status(status)}) "
+                        f"but its logs are no longer on disk — the run "
+                        f"directory has been cleaned up, so they will not "
+                        f"appear later."
+                    ),
+                    data={"logs": [], "status": _human_run_status(status),
+                          "logs_purged": True},
+                    next_steps=[
+                        f"The run's configuration is still available: "
+                        f"get_run_details(run_id='{run_id}').",
+                        "To investigate the failure, duplicate_run and launch a "
+                        "fresh attempt — that writes fresh logs.",
+                    ],
+                )
+                return json.dumps(result, indent=2)
             result = envelope(
                 summary=(
                     f"No log output is available yet for run {run_id}. If it is "
                     f"still starting or running on a cluster, logs may not have "
                     f"synced — try again shortly."
                 ),
-                data={"logs": []},
+                data={"logs": [], "logs_purged": False},
                 next_steps=[f"Check status with get_run(run_id='{run_id}')."],
             )
             return json.dumps(result, indent=2)
@@ -1708,6 +1732,178 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error recommending a pipeline for '{goal}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Watching a run in flight
+# ---------------------------------------------------------------------------
+
+# Statuses from which nothing further will happen. Used to tell "logs have not
+# synced yet" apart from "logs are gone".
+_TERMINAL_RUN_STATUSES = ("NextSuc", "NextErr", "Error", "Terminated")
+
+_TRACE_FILE = "trace.txt"
+
+# Nextflow task states. CACHED means the task was reused from a previous run —
+# it is DONE, and counting it as outstanding would badly understate progress.
+_TRACE_DONE = ("COMPLETED", "CACHED")
+_TRACE_FAILED = ("FAILED", "ABORTED")
+_TRACE_RUNNING = ("RUNNING", "SUBMITTED", "PENDING")
+
+_WATCH_MAX_LISTED = 5
+
+
+def _fetch_run_status(via_client, run_id, strict: bool = False):
+    """The raw RunStatus string, or None if it cannot be read.
+
+    strict=True where the status IS the answer rather than a refinement of one:
+    swallowing an outage there reports "Connecting, no progress available",
+    which blames the run for an infrastructure failure.
+    """
+    try:
+        response = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/status")
+        if isinstance(response, dict):
+            return response.get("runStatus")
+    except Exception as e:
+        if strict:
+            raise
+        logger.info(f"Could not read status for run {run_id}: {e}")
+    return None
+
+
+def _parse_trace(text):
+    """Parse a Nextflow trace.txt into per-task progress.
+
+    The status endpoint only returns a flat label, so this is the only source
+    of "which step is it on". Returns None when there is no usable trace.
+    """
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    if len(lines) < 2:
+        return None
+    header = lines[0].split("\t")
+    try:
+        i_name, i_status = header.index("name"), header.index("status")
+    except ValueError:
+        return None
+    i_exit = header.index("exit") if "exit" in header else None
+
+    done = failed = running = 0
+    failed_tasks, running_now = [], []
+    for line in lines[1:]:
+        cells = line.split("\t")
+        if len(cells) <= i_status:
+            continue
+        name, status = cells[i_name], cells[i_status].strip().upper()
+        if status in _TRACE_DONE:
+            done += 1
+        elif status in _TRACE_FAILED:
+            failed += 1
+            entry = {"name": name, "status": status}
+            if i_exit is not None and len(cells) > i_exit:
+                entry["exit"] = cells[i_exit]
+            failed_tasks.append(entry)
+        elif status in _TRACE_RUNNING:
+            running += 1
+            running_now.append(name)
+
+    total = done + failed + running
+    if not total:
+        return None
+    return {
+        "total_tasks": total,
+        "finished": done,
+        "failed": failed,
+        "running": running,
+        "percent_complete": round((done / total) * 100) if total else 0,
+        "running_now": running_now[:_WATCH_MAX_LISTED],
+        "failed_tasks": failed_tasks[:_WATCH_MAX_LISTED],
+    }
+
+
+@mcp.tool()
+def watch_run(run_id: str) -> str:
+    """
+    Report how far a run has actually got — how many steps are done, which step
+    is running right now, and which have failed — not just its overall status
+    label.
+
+    Use this when a user asks "is it done yet", "how far along is it", or "what
+    is it doing". MCP tools cannot poll on their own, so when a run is still
+    going this returns check_again=true; call it again after a while rather
+    than assuming nothing changed.
+
+    Args:
+        run_id: The run to check.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Watching run {run_id}")
+        status = _fetch_run_status(via_client, run_id, strict=True)
+        human = _human_run_status(status)
+
+        progress = None
+        try:
+            logs = via_client.call(
+                method="GET", endpoint=f"/api/v1/run/{run_id}/logs", params=None)
+            if isinstance(logs, dict) and "logs" in logs:
+                logs = logs["logs"]
+            trace = next((l for l in (logs or [])
+                          if isinstance(l, dict) and l.get("name") == _TRACE_FILE),
+                         None)
+            if trace:
+                progress = _parse_trace(trace.get("content"))
+        except Exception as e:
+            logger.info(f"No trace available for run {run_id}: {e}")
+
+        finished = status in _TERMINAL_RUN_STATUSES
+        check_again = not finished
+
+        if progress:
+            summary = (
+                f"Run {run_id} is {human}: {progress['finished']} of "
+                f"{progress['total_tasks']} steps done "
+                f"({progress['percent_complete']}%)")
+            if progress["failed_tasks"]:
+                names = ", ".join(t["name"] for t in progress["failed_tasks"])
+                summary += f". Failed at {names}"
+            elif progress["running_now"]:
+                summary += f". Currently running {', '.join(progress['running_now'])}"
+            summary += "."
+        else:
+            summary = (f"Run {run_id} is {human}. No step-level progress is "
+                       f"available yet.")
+
+        if progress and progress["failed_tasks"]:
+            next_steps = [
+                f"See the error: get_run_log(run_id='{run_id}').",
+                f"Check the configuration for a cause: "
+                f"preflight_run(run_id='{run_id}').",
+            ]
+        elif check_again:
+            next_steps = [
+                f"Still going — call watch_run(run_id='{run_id}') again in a "
+                f"few minutes rather than assuming it is stuck.",
+                "Nothing needs doing while it runs.",
+            ]
+        elif status == "NextSuc":
+            next_steps = [
+                f"Finished — call summarize_results(run_id='{run_id}') for what "
+                f"it found.",
+            ]
+        else:
+            next_steps = [f"See what happened: get_run_log(run_id='{run_id}')."]
+
+        result = envelope(
+            summary=summary,
+            data={"run_id": run_id, "status": human, "raw_status": status,
+                  "check_again": check_again, "progress": progress},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error watching run {run_id}: {e}")
         return json.dumps({"error": str(e)})
 
 
@@ -2861,8 +3057,12 @@ _RECIPES = [
         "steps": [
             "get_run(run_id='<id>') — confirm the status and which attempt is "
             "current.",
+            "watch_run(run_id='<id>') — how far it got and which step failed, "
+            "with the exit code.",
             "get_run_log(run_id='<id>') — returns the log that actually carries "
-            "the failure, already tailed to the end where errors live.",
+            "the failure, already tailed to the end where errors live. If it "
+            "reports the logs were cleaned up, they are gone for good — say so "
+            "rather than suggesting the user wait.",
             "Read the error to the user in plain language, and say which step "
             "of the pipeline it came from.",
             "If a setting caused it: plan_run(pipeline_id=...) to see the "

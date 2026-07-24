@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- **Watching a run, and honest logs (Phase 4)**
+  - `watch_run(run_id)` reports how far a run has actually got — steps done,
+    which step is running now, which failed and with what exit code — instead of
+    a single status word. It reads Nextflow's task trace, which is the only
+    place that detail exists.
+  - `get_run_log` no longer tells you to "try again shortly" for a run whose
+    logs are gone. Finished runs whose directory has been cleaned up now say so
+    plainly and point at what still works, instead of implying the logs are on
+    their way.
+
 - **Results and apps (Phase 3)** — what a finished run actually found, instead
   of a list of files:
   - `summarize_results(run_id)` reports the significant genes per comparison,
