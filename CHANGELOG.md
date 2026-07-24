@@ -3,6 +3,23 @@
 ## [Unreleased]
 
 ### Added
+- **Getting data in, and pre-flight (Phase 2)** — the steps between "I have
+  fastqs" and a correctly-configured run:
+  - `preflight_run(run_id)` checks a run for the mistakes that waste cluster
+    time *before* it launches: a sample dataset with no files, a design-file
+    path that does not exist, sheet sample names that do not match the dataset
+    (in both directions), groups without replicates, empty inputs. Every
+    finding carries a plain-language fix. Live on staging it correctly passes
+    healthy runs and flags a real example run whose dataset is missing and
+    whose two design files point at paths that are gone.
+  - `prepare_samples(name, files)` builds a sample dataset from a list of fastq
+    paths in one call, pairing R1/R2 automatically across the conventions that
+    occur in practice, and refusing to silently drop a file whose name
+    collapses to another sample's.
+  - `make_sample_sheet(run_id, groups, comparisons)` authors the
+    experimental-design sheets and places them where the run expects them,
+    refusing a group without replicates or a comparison naming an unknown
+    group.
 - **Guided discovery and launch (Phase 1)** — a scientist who states a *goal*
   instead of naming a pipeline is now guided all the way to launch:
   - `recommend_pipeline(goal)` matches plain-language goals to pipelines and
