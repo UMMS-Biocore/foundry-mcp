@@ -33,7 +33,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 # Import from our modules
 from .client import get_client
 from .config import (
-    set_credentials, validate_credentials, get_fixed_hostname,
+    set_credentials, validate_credentials, get_fixed_hostname, get_credentials,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
 )
 from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
@@ -1712,6 +1712,1115 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+# A run produces one DESeq2 directory per quantifier (RSEM, Kallisto, Salmon,
+# STAR_Salmon, STAR_featurecounts). Reporting five near-identical answers is its
+# own noise problem, so results are summarised across them.
+_DE_SIG_SUFFIX = "_sig_deseq2_results.tsv"
+_DE_DIR_PREFIX = "DESeq2_"
+_QC_SUMMARY_PATH = "summary/overall_summary.tsv"
+
+_TOP_GENES = 3
+
+# Reading these into a chat context would be slow and useless: the DESeq2 HTML
+# is ~1.4 MB and the MultiQC report ~4.8 MB.
+_RESULT_SKIP_EXTENSIONS = ("html", "rmd", "pdf", "png", "jpg", "jpeg", "svg")
+
+# A sample this far below the median read count is worth mentioning.
+_QC_LOW_READ_FRACTION = 0.25
+
+
+def _report_files(via_client, run_id):
+    """Every file in a run's report, as plain dict rows.
+
+    Always use each row's `file_path` verbatim — real outputs live under
+    `<dir>/outputs/` and inputs under `<dir>/inputs/`, so building a path from
+    the directory and file name produces something `load_file` cannot resolve.
+    """
+    report = via_client.reports.fetch_report_data(run_id)
+    files = via_client.reports.get_all_files(report)
+    rows = files.to_dict(orient="records") if hasattr(files, "to_dict") else list(files)
+    return report, rows
+
+
+def _load_table(via_client, report, file_path):
+    """Load a tabular result file as a list of dict rows, or None."""
+    try:
+        content = via_client.reports.load_file(report, file_path, sep="\t")
+    except Exception as e:
+        logger.info(f"Could not load {file_path}: {e}")
+        return None
+    if hasattr(content, "to_dict"):
+        return content.to_dict(orient="records")
+    return None
+
+
+def _quantifier_from_path(file_path: str) -> str:
+    """`DESeq2_RSEM/outputs/x.tsv` -> `RSEM`."""
+    directory = (file_path or "").split("/", 1)[0]
+    if directory.startswith(_DE_DIR_PREFIX):
+        return directory[len(_DE_DIR_PREFIX):] or directory
+    return directory
+
+
+def _comparison_from_name(name: str) -> str:
+    """`control_vs_exper_sig_deseq2_results.tsv` -> `control_vs_exper`."""
+    base = (name or "").rsplit("/", 1)[-1]
+    return base[: -len(_DE_SIG_SUFFIX)] if base.endswith(_DE_SIG_SUFFIX) else base
+
+
+def _summarize_de_table(rows):
+    """Count significant genes and pick the strongest movers in each direction."""
+    genes = [r for r in rows or [] if r.get("gene") is not None]
+
+    def _fc(row):
+        try:
+            return float(row.get("log2FoldChange") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _trim(row):
+        entry = {"gene": row.get("gene"), "log2FoldChange": _fc(row)}
+        if row.get("padj") is not None:
+            entry["padj"] = row["padj"]
+        return entry
+
+    up = sorted((g for g in genes if _fc(g) > 0), key=_fc, reverse=True)
+    down = sorted((g for g in genes if _fc(g) < 0), key=_fc)
+    return {
+        "significant_genes": len(genes),
+        "top_up": [_trim(g) for g in up[:_TOP_GENES]],
+        "top_down": [_trim(g) for g in down[:_TOP_GENES]],
+        "all_genes": [g.get("gene") for g in genes],
+    }
+
+
+def _summarize_qc(rows):
+    """Turn the per-sample alignment table into a one-line verdict."""
+    if not rows:
+        return None
+
+    def _num(row, *keys):
+        for key in keys:
+            value = row.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return 0.0
+
+    totals, aligned, per_sample = 0.0, 0.0, []
+    for row in rows:
+        total = _num(row, "Total Reads")
+        # Any aligner column will do for a headline rate; STAR is the default.
+        unique = _num(row, "Unique Reads Aligned (STAR)",
+                      "Unique Reads Aligned (HISAT2)", "Unique Aligned Reads (RSEM)")
+        totals += total
+        aligned += unique
+        per_sample.append({"sample": row.get("Sample"), "total_reads": int(total),
+                           "aligned_reads": int(unique)})
+
+    warnings = []
+    read_counts = sorted(s["total_reads"] for s in per_sample)
+    if read_counts:
+        median = read_counts[len(read_counts) // 2]
+        thin = [s["sample"] for s in per_sample
+                if median and s["total_reads"] < median * _QC_LOW_READ_FRACTION]
+        if thin:
+            warnings.append(
+                f"Unusually few reads compared with the other samples: "
+                f"{', '.join(str(t) for t in thin)}.")
+
+    rate = round((aligned / totals) * 100, 1) if totals else 0.0
+    if totals and rate < 50:
+        warnings.append(f"Overall alignment rate is low ({rate}%).")
+
+    return {"samples": len(per_sample), "total_reads": int(totals),
+            "aligned_reads": int(aligned), "alignment_rate_pct": rate,
+            "per_sample": per_sample, "warnings": warnings}
+
+
+@mcp.tool()
+def summarize_results(run_id: str) -> str:
+    """
+    Report what a finished run actually FOUND, in a scientist's terms: how many
+    genes came out differentially expressed for each comparison, the strongest
+    movers in each direction, whether the quantifiers agree, and an alignment/QC
+    verdict.
+
+    Use this the moment a run completes, instead of listing report files. It
+    reads only the small result tables — never the multi-megabyte HTML reports.
+
+    Args:
+        run_id: The finished run (same as the report id).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Summarizing results for run {run_id}")
+        report, rows = _report_files(via_client, run_id)
+
+        de_results = []
+        for row in rows:
+            path = row.get("file_path") or ""
+            if not path.endswith(_DE_SIG_SUFFIX) or "/inputs/" in path:
+                continue
+            table = _load_table(via_client, report, path)
+            if table is None:
+                continue
+            entry = {"quantifier": _quantifier_from_path(path),
+                     "comparison": _comparison_from_name(path),
+                     "file_path": path}
+            entry.update(_summarize_de_table(table))
+            de_results.append(entry)
+
+        qc_row = next((r for r in rows
+                       if (r.get("file_path") or "") == _QC_SUMMARY_PATH), None)
+        qc = _summarize_qc(_load_table(via_client, report, _QC_SUMMARY_PATH)) if qc_row else None
+
+        # Where do the quantifiers agree? Genes found by all of them are the
+        # ones worth leading with.
+        gene_sets = [set(d["all_genes"]) for d in de_results if d["all_genes"]]
+        shared = sorted(set.intersection(*gene_sets)) if gene_sets else []
+        agreement = {
+            "counts_by_quantifier": {d["quantifier"]: d["significant_genes"]
+                                     for d in de_results},
+            "genes_in_all_quantifiers": shared,
+        }
+        for entry in de_results:
+            entry.pop("all_genes", None)
+
+        if not de_results:
+            summary = (
+                f"Run {run_id} produced no differential-expression results to "
+                f"summarize.")
+        else:
+            best = max(de_results, key=lambda d: d["significant_genes"])
+            if best["significant_genes"] == 0:
+                summary = (
+                    f"Run {run_id} completed and found no genes significantly "
+                    f"differentially expressed in {best['comparison']}.")
+            else:
+                lead = (best["top_up"] or best["top_down"])[0]
+                summary = (
+                    f"Run {run_id}: {best['significant_genes']} significant "
+                    f"gene(s) in {best['comparison']} ({best['quantifier']}), "
+                    f"led by {lead['gene']} "
+                    f"(log2FC {lead['log2FoldChange']:+.2f}).")
+        if qc:
+            summary += (f" {qc['samples']} sample(s), "
+                        f"{qc['alignment_rate_pct']}% aligned.")
+
+        next_steps = [
+            f"To open these results in a viewer, call suggest_apps(run_id='{run_id}').",
+            f"For the full file inventory, call list_results(run_id='{run_id}').",
+        ]
+        if qc and qc["warnings"]:
+            next_steps.insert(0, "Check the QC warnings above before "
+                                 "interpreting the results.")
+
+        result = envelope(
+            summary=summary,
+            data={"run_id": run_id, "differential_expression": de_results,
+                  "agreement": agreement, "qc": qc},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error summarizing results for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# --- Grouping a run's outputs into something readable ----------------------
+
+# Ordered: the first rule whose test matches wins, so the specific ones lead.
+_RESULT_GROUPS = (
+    ("Differential expression", ("deseq2_results", "_des.html", "limmavoom",
+                                 "sig_deseq2", "all_deseq2")),
+    ("Quality control", ("multiqc", "overall_summary", "fastqc", "rseqc",
+                         "_qc.", "metrics")),
+    ("Quantification", ("expression", "counts", "count.tsv", "abundance",
+                        "quant", "tpm", "fpkm")),
+    ("Alignments and coverage", (".bam", ".bai", ".bw", ".bigwig", ".tdf",
+                                 ".cram")),
+    ("Single-cell objects", (".h5ad", ".rds", ".loom", ".h5")),
+)
+_RESULT_GROUP_OTHER = "Other outputs"
+
+# Intermediates a scientist never asks for: the notebook source a report was
+# rendered from, and the inputs directory (what went IN, not a result).
+_RESULT_HIDE_EXTENSIONS = ("rmd", "nf", "config", "log", "yaml", "yml")
+
+_APP_RULES = (
+    # (app name fragment, matching file suffixes, why)
+    ("gsea", ("deseq2_results.tsv",),
+     "differential-expression results can be explored as gene sets"),
+    ("cellxgene", (".h5ad",), "single-cell objects open directly"),
+    ("igv", (".bam", ".bw", ".bigwig", ".tdf", ".cram"),
+     "alignments and coverage tracks can be browsed against the genome"),
+)
+
+
+def _human_size(num_bytes) -> str:
+    try:
+        size = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _is_intermediate(row) -> bool:
+    path = (row.get("file_path") or "").lower()
+    extension = (row.get("extension") or "").lower()
+    return "/inputs/" in path or extension in _RESULT_HIDE_EXTENSIONS
+
+
+def _classify_result(row) -> str:
+    haystack = (row.get("file_path") or "").lower()
+    for group, needles in _RESULT_GROUPS:
+        if any(needle in haystack for needle in needles):
+            return group
+    return _RESULT_GROUP_OTHER
+
+
+@mcp.tool()
+def list_results(run_id: str) -> str:
+    """
+    List a finished run's outputs grouped by what they ARE — differential
+    expression, quality control, quantification, alignments — with readable
+    sizes, instead of a flat list of route-paths.
+
+    Each entry carries the exact `file_path` to hand to load_file or
+    download_file. Intermediates (notebook sources, the inputs directory) are
+    hidden and counted.
+
+    Args:
+        run_id: The finished run (same as the report id).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing results for run {run_id}")
+        _report, rows = _report_files(via_client, run_id)
+
+        grouped, hidden = {}, 0
+        for row in rows:
+            if _is_intermediate(row):
+                hidden += 1
+                continue
+            grouped.setdefault(_classify_result(row), []).append({
+                "name": row.get("name"),
+                "file_path": row.get("file_path"),
+                "size": _human_size(row.get("fileSize")),
+            })
+
+        order = [g for g, _ in _RESULT_GROUPS] + [_RESULT_GROUP_OTHER]
+        groups = [{"group": g, "files": grouped[g]} for g in order if g in grouped]
+        shown = sum(len(g["files"]) for g in groups)
+
+        result = envelope(
+            summary=(
+                f"Run {run_id} produced {shown} output file(s) across "
+                f"{len(groups)} group(s); {hidden} intermediate file(s) hidden."
+            ),
+            data={"run_id": run_id, "groups": groups,
+                  "hidden_intermediate_files": hidden},
+            next_steps=[
+                f"For the actual findings rather than the file list, call "
+                f"summarize_results(run_id='{run_id}').",
+                f"To open results in a viewer, call suggest_apps(run_id='{run_id}').",
+                "Use a file's `file_path` verbatim with load_file or "
+                "download_file.",
+            ],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing results for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+def _installed_apps(via_client):
+    """The apps this instance actually has, as [{id, name}]."""
+    response = via_client.call(method="GET", endpoint="/api/app/v1")
+    if isinstance(response, dict):
+        response = response.get("data", [])
+    return [a for a in (response or []) if isinstance(a, dict) and a.get("id")]
+
+
+@mcp.tool()
+def suggest_apps(run_id: str) -> str:
+    """
+    Recommend which interactive app to open a run's results in, and with which
+    file — differential expression into GSEA Explorer, single-cell objects into
+    Cellxgene, alignments and coverage into IGV.
+
+    Only apps actually installed on this instance are suggested, so a
+    recommendation never points at an app that is not there. Launching is a
+    separate, explicit step via launch_app.
+
+    Args:
+        run_id: The finished run (same as the report id).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Suggesting apps for run {run_id}")
+        _report, rows = _report_files(via_client, run_id)
+        apps = _installed_apps(via_client)
+
+        suggestions = []
+        for fragment, suffixes, reason in _APP_RULES:
+            app = next((a for a in apps
+                        if fragment in (a.get("name") or "").lower()), None)
+            if not app:
+                continue
+            matches = [r.get("file_path") for r in rows
+                       if not _is_intermediate(r)
+                       and (r.get("file_path") or "").lower().endswith(suffixes)]
+            if not matches:
+                continue
+            suggestions.append({
+                "app_id": app["id"], "app_name": app.get("name"),
+                "reason": reason, "files": matches,
+            })
+
+        if not suggestions:
+            summary = (
+                f"Run {run_id} has no outputs matching an app installed on this "
+                f"instance, so there is no viewer to suggest.")
+            next_steps = [
+                f"Call list_results(run_id='{run_id}') to see what the run "
+                f"produced, and list_apps() for what is installed.",
+            ]
+        else:
+            names = ", ".join(s["app_name"] for s in suggestions)
+            summary = (f"Run {run_id} has results that open in: {names}.")
+            next_steps = [
+                f"To open one, call launch_app(app_id='{suggestions[0]['app_id']}') "
+                f"and point it at the file listed above.",
+                "Confirm with the user first — launching an app starts a "
+                "container.",
+            ]
+
+        result = envelope(
+            summary=summary,
+            data={"run_id": run_id, "suggestions": suggestions},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error suggesting apps for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Getting sample data in
+# ---------------------------------------------------------------------------
+
+# Extensions stripped when deriving a sample name, longest first so that
+# ".fastq.gz" wins over ".gz".
+_FASTQ_EXTENSIONS = (".fastq.gz", ".fq.gz", ".fastq", ".fq", ".gz")
+
+# The mate markers seen in the wild. Each pattern must capture the sample stem
+# in group 1 and the mate number in group 2. `.1.` / `_1.` are last because
+# they are the loosest and would otherwise swallow "_R1_".
+_MATE_PATTERNS = (
+    re.compile(r"^(.*)_R([12])_\d+$"),   # sampleA_R1_001
+    re.compile(r"^(.*)_R([12])$"),       # sampleA_R1
+    re.compile(r"^(.*)\.R([12])$"),      # sampleA.R1
+    re.compile(r"^(.*)_([12])$"),        # sampleB_1
+    re.compile(r"^(.*)\.([12])$"),       # exper_rep3.1
+)
+
+
+def _strip_fastq_extension(basename: str) -> str:
+    lowered = basename.lower()
+    for ext in _FASTQ_EXTENSIONS:
+        if lowered.endswith(ext):
+            return basename[: -len(ext)]
+    return basename
+
+
+def _split_mate(path: str):
+    """Return (directory, sample_stem, mate_number|None) for a fastq path."""
+    directory, _, basename = path.rpartition("/")
+    stem = _strip_fastq_extension(basename)
+    for pattern in _MATE_PATTERNS:
+        match = pattern.match(stem)
+        if match:
+            return directory, match.group(1), match.group(2)
+    return directory, stem, None
+
+
+def _pair_fastqs(files):
+    """Group fastq paths into dataset rows, pairing R1/R2 automatically.
+
+    Returns (rows, unpaired_sample_names). A file whose mate is absent still
+    becomes a row — dropping data silently would be worse — but its name is
+    reported, because a lone R1 is much more often a forgotten file than a
+    deliberate single-end run.
+    """
+    grouped = {}
+    for path in files:
+        path = (path or "").strip()
+        if not path:
+            continue
+        directory, stem, mate = _split_mate(path)
+        # Key on the directory too: the same basename in two directories is two
+        # samples, not a pair.
+        entry = grouped.setdefault((directory, stem), {})
+        entry[mate or "single"] = path
+
+    rows, unpaired = [], []
+    for (_directory, stem), mates in sorted(grouped.items(), key=lambda kv: kv[0][1]):
+        first = mates.get("1") or mates.get("single")
+        second = mates.get("2")
+        if second and not mates.get("1"):
+            # An R2 with no R1 — treat the file we have as the primary read.
+            first, second = second, None
+        if first and second:
+            rows.append({"name": stem, "file1": first, "file2": second,
+                         "file_layout": "pair"})
+        else:
+            if mates.get("1") or mates.get("2"):
+                unpaired.append(stem)
+            rows.append({"name": stem, "file1": first, "file2": "",
+                         "file_layout": "single"})
+    return rows, unpaired
+
+
+def _resolve_canvas_id(via_client):
+    """Pick a study-tracker canvas to attach dataset rows to."""
+    response = via_client.call(
+        method="POST", endpoint="/api/v1/vmeta/canvas/search", data={}
+    )
+    rows = response.get("data", []) if isinstance(response, dict) else response
+    for row in rows or []:
+        if row.get("_id"):
+            return row["_id"]
+    return None
+
+
+@mcp.tool()
+def prepare_samples(name: str, files: list, canvas_id: str = "") -> str:
+    """
+    Build a sample dataset from a list of fastq paths in ONE call, pairing
+    R1/R2 automatically. Returns the dataset id as `vmetaCollectionId`, ready
+    to set as a run's sample input.
+
+    Handles the naming conventions that occur in practice — `_R1_001`, `_R1`,
+    `_1`, `.1.` — derives the sample name by stripping the mate marker and
+    extension, and reports any read whose mate is missing rather than silently
+    treating it as single-end.
+
+    Args:
+        name: Dataset name (must be non-empty).
+        files: Absolute paths to the fastq files, R1 and R2 together.
+        canvas_id: Optional study-tracker canvas; resolved automatically if
+            omitted.
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        if not files:
+            raise ValueError(
+                "No files given — pass the absolute paths of the fastq files")
+
+        rows, unpaired = _pair_fastqs(files)
+        if not rows:
+            raise ValueError("No usable file paths were found in `files`")
+
+        # Invariant: every path handed in must end up in exactly one row. This
+        # is what catches ambiguous naming — e.g. a_R1/a_R2 alongside a bare
+        # a.fastq.gz all reduce to the sample "a", and without this check the
+        # odd one out is silently dropped and the run quietly analyses less
+        # data than the scientist believes.
+        given = [f.strip() for f in files if f and f.strip()]
+        used = {r["file1"] for r in rows} | {r["file2"] for r in rows if r["file2"]}
+        dropped = [f for f in given if f not in used]
+        if dropped:
+            raise ValueError(
+                f"These files could not be assigned to a distinct sample: "
+                f"{', '.join(dropped)}. They collapse to the same sample name as "
+                f"another file. Rename them so each sample is unambiguous — "
+                f"otherwise they would be silently left out of the analysis."
+            )
+
+        via_client = get_client()
+        resolved_canvas = canvas_id.strip() if canvas_id else _resolve_canvas_id(via_client)
+        if not resolved_canvas:
+            raise ValueError(
+                "No study-tracker canvas is available to attach samples to. "
+                "Pass canvas_id explicitly (search_canvas lists them).")
+
+        logger.info(f"Creating dataset '{name}' with {len(rows)} sample(s)")
+        created = via_client.call(
+            method="POST", endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name.strip()},
+        )
+        payload = created.get("data", created) if isinstance(created, dict) else {}
+        dataset_id = payload.get("_id") or payload.get("id")
+        if not dataset_id:
+            raise ValueError(f"Dataset creation returned no id: {created}")
+
+        added, failed = [], []
+        for row in rows:
+            file_row = {"name": row["name"], "file1": row["file1"],
+                        "file2": row["file2"], "file3": "", "file4": "",
+                        "file_layout": row["file_layout"]}
+            try:
+                via_client.call(
+                    method="POST",
+                    endpoint=f"/api/v1/vmeta/dataset/{dataset_id}/addFile",
+                    data={"canvasId": resolved_canvas, "file": file_row},
+                )
+                added.append(row["name"])
+            except Exception as e:
+                logger.error(f"Could not add sample '{row['name']}': {e}")
+                failed.append(row["name"])
+
+        if failed:
+            raise ValueError(
+                f"Dataset '{name}' was created ({dataset_id}) but "
+                f"{len(failed)} sample(s) could not be attached: "
+                f"{', '.join(failed)}. The dataset is NOT ready to use; add the "
+                f"missing samples or delete it and retry."
+            )
+
+        paired = sum(1 for r in rows if r["file_layout"] == "pair")
+        next_steps = [
+            f"Set this dataset on a run: update_run(...) with the sample "
+            f"input's vmetaCollectionId = '{dataset_id}'.",
+            "Then preflight_run(run_id=...) before launching.",
+        ]
+        if unpaired:
+            next_steps.insert(0, (
+                f"Check {', '.join(unpaired)} — a mate file was expected but "
+                f"not found, so it was added as single-end. If the R2 exists, "
+                f"re-run prepare_samples with it included."))
+
+        result = envelope(
+            summary=(
+                f"Dataset '{name}' created with {len(added)} sample(s) "
+                f"({paired} paired-end, {len(added) - paired} single-end)."
+            ),
+            data={"vmetaCollectionId": dataset_id, "name": name.strip(),
+                  "sample_count": len(added), "paired": paired,
+                  "unpaired": unpaired,
+                  "samples": [r["name"] for r in rows]},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error preparing samples for '{name}': {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Sample sheets
+# ---------------------------------------------------------------------------
+
+# Both layouts were read off the cluster from live run 12194, not guessed.
+_GROUPS_SHEET_NAME = "metadata.tsv"
+_COMPARISONS_SHEET_NAME = "comparisons.tsv"
+_GROUPS_HEADER = "sample_name\tgroup"
+_COMPARISONS_HEADER = "controls\ttreats\tnames"
+
+
+def _normalize_groups(groups):
+    """Accept {sample: group} or [[sample, group], ...] and return an ordered
+    dict. Insertion order is preserved so a scientist gets their own ordering
+    back rather than an alphabetised one."""
+    if isinstance(groups, dict):
+        pairs = list(groups.items())
+    else:
+        pairs = []
+        for row in groups or []:
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                pairs.append((row[0], row[1]))
+            elif isinstance(row, dict) and "sample" in row:
+                pairs.append((row["sample"], row.get("group")))
+    return {str(s).strip(): str(g).strip() for s, g in pairs if str(s).strip()}
+
+
+def _render_groups_tsv(groups) -> str:
+    mapping = _normalize_groups(groups)
+    lines = [_GROUPS_HEADER]
+    lines.extend(f"{sample}\t{group}" for sample, group in mapping.items())
+    return "\n".join(lines) + "\n"
+
+
+def _render_comparisons_tsv(comparisons) -> str:
+    lines = [_COMPARISONS_HEADER]
+    for row in comparisons or []:
+        control, treat = str(row[0]).strip(), str(row[1]).strip()
+        name = (str(row[2]).strip() if len(row) > 2 and row[2]
+                else f"{control}_vs_{treat}")
+        lines.append(f"{control}\t{treat}\t{name}")
+    return "\n".join(lines) + "\n"
+
+
+def _upload_run_file(run_id, run_uuid, file_name, content, remote_dir):
+    """POST a small text file to a run's upload area.
+
+    Deliberately a raw multipart request rather than the SDK's
+    upload_report_file: that derives its attempt id from the run's existing
+    report paths, which a run that has never launched does not have — and a
+    never-launched run is exactly when a sample sheet is needed.
+    """
+    hostname, token = get_credentials()
+    url = f"{hostname.rstrip('/')}/api/v1/run/{run_id}/reports/upload/{run_uuid}"
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": (file_name, content.encode("utf-8"), "text/tab-separated-values")},
+        data={"dir": remote_dir},
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Upload of {file_name} failed ({response.status_code}): "
+            f"{response.text[:200]}"
+        )
+    return True
+
+
+def _upload_report_enabled(via_client) -> bool:
+    """The upload route sits behind the per-user UPLOAD_REPORT feature flag."""
+    try:
+        flags = via_client.call(
+            method="GET", endpoint="/api/configurations/v1/user")
+        return bool((flags or {}).get("UPLOAD_REPORT"))
+    except Exception as e:
+        logger.info(f"Could not read feature flags, assuming upload is off: {e}")
+        return False
+
+
+@mcp.tool()
+def make_sample_sheet(
+    run_id: str,
+    groups: dict,
+    comparisons: list = None,
+    allow_single_replicate: bool = False,
+) -> str:
+    """
+    Build the experimental-design sheets a differential-expression run needs,
+    and place them where the run expects them.
+
+    `groups` says which sample belongs to which condition; `comparisons` says
+    which conditions to contrast. Returns the absolute paths to set as the run's
+    `groups_file` and `compare_file` inputs, and always returns the sheet text
+    itself so nothing is a black box.
+
+    Args:
+        run_id: The run these sheets belong to.
+        groups: {sample_name: group}, or [[sample_name, group], ...].
+        comparisons: [[control, treated], ...]; a third element names the
+            comparison, otherwise it is "<control>_vs_<treated>".
+        allow_single_replicate: Permit a group with only one sample. Off by
+            default because differential expression cannot test such a group.
+    """
+    try:
+        mapping = _normalize_groups(groups)
+        if not mapping:
+            raise ValueError(
+                "No groups given — pass {sample_name: group} naming which "
+                "sample belongs to which condition.")
+
+        counts = {}
+        for group in mapping.values():
+            counts[group] = counts.get(group, 0) + 1
+        thin = sorted(g for g, n in counts.items() if n < _PREFLIGHT_MIN_REPLICATES)
+        if thin and not allow_single_replicate:
+            raise ValueError(
+                f"Group(s) with only one sample: {', '.join(thin)}. Differential "
+                f"expression cannot test a group without replicates. Add more "
+                f"samples, merge the group, or pass allow_single_replicate=True "
+                f"if you really mean it."
+            )
+
+        for row in comparisons or []:
+            unknown = [str(g).strip() for g in row[:2]
+                       if str(g).strip() not in counts]
+            if unknown:
+                raise ValueError(
+                    f"Comparison names a group that is not in `groups`: "
+                    f"{', '.join(unknown)}. Known groups: "
+                    f"{', '.join(sorted(counts))}."
+                )
+
+        via_client = get_client()
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+        launch_dir = (details.get("launchDirectory") or "").rstrip("/")
+        if not launch_dir:
+            raise ValueError(
+                f"Run {run_id} has no launch directory, so there is nowhere to "
+                f"put the sheets. Check the run's compute environment.")
+        run_uuid = details.get("runUUID")
+
+        remote_dir = f"foundryUploads/run{run_id}"
+        base = f"{launch_dir}/{remote_dir}"
+        groups_tsv = _render_groups_tsv(mapping)
+        comparisons_tsv = _render_comparisons_tsv(comparisons) if comparisons else None
+
+        sheets = [(_GROUPS_SHEET_NAME, groups_tsv)]
+        if comparisons_tsv:
+            sheets.append((_COMPARISONS_SHEET_NAME, comparisons_tsv))
+
+        uploaded = _upload_report_enabled(via_client)
+        if uploaded:
+            for file_name, content in sheets:
+                _upload_run_file(
+                    run_id=run_id, run_uuid=run_uuid, file_name=file_name,
+                    content=content, remote_dir=remote_dir,
+                )
+
+        groups_path = f"{base}/{_GROUPS_SHEET_NAME}"
+        compare_path = f"{base}/{_COMPARISONS_SHEET_NAME}" if comparisons_tsv else None
+
+        data = {
+            "uploaded": uploaded,
+            "groups_file": groups_path,
+            "compare_file": compare_path,
+            "groups_tsv": groups_tsv,
+            "comparisons_tsv": comparisons_tsv,
+            "group_counts": counts,
+        }
+
+        if uploaded:
+            summary = (
+                f"Wrote {len(sheets)} sheet(s) for run {run_id}: "
+                f"{len(mapping)} samples across {len(counts)} group(s)."
+            )
+            next_steps = [
+                f"Set the paths on the run: update_run(...) with "
+                f"groups_file='{groups_path}'"
+                + (f" and compare_file='{compare_path}'" if compare_path else "")
+                + ".",
+                f"Then preflight_run(run_id='{run_id}') before launching.",
+            ]
+        else:
+            summary = (
+                f"Generated {len(sheets)} sheet(s) for run {run_id} but did NOT "
+                f"upload them — the UPLOAD_REPORT feature is not enabled for "
+                f"this user."
+            )
+            next_steps = [
+                "Save the `groups_tsv` (and `comparisons_tsv`) content below "
+                f"and upload it to the run's Uploads area as "
+                f"{_GROUPS_SHEET_NAME}"
+                + (f" / {_COMPARISONS_SHEET_NAME}" if compare_path else "")
+                + ", or ask an admin to enable UPLOAD_REPORT.",
+                f"Then set groups_file='{groups_path}'"
+                + (f" and compare_file='{compare_path}'" if compare_path else "")
+                + " with update_run, and preflight_run before launching.",
+            ]
+
+        result = envelope(summary=summary, data=data, next_steps=next_steps)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error making sample sheets for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight: catch what would otherwise waste cluster time
+# ---------------------------------------------------------------------------
+
+# Values that mean "nothing here" once they reach the pipeline.
+_PREFLIGHT_PLACEHOLDERS = ("", "NO_FILE", "NA", "None", "null")
+
+# Statuses that mean the run has never shipped its upload tarball to the
+# cluster, so a path under its own foundryUploads/ legitimately does not exist
+# yet. Failing there would cry wolf on every freshly duplicated run.
+_PREFLIGHT_UNLAUNCHED = ("init", "Waiting", "NotSubmitted", "")
+
+_PREFLIGHT_MIN_REPLICATES = 2
+
+
+def _preflight_check(check_id, status, detail, fix="", **extra):
+    check = {"id": check_id, "status": status, "detail": detail, "fix": fix}
+    check.update(extra)
+    return check
+
+
+def _read_cluster_file(via_client, run_id, path, cluster_id, run_uuid):
+    """Read a file from the run's compute environment. Returns None if absent."""
+    try:
+        body = {"path": path, "profileClusterId": cluster_id}
+        if run_uuid:
+            body["runUUID"] = run_uuid
+        response = via_client.call(
+            method="POST", endpoint=f"/api/v1/run/{run_id}/uploaded-file",
+            data=body,
+        )
+        if isinstance(response, dict):
+            # A JSON body here is the error envelope, not file contents.
+            return None
+        return response
+    except Exception as e:
+        logger.info(f"Pre-flight could not read {path}: {e}")
+        return None
+
+
+def _parse_groups_sheet(text):
+    """Parse a `sample_name<TAB>group` sheet into {sample: group}.
+
+    Tolerates comma separation and a missing header — a scientist pasting a
+    sheet should not be defeated by punctuation.
+    """
+    mapping = {}
+    for i, line in enumerate((text or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"[\t,]", line)
+        if len(parts) < 2:
+            continue
+        sample, group = parts[0].strip(), parts[1].strip()
+        if i == 0 and sample.lower() in ("sample_name", "sample", "name"):
+            continue
+        if sample:
+            mapping[sample] = group
+    return mapping
+
+
+def _preflight_dataset(via_client, sample_inputs):
+    """Resolve each sample input's dataset and return (check, sample_names)."""
+    if not sample_inputs:
+        return _preflight_check(
+            "samples", "fail", "No sample dataset is attached to this run.",
+            "Build one with prepare_samples(...), then set it with update_run.",
+        ), set()
+
+    names, empty = set(), []
+    for inp in sample_inputs:
+        dataset_id = inp.get("vmetaCollectionId")
+        if not dataset_id:
+            empty.append(inp["name"])
+            continue
+        try:
+            response = via_client.call(
+                method="POST",
+                endpoint=f"/api/v1/vmeta/dataset/{dataset_id}/files/search",
+                data={},
+            )
+            rows = response.get("data", []) if isinstance(response, dict) else []
+        except Exception as e:
+            logger.warning(f"Pre-flight could not read dataset {dataset_id}: {e}")
+            rows = []
+        if not rows:
+            empty.append(inp["name"])
+        names.update(r.get("name") for r in rows if r.get("name"))
+
+    if empty:
+        return _preflight_check(
+            "samples", "fail",
+            f"Sample dataset for {', '.join(empty)} has no files.",
+            "Add samples with prepare_samples(...) or pick a dataset that has "
+            "them, then update_run.",
+        ), names
+    return _preflight_check(
+        "samples", "pass", f"{len(names)} sample(s) attached."), names
+
+
+@mcp.tool()
+def preflight_run(run_id: str) -> str:
+    """
+    Check a run for the mistakes that waste cluster time, BEFORE launching it.
+
+    Verifies the sample dataset has files, that every sample-sheet path really
+    exists on the compute environment, that the sheet's sample names match the
+    dataset, that each group has replicates, and that no required input is
+    empty. Call this between update_run and initiate_run — every problem it
+    finds is one that would otherwise surface as a failed or silently-skipped
+    job after the queue time has already been spent.
+
+    Args:
+        run_id: The run to check.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Pre-flighting run {run_id}")
+        details = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/details"
+        )
+
+        run_env = details.get("runEnvironment") or {}
+        cluster_id = run_env.get("selectedId")
+        run_uuid = details.get("runUUID")
+        launch_dir = (details.get("launchDirectory") or "").rstrip("/")
+        own_uploads = f"{launch_dir}/foundryUploads/run{run_id}" if launch_dir else None
+
+        # Has this run ever shipped its uploads to the cluster?
+        launched = True
+        try:
+            listing = via_client.call(
+                method="POST", endpoint="/api/v1/run/list",
+                params={"take": 1, "skip": 0, "sort": "dateCreated",
+                        "order": "desc", "filter": f"id:eq={run_id}"},
+                data={},
+            )
+            rows = listing.get("data", []) if isinstance(listing, dict) else []
+            if rows:
+                launched = rows[0].get("status") not in _PREFLIGHT_UNLAUNCHED
+        except Exception as e:
+            logger.info(f"Pre-flight could not read run status: {e}")
+
+        inputs = list(_iter_run_inputs(details.get("inputs") or []))
+        sample_inputs = [i for i in inputs if i["type"] == "vmetaCollection"]
+
+        checks = []
+        dataset_check, dataset_names = _preflight_dataset(via_client, sample_inputs)
+        checks.append(dataset_check)
+
+        # Empty / placeholder values.
+        blanks = [i["name"] for i in inputs
+                  if isinstance(i["value"], str)
+                  and i["value"].strip() in _PREFLIGHT_PLACEHOLDERS]
+        checks.append(
+            _preflight_check(
+                "empty_inputs", "fail",
+                f"{len(blanks)} input(s) have no value: {', '.join(blanks)}.",
+                "Set them with update_run — the pipeline treats these as "
+                "missing and may skip steps rather than fail loudly.",
+            ) if blanks else
+            _preflight_check("empty_inputs", "pass", "All inputs have values.")
+        )
+
+        # Genome build.
+        build = next((i for i in inputs
+                      if "genome_build" in (i["name"] or "").lower()), None)
+        checks.append(
+            _preflight_check("genome", "pass",
+                             f"Genome build is '{build['value']}'.")
+            if build and str(build["value"]).strip()
+            else _preflight_check(
+                "genome", "warn", "No genome build is set on this run.",
+                "Confirm the pipeline does not need one, or set it with "
+                "update_run.")
+        )
+
+        # Design-file paths, read from the run's own compute environment.
+        sheets = {}
+        for inp in inputs:
+            value = inp["value"]
+            if not _is_design_input(inp["name"]) or not isinstance(value, str):
+                continue
+            if value.strip() in _PREFLIGHT_PLACEHOLDERS:
+                continue
+            contents = _read_cluster_file(
+                via_client, run_id, value, cluster_id, run_uuid)
+            if contents is not None:
+                sheets[inp["name"]] = contents
+                checks.append(_preflight_check(
+                    "design_file", "pass", f"{inp['name']} exists.",
+                    input=inp["name"]))
+                continue
+            pending = (not launched and own_uploads
+                       and value.startswith(own_uploads))
+            if pending:
+                checks.append(_preflight_check(
+                    "design_file", "warn",
+                    f"{inp['name']} is not on the cluster yet ({value}).",
+                    "Expected — this run has not launched, so its uploads have "
+                    "not shipped. It will be sent with the run.",
+                    input=inp["name"]))
+            else:
+                checks.append(_preflight_check(
+                    "design_file", "fail",
+                    f"{inp['name']} points at a path that does not exist: "
+                    f"{value}.",
+                    "Re-supply the file with make_sample_sheet(...) — this is "
+                    "what happens when a run is duplicated after its original "
+                    "run directory was cleaned up, and it makes downstream "
+                    "steps silently skip.",
+                    input=inp["name"]))
+
+        # Sample names + replicates, from whichever sheet carries groups.
+        groups = {}
+        for name, text in sheets.items():
+            if "group" in name.lower():
+                groups = _parse_groups_sheet(text)
+                break
+
+        if groups and dataset_names:
+            unknown = sorted(set(groups) - dataset_names)
+            ungrouped = sorted(dataset_names - set(groups))
+            if unknown:
+                checks.append(_preflight_check(
+                    "sample_names_match", "fail",
+                    f"{len(unknown)} sample(s) in the sheet are not in the "
+                    f"dataset: {', '.join(unknown)}.",
+                    "Fix the names so they match the dataset exactly — the "
+                    "pipeline matches on the name string."))
+            elif ungrouped:
+                checks.append(_preflight_check(
+                    "sample_names_match", "warn",
+                    f"{len(ungrouped)} sample(s) have no group and will be "
+                    f"left out: {', '.join(ungrouped)}.",
+                    "Add them to the groups sheet, or confirm you meant to "
+                    "exclude them."))
+            else:
+                checks.append(_preflight_check(
+                    "sample_names_match", "pass",
+                    "Sheet and dataset sample names match."))
+
+        if groups:
+            counts = {}
+            for group in groups.values():
+                counts[group] = counts.get(group, 0) + 1
+            thin = sorted(g for g, n in counts.items()
+                          if n < _PREFLIGHT_MIN_REPLICATES)
+            checks.append(
+                _preflight_check(
+                    "replicates", "warn",
+                    f"Group(s) with only one sample: {', '.join(thin)}.",
+                    "Differential expression needs replicates; with one sample "
+                    "a group cannot be tested.")
+                if thin else
+                _preflight_check("replicates", "pass",
+                                 f"{len(counts)} group(s), all replicated.")
+            )
+
+        failures = sum(1 for c in checks if c["status"] == "fail")
+        warnings = sum(1 for c in checks if c["status"] == "warn")
+        ok = failures == 0
+
+        if ok:
+            summary = (f"Run {run_id} looks ready to launch "
+                       f"({len(checks)} checks, {warnings} warning(s)).")
+            next_steps = [
+                "Review any warnings with the user.",
+                f"Then initiate_run(run_id='{run_id}') — this uses HPC "
+                "compute, so confirm first.",
+            ]
+        else:
+            summary = (f"Run {run_id} is NOT ready: {failures} problem(s) that "
+                       f"would waste cluster time.")
+            next_steps = [
+                "Fix the failing checks above before launching — each one "
+                "lists how.",
+                "Then call preflight_run again; only launch once it passes.",
+            ]
+
+        result = envelope(
+            summary=summary,
+            data={"ok": ok, "failures": failures, "warnings": warnings,
+                  "run": {"id": run_id, "name": details.get("name"),
+                          "launched": launched},
+                  "checks": checks},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error pre-flighting run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Recipes
 # ---------------------------------------------------------------------------
 
@@ -1768,11 +2877,14 @@ _RECIPES = [
         "steps": [
             "list_runs(take=10) — most recent first; status tells you what "
             "completed.",
-            "get_all_report_paths(report_id='<run id>') — the run id IS the "
-            "report id.",
-            "fetch_report(report_id='<run id>') — the report contents.",
-            "list_files / load_file / download_file for specific outputs, and "
-            "list_apps + launch_app to open an interactive viewer.",
+            "summarize_results(run_id='<id>') — what the run FOUND: significant "
+            "genes per comparison, the strongest movers, and a QC verdict. "
+            "Lead with this, not with a file list.",
+            "list_results(run_id='<id>') — the outputs grouped by what they "
+            "are, if the user wants the files themselves. Pass a file's "
+            "`file_path` verbatim to load_file or download_file.",
+            "suggest_apps(run_id='<id>') — which viewer opens these results, "
+            "then launch_app to open it (confirm with the user first).",
         ],
     },
 ]

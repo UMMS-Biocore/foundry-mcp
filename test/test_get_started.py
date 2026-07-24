@@ -46,12 +46,15 @@ class TestGetStarted:
         assert "get_run_log" in chained
         assert "get_run" in chained
 
-    def test_the_results_recipe_reaches_for_reports_and_apps(self):
+    def test_the_results_recipe_leads_with_findings_not_a_file_list(self):
         recipe = next(r for r in _recipes()["data"]["recipes"]
                       if r["id"] == "find_my_results")
         chained = " ".join(recipe["steps"])
         assert "list_runs" in chained
-        assert "fetch_report" in chained or "get_all_report_paths" in chained
+        assert "summarize_results" in chained
+        assert "suggest_apps" in chained
+        # The findings must come before the file inventory.
+        assert chained.index("summarize_results") < chained.index("list_results")
 
     def test_every_recipe_says_when_to_use_it(self):
         for recipe in _recipes()["data"]["recipes"]:
