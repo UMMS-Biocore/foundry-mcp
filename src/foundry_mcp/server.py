@@ -1712,6 +1712,225 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+# A run produces one DESeq2 directory per quantifier (RSEM, Kallisto, Salmon,
+# STAR_Salmon, STAR_featurecounts). Reporting five near-identical answers is its
+# own noise problem, so results are summarised across them.
+_DE_SIG_SUFFIX = "_sig_deseq2_results.tsv"
+_DE_DIR_PREFIX = "DESeq2_"
+_QC_SUMMARY_PATH = "summary/overall_summary.tsv"
+
+_TOP_GENES = 3
+
+# Reading these into a chat context would be slow and useless: the DESeq2 HTML
+# is ~1.4 MB and the MultiQC report ~4.8 MB.
+_RESULT_SKIP_EXTENSIONS = ("html", "rmd", "pdf", "png", "jpg", "jpeg", "svg")
+
+# A sample this far below the median read count is worth mentioning.
+_QC_LOW_READ_FRACTION = 0.25
+
+
+def _report_files(via_client, run_id):
+    """Every file in a run's report, as plain dict rows.
+
+    Always use each row's `file_path` verbatim — real outputs live under
+    `<dir>/outputs/` and inputs under `<dir>/inputs/`, so building a path from
+    the directory and file name produces something `load_file` cannot resolve.
+    """
+    report = via_client.reports.fetch_report_data(run_id)
+    files = via_client.reports.get_all_files(report)
+    rows = files.to_dict(orient="records") if hasattr(files, "to_dict") else list(files)
+    return report, rows
+
+
+def _load_table(via_client, report, file_path):
+    """Load a tabular result file as a list of dict rows, or None."""
+    try:
+        content = via_client.reports.load_file(report, file_path, sep="\t")
+    except Exception as e:
+        logger.info(f"Could not load {file_path}: {e}")
+        return None
+    if hasattr(content, "to_dict"):
+        return content.to_dict(orient="records")
+    return None
+
+
+def _quantifier_from_path(file_path: str) -> str:
+    """`DESeq2_RSEM/outputs/x.tsv` -> `RSEM`."""
+    directory = (file_path or "").split("/", 1)[0]
+    if directory.startswith(_DE_DIR_PREFIX):
+        return directory[len(_DE_DIR_PREFIX):] or directory
+    return directory
+
+
+def _comparison_from_name(name: str) -> str:
+    """`control_vs_exper_sig_deseq2_results.tsv` -> `control_vs_exper`."""
+    base = (name or "").rsplit("/", 1)[-1]
+    return base[: -len(_DE_SIG_SUFFIX)] if base.endswith(_DE_SIG_SUFFIX) else base
+
+
+def _summarize_de_table(rows):
+    """Count significant genes and pick the strongest movers in each direction."""
+    genes = [r for r in rows or [] if r.get("gene") is not None]
+
+    def _fc(row):
+        try:
+            return float(row.get("log2FoldChange") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _trim(row):
+        entry = {"gene": row.get("gene"), "log2FoldChange": _fc(row)}
+        if row.get("padj") is not None:
+            entry["padj"] = row["padj"]
+        return entry
+
+    up = sorted((g for g in genes if _fc(g) > 0), key=_fc, reverse=True)
+    down = sorted((g for g in genes if _fc(g) < 0), key=_fc)
+    return {
+        "significant_genes": len(genes),
+        "top_up": [_trim(g) for g in up[:_TOP_GENES]],
+        "top_down": [_trim(g) for g in down[:_TOP_GENES]],
+        "all_genes": [g.get("gene") for g in genes],
+    }
+
+
+def _summarize_qc(rows):
+    """Turn the per-sample alignment table into a one-line verdict."""
+    if not rows:
+        return None
+
+    def _num(row, *keys):
+        for key in keys:
+            value = row.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return 0.0
+
+    totals, aligned, per_sample = 0.0, 0.0, []
+    for row in rows:
+        total = _num(row, "Total Reads")
+        # Any aligner column will do for a headline rate; STAR is the default.
+        unique = _num(row, "Unique Reads Aligned (STAR)",
+                      "Unique Reads Aligned (HISAT2)", "Unique Aligned Reads (RSEM)")
+        totals += total
+        aligned += unique
+        per_sample.append({"sample": row.get("Sample"), "total_reads": int(total),
+                           "aligned_reads": int(unique)})
+
+    warnings = []
+    read_counts = sorted(s["total_reads"] for s in per_sample)
+    if read_counts:
+        median = read_counts[len(read_counts) // 2]
+        thin = [s["sample"] for s in per_sample
+                if median and s["total_reads"] < median * _QC_LOW_READ_FRACTION]
+        if thin:
+            warnings.append(
+                f"Unusually few reads compared with the other samples: "
+                f"{', '.join(str(t) for t in thin)}.")
+
+    rate = round((aligned / totals) * 100, 1) if totals else 0.0
+    if totals and rate < 50:
+        warnings.append(f"Overall alignment rate is low ({rate}%).")
+
+    return {"samples": len(per_sample), "total_reads": int(totals),
+            "aligned_reads": int(aligned), "alignment_rate_pct": rate,
+            "per_sample": per_sample, "warnings": warnings}
+
+
+@mcp.tool()
+def summarize_results(run_id: str) -> str:
+    """
+    Report what a finished run actually FOUND, in a scientist's terms: how many
+    genes came out differentially expressed for each comparison, the strongest
+    movers in each direction, whether the quantifiers agree, and an alignment/QC
+    verdict.
+
+    Use this the moment a run completes, instead of listing report files. It
+    reads only the small result tables — never the multi-megabyte HTML reports.
+
+    Args:
+        run_id: The finished run (same as the report id).
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Summarizing results for run {run_id}")
+        report, rows = _report_files(via_client, run_id)
+
+        de_results = []
+        for row in rows:
+            path = row.get("file_path") or ""
+            if not path.endswith(_DE_SIG_SUFFIX) or "/inputs/" in path:
+                continue
+            table = _load_table(via_client, report, path)
+            if table is None:
+                continue
+            entry = {"quantifier": _quantifier_from_path(path),
+                     "comparison": _comparison_from_name(path),
+                     "file_path": path}
+            entry.update(_summarize_de_table(table))
+            de_results.append(entry)
+
+        qc_row = next((r for r in rows
+                       if (r.get("file_path") or "") == _QC_SUMMARY_PATH), None)
+        qc = _summarize_qc(_load_table(via_client, report, _QC_SUMMARY_PATH)) if qc_row else None
+
+        # Where do the quantifiers agree? Genes found by all of them are the
+        # ones worth leading with.
+        gene_sets = [set(d["all_genes"]) for d in de_results if d["all_genes"]]
+        shared = sorted(set.intersection(*gene_sets)) if gene_sets else []
+        agreement = {
+            "counts_by_quantifier": {d["quantifier"]: d["significant_genes"]
+                                     for d in de_results},
+            "genes_in_all_quantifiers": shared,
+        }
+        for entry in de_results:
+            entry.pop("all_genes", None)
+
+        if not de_results:
+            summary = (
+                f"Run {run_id} produced no differential-expression results to "
+                f"summarize.")
+        else:
+            best = max(de_results, key=lambda d: d["significant_genes"])
+            if best["significant_genes"] == 0:
+                summary = (
+                    f"Run {run_id} completed and found no genes significantly "
+                    f"differentially expressed in {best['comparison']}.")
+            else:
+                lead = (best["top_up"] or best["top_down"])[0]
+                summary = (
+                    f"Run {run_id}: {best['significant_genes']} significant "
+                    f"gene(s) in {best['comparison']} ({best['quantifier']}), "
+                    f"led by {lead['gene']} "
+                    f"(log2FC {lead['log2FoldChange']:+.2f}).")
+        if qc:
+            summary += (f" {qc['samples']} sample(s), "
+                        f"{qc['alignment_rate_pct']}% aligned.")
+
+        next_steps = [
+            f"To open these results in a viewer, call suggest_apps(run_id='{run_id}').",
+            f"For the full file inventory, call list_results(run_id='{run_id}').",
+        ]
+        if qc and qc["warnings"]:
+            next_steps.insert(0, "Check the QC warnings above before "
+                                 "interpreting the results.")
+
+        result = envelope(
+            summary=summary,
+            data={"run_id": run_id, "differential_expression": de_results,
+                  "agreement": agreement, "qc": qc},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error summarizing results for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Getting sample data in
 # ---------------------------------------------------------------------------
 
