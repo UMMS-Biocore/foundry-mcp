@@ -3,6 +3,21 @@
 ## [Unreleased]
 
 ### Added
+- **Results and apps (Phase 3)** — what a finished run actually found, instead
+  of a list of files:
+  - `summarize_results(run_id)` reports the significant genes per comparison,
+    the strongest movers each way, and an alignment/QC verdict. An RNA-seq run
+    produces five parallel DESeq2 outputs, so it also reports where the
+    quantifiers agree — on the reference run that is three genes found by all
+    five. It reads only the small result tables, never the multi-megabyte HTML
+    reports, and treats "no genes were significant" as a result rather than an
+    error.
+  - `list_results(run_id)` groups a run's outputs by what they are —
+    differential expression, quality control, quantification, alignments —
+    with readable sizes, hiding and counting intermediates.
+  - `suggest_apps(run_id)` recommends which viewer to open results in (GSEA
+    Explorer, Cellxgene, IGV), matching against the apps actually installed so
+    it never points at one that is missing.
 - **Getting data in, and pre-flight (Phase 2)** — the steps between "I have
   fastqs" and a correctly-configured run:
   - `preflight_run(run_id)` checks a run for the mistakes that waste cluster

@@ -2877,11 +2877,14 @@ _RECIPES = [
         "steps": [
             "list_runs(take=10) — most recent first; status tells you what "
             "completed.",
-            "get_all_report_paths(report_id='<run id>') — the run id IS the "
-            "report id.",
-            "fetch_report(report_id='<run id>') — the report contents.",
-            "list_files / load_file / download_file for specific outputs, and "
-            "list_apps + launch_app to open an interactive viewer.",
+            "summarize_results(run_id='<id>') — what the run FOUND: significant "
+            "genes per comparison, the strongest movers, and a QC verdict. "
+            "Lead with this, not with a file list.",
+            "list_results(run_id='<id>') — the outputs grouped by what they "
+            "are, if the user wants the files themselves. Pass a file's "
+            "`file_path` verbatim to load_file or download_file.",
+            "suggest_apps(run_id='<id>') — which viewer opens these results, "
+            "then launch_app to open it (confirm with the user first).",
         ],
     },
 ]
