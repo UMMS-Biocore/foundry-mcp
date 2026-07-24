@@ -616,9 +616,12 @@ def get_all_report_paths(report_id: str) -> str:
 
 # Valid run-list sort fields — must match the backend's runListAPIDbMap
 # (backend/src/types/run.ts). Any other value is rejected by the backend.
+# NOTE the route excludes pipelineId from the whitelist
+# (`Object.keys(runListAPIDbMap).filter(key => key !== "pipelineId")`), so it is
+# deliberately absent here and aliased to pipelineName below.
 RUN_LIST_SORT_FIELDS = {
     "id", "name", "status", "username", "dateCreated",
-    "pipelineId", "pipelineName", "summary", "dateCreatedLastRun", "schedulerId",
+    "pipelineName", "summary", "dateCreatedLastRun", "schedulerId",
 }
 
 # Common model-guessed sort aliases -> a valid field. Keys are normalized
@@ -634,6 +637,10 @@ RUN_LIST_SORT_ALIASES = {
     "date": "dateCreated",
     "lastrun": "dateCreatedLastRun",
     "recent": "dateCreatedLastRun",
+    # The backend rejects sorting by pipelineId; grouping by pipeline name is
+    # the same intent and is accepted.
+    "pipelineid": "pipelineName",
+    "pipeline": "pipelineName",
 }
 
 
@@ -703,7 +710,8 @@ def list_runs(
         take: Page size (default 10).
         skip: Offset for pagination (default 0).
         sort: Sort field. Valid values: id, name, status, username, dateCreated,
-            pipelineId, pipelineName, summary, dateCreatedLastRun, schedulerId.
+            pipelineName, summary, dateCreatedLastRun, schedulerId.
+            There is NO "pipelineId" sort — use "pipelineName".
             There is NO "dateModified"/"updatedAt" — use "dateCreated" for the most
             recent runs. Unrecognized values fall back to "dateCreated".
         order: "desc" (newest first, default) or "asc".
