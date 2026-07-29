@@ -2571,7 +2571,7 @@ def _upload_run_file(run_id, run_uuid, file_name, content, remote_dir):
         url,
         headers={"Authorization": f"Bearer {token}"},
         files={"file": (file_name, content.encode("utf-8"), "text/tab-separated-values")},
-        data={"dir": remote_dir},
+        data={"dir": remote_dir, "target": "runInput"},
         timeout=120,
     )
     if response.status_code >= 400:
