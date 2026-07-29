@@ -103,7 +103,7 @@ class TestWatchRun:
         assert "watch_run" in " ".join(parsed["next_steps"])
 
     def test_does_not_ask_the_caller_to_check_back_once_finished(self):
-        parsed, _ = _watch(status="NextSuc",
+        parsed, _ = _watch(status="Completed",
                            logs=[{"name": "trace.txt", "content": RUNNING_TRACE}])
         assert parsed["data"]["check_again"] is False
         assert "summarize_results" in " ".join(parsed["next_steps"])

@@ -53,3 +53,45 @@ class TestGetRunHumanStatus:
             parsed = json.loads(server.get_run(run_name="nope"))
         assert parsed["match_type"] == "none"
         assert "status_display" not in parsed
+
+
+class TestDualVocabulary:
+    """Backend 2.20.0 renames the run status wire values. MCP releases on its own
+    cadence and can be pointed at an older backend, so it must read both."""
+
+    def test_display_map_covers_both_vocabularies(self):
+        for legacy, canonical in [
+            ("NextSuc", "Completed"),
+            ("NextErr", "Failed"),
+            ("NextRun", "Running"),
+            ("init", "Initializing"),
+            ("Waiting", "Submitted"),
+            ("Error", "LaunchFailed"),
+            ("Aborted", "Unreachable"),
+        ]:
+            assert legacy in server._RUN_STATUS_DISPLAY
+            assert canonical in server._RUN_STATUS_DISPLAY
+            assert (
+                server._RUN_STATUS_DISPLAY[legacy]
+                == server._RUN_STATUS_DISPLAY[canonical]
+            )
+
+    def test_terminal_statuses_cover_both_vocabularies(self):
+        for value in (
+            "NextSuc", "NextErr", "Error", "Terminated",
+            "Completed", "Failed", "LaunchFailed",
+        ):
+            assert value in server._TERMINAL_RUN_STATUSES
+
+    def test_canonical_completed_run_points_to_reports(self):
+        client = _search_client([{"id": 1, "name": "x", "status": "Completed"}])
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run(run_id="1"))
+        assert parsed["status_display"] == "Completed"
+
+    def test_canonical_failed_run_points_to_log(self):
+        client = _search_client([{"id": 1, "name": "x", "status": "Failed"}])
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run(run_id="1"))
+        assert parsed["status_display"] == "Failed"
+        assert "get_run_log" in parsed["next_steps"][0]

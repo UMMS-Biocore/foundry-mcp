@@ -62,7 +62,7 @@ DETAILS = {
 def _client(details=DETAILS, example_run=True):
     c = MagicMock()
     runs = {"total": 1, "take": 1, "skip": 0, "data": [
-        {"id": 12194, "name": "Mouse Aligner Tests", "status": "NextSuc",
+        {"id": 12194, "name": "Mouse Aligner Tests", "status": "Completed",
          "dateCreated": "2026-07-15T20:47:14.000Z"}]} if example_run else {
         "total": 0, "take": 1, "skip": 0, "data": []}
 

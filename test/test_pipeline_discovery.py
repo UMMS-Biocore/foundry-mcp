@@ -178,7 +178,7 @@ def _recommend_client(catalog=None, example_run=None):
 
 
 def _run_row(rid=12194, name="Mouse Aligner Tests", pid=1405):
-    return {"id": rid, "name": name, "status": "NextSuc", "pipelineId": pid,
+    return {"id": rid, "name": name, "status": "Completed", "pipelineId": pid,
             "dateCreated": "2026-07-15T20:47:14.000Z", "username": "kucukura",
             "projectId": 1841, "pipelineName": "RNA-seq Pipeline"}
 
@@ -247,7 +247,7 @@ class TestRecommendPipeline:
                      if c.kwargs.get("endpoint") == "/api/v1/run/list"]
         assert run_calls, "expected an example-run lookup"
         params = run_calls[0].kwargs["params"]
-        assert params["filter"] == "pipelineId:eq=1405,status:eq=NextSuc"
+        assert params["filter"] == "pipelineId:eq=1405,status:eq=Completed|NextSuc"
         assert params["sort"] == "dateCreated"
         assert params["order"] == "desc"
 

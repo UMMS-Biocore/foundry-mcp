@@ -51,7 +51,7 @@ DATASET_ROWS = [{"name": n, "file1": f"/d/{n}.1.gz", "file2": f"/d/{n}.2.gz",
                           "exper_rep1", "exper_rep2", "exper_rep3")]
 
 
-def _client(details=None, dataset_rows=None, files=None, run_status="NextSuc"):
+def _client(details=None, dataset_rows=None, files=None, run_status="Completed"):
     """files maps an absolute path -> its contents, or to the sentinel MISSING."""
     files = {} if files is None else files
     details = details or _details()
