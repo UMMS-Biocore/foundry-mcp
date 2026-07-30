@@ -759,15 +759,27 @@ def list_runs(
 
 # Bench-friendly labels for raw RunStatus values (mirrors the frontend's
 # getRunStatusDisplayText, but says "Failed" instead of "Error" for clarity).
+#
+# Both vocabularies are listed. Backend 2.20.0 renamed the wire values, and this
+# server releases on its own cadence, so it may be pointed at either version.
 _RUN_STATUS_DISPLAY = {
+    # Canonical vocabulary, backend 2.20.0 and later.
+    "Failed": "Failed",
+    "LaunchFailed": "Failed",
+    "Completed": "Completed",
+    "Running": "Running",
+    "Initializing": "Initializing",
+    "Submitted": "Initializing",
+    "Terminated": "Terminated",
+    "NotSubmitted": "Not submitted",
+    "Unreachable": "Connecting",
+    # Legacy vocabulary, backends before 2.20.0. Remove once the floor moves.
     "NextErr": "Failed",
     "Error": "Failed",
     "NextSuc": "Completed",
     "NextRun": "Running",
     "init": "Initializing",
     "Waiting": "Initializing",
-    "Terminated": "Terminated",
-    "NotSubmitted": "Not submitted",
     "Aborted": "Connecting",
 }
 
@@ -1626,7 +1638,8 @@ def _find_example_run(via_client, pipeline_id, strict: bool = False):
             endpoint="/api/v1/run/list",
             params={
                 "take": 1, "skip": 0, "sort": "dateCreated", "order": "desc",
-                "filter": f"pipelineId:eq={pipeline_id},status:eq=NextSuc",
+                # Pipe-grouped so one request matches either backend vocabulary.
+                "filter": f"pipelineId:eq={pipeline_id},status:eq=Completed|NextSuc",
             },
             data={},
         )
@@ -1741,7 +1754,17 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
 
 # Statuses from which nothing further will happen. Used to tell "logs have not
 # synced yet" apart from "logs are gone".
-_TERMINAL_RUN_STATUSES = ("NextSuc", "NextErr", "Error", "Terminated")
+_TERMINAL_RUN_STATUSES = (
+    # Canonical vocabulary, backend 2.20.0 and later.
+    "Completed",
+    "Failed",
+    "LaunchFailed",
+    "Terminated",
+    # Legacy vocabulary, backends before 2.20.0.
+    "NextSuc",
+    "NextErr",
+    "Error",
+)
 
 _TRACE_FILE = "trace.txt"
 
@@ -1887,7 +1910,7 @@ def watch_run(run_id: str) -> str:
                 f"few minutes rather than assuming it is stuck.",
                 "Nothing needs doing while it runs.",
             ]
-        elif status == "NextSuc":
+        elif status in ("Completed", "NextSuc"):
             next_steps = [
                 f"Finished — call summarize_results(run_id='{run_id}') for what "
                 f"it found.",
