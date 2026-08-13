@@ -7,8 +7,8 @@ Credentials are configured in mcp.json via headers:
   "foundry": {
     "url": "http://127.0.0.1:8705/mcp",
     "headers": {
-      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
-      "X-ViaFoundry-Token": "your-token-here"
+      "X-Foundry-Connect-Hostname": "https://your-viafoundry.com",
+      "X-Foundry-Connect-Token": "your-token-here"
     }
   }
 }
@@ -55,11 +55,11 @@ class CredentialsMiddleware:
     
     Security Modes:
       - Fixed Hostname Mode (production): When fixed_hostname is set, the server
-        uses that hostname for all requests, ignoring client X-ViaFoundry-Hostname
+        uses that hostname for all requests, ignoring client X-Foundry-Connect-Hostname
         headers. This prevents the server from being used as an open proxy.
       
       - Open Mode (development): When fixed_hostname is None, the server accepts
-        X-ViaFoundry-Hostname from clients, allowing connection to any Foundry Connect
+        X-Foundry-Connect-Hostname from clients, allowing connection to any Foundry Connect
         instance. Only safe for localhost deployments.
     
     Returns 401 Unauthorized if credentials are missing or invalid.
@@ -116,7 +116,7 @@ class CredentialsMiddleware:
             headers = dict(scope.get("headers", []))
 
             # Get token from headers (always required from client).
-            # Prefer the explicit X-ViaFoundry-Token header (IDE/manual setup);
+            # Prefer the explicit X-Foundry-Connect-Token header (IDE/manual setup);
             # fall back to an OAuth-style "Authorization: Bearer <token>" header
             # so clients that discovered credentials via the OAuth flow work too.
             token = (headers.get(HEADER_TOKEN_NEW.encode(), b"").decode()
@@ -185,27 +185,27 @@ class CredentialsMiddleware:
         # In fixed hostname mode, we only need the token from client
         if self.fixed_hostname:
             if not token:
-                detail = "Missing X-ViaFoundry-Token header."
+                detail = "Missing X-Foundry-Connect-Token header."
             elif not token.startswith(MCP_TOKEN_PREFIX):
-                detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+                detail = f"Invalid token format: X-Foundry-Connect-Token must start with '{MCP_TOKEN_PREFIX}'"
             else:
                 detail = "Invalid credentials."
-            help_msg = "Configure X-ViaFoundry-Token in mcp.json headers."
+            help_msg = "Configure X-Foundry-Connect-Token in mcp.json headers."
         else:
             # Open mode - need both hostname and token from client
             if not hostname and not token:
-                detail = "Missing credentials. Provide X-ViaFoundry-Hostname and X-ViaFoundry-Token headers."
+                detail = "Missing credentials. Provide X-Foundry-Connect-Hostname and X-Foundry-Connect-Token headers."
             elif not hostname:
-                detail = "Missing X-ViaFoundry-Hostname header."
+                detail = "Missing X-Foundry-Connect-Hostname header."
             elif not token:
-                detail = "Missing X-ViaFoundry-Token header."
+                detail = "Missing X-Foundry-Connect-Token header."
             elif not (hostname.startswith("http://") or hostname.startswith("https://")):
                 detail = f"Invalid hostname format: '{hostname}'. Must start with http:// or https://"
             elif not token.startswith(MCP_TOKEN_PREFIX):
-                detail = f"Invalid token format: X-ViaFoundry-Token must start with '{MCP_TOKEN_PREFIX}'"
+                detail = f"Invalid token format: X-Foundry-Connect-Token must start with '{MCP_TOKEN_PREFIX}'"
             else:
                 detail = "Invalid credentials."
-            help_msg = "Configure credentials in mcp.json headers: X-ViaFoundry-Hostname and X-ViaFoundry-Token"
+            help_msg = "Configure credentials in mcp.json headers: X-Foundry-Connect-Hostname and X-Foundry-Connect-Token"
         
         body = json.dumps({
             "error": "Unauthorized",
@@ -247,7 +247,7 @@ def create_mcp_server(stateless: bool = False) -> FastMCP:
     """
     # DNS rebinding protection is disabled because this server runs behind a
     # reverse proxy (nginx/Apache) and handles its own authentication via
-    # CredentialsMiddleware (X-ViaFoundry-Token). The proxy may forward any
+    # CredentialsMiddleware (X-Foundry-Connect-Token). The proxy may forward any
     # external Host header (e.g. mcp.viafoundry.com, *.infra.viafoundry.net),
     # which would be rejected by the SDK's default allowed_hosts list.
     # See: https://github.com/modelcontextprotocol/python-sdk/issues/1798
@@ -1079,7 +1079,7 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
 
 def _iter_run_inputs(inputs):
     """Yield normalized {name, value, type, vmetaCollectionId} dicts from either
-    run-input shape: the ViaFoundry list of {name,value,type,...}, or the
+    run-input shape: the Foundry Connect list of {name,value,type,...}, or the
     external-pipeline (nf-core/Nextflow) dict of {name: {...}} that the backend
     returns instead."""
     if isinstance(inputs, dict):
@@ -4480,8 +4480,8 @@ Credentials are configured in ~/.cursor/mcp.json:
     "foundry": {
       "url": "http://127.0.0.1:8705/mcp",
       "headers": {
-        "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
-        "X-ViaFoundry-Token": "your-personal-access-token"
+        "X-Foundry-Connect-Hostname": "https://your-viafoundry.com",
+        "X-Foundry-Connect-Token": "your-personal-access-token"
       }
     }
   }
@@ -4492,7 +4492,7 @@ Security Modes:
     FRONTEND_PATH_PREFIX) to lock the server to a specific Foundry Connect instance.
     Used for production deployments.
   - Open Mode: Without FRONTEND_HOSTNAME, clients can specify any target via
-    X-ViaFoundry-Hostname header (development mode, only safe for localhost).
+    X-Foundry-Connect-Hostname header (development mode, only safe for localhost).
 
 Examples:
   python -m foundry_mcp.server --port 8705
@@ -4519,10 +4519,10 @@ Examples:
         # Fixed hostname mode (production)
         logger.info("Security Mode: FIXED HOSTNAME (production)")
         logger.info(f"  Target: {fixed_hostname}")
-        logger.info("  Client X-ViaFoundry-Hostname headers will be ignored")
+        logger.info("  Client X-Foundry-Connect-Hostname headers will be ignored")
         logger.info("")
         logger.info("Configure in mcp.json headers:")
-        logger.info("  X-ViaFoundry-Token: your-personal-access-token")
+        logger.info("  X-Foundry-Connect-Token: your-personal-access-token")
     else:
         # Open mode (development)
         logger.info("Security Mode: OPEN (development)")
@@ -4539,8 +4539,8 @@ Examples:
             )
         logger.info("")
         logger.info("Configure in mcp.json headers:")
-        logger.info("  X-ViaFoundry-Hostname: https://your-viafoundry.com")
-        logger.info("  X-ViaFoundry-Token: your-personal-access-token")
+        logger.info("  X-Foundry-Connect-Hostname: https://your-viafoundry.com")
+        logger.info("  X-Foundry-Connect-Token: your-personal-access-token")
     
     logger.info("=" * 60)
     
