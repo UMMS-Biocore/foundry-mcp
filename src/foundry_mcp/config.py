@@ -3,11 +3,11 @@
 Configuration for Foundry Connect MCP.
 
 Credentials are passed via HTTP headers:
-  - X-ViaFoundry-Hostname: Your Foundry Connect instance URL (required in open mode)
-  - X-ViaFoundry-Token: Your Personal Access Token (required)
+  - X-Foundry-Connect-Hostname: Your Foundry Connect instance URL (required in open mode)
+  - X-Foundry-Connect-Token: Your Personal Access Token (required)
 
 Security Modes:
-  - Open Mode (default): Client can specify X-ViaFoundry-Hostname header.
+  - Open Mode (default): Client can specify X-Foundry-Connect-Hostname header.
     Used for localhost/development deployments.
   
   - Fixed Hostname Mode: Server uses a configured hostname, ignoring client header.
@@ -20,8 +20,8 @@ Configure in ~/.cursor/mcp.json:
   "foundry": {
     "url": "http://127.0.0.1:8705/mcp",
     "headers": {
-      "X-ViaFoundry-Hostname": "https://your-viafoundry.com",
-      "X-ViaFoundry-Token": "via_mcp_your-token-here"
+      "X-Foundry-Connect-Hostname": "https://your-viafoundry.com",
+      "X-Foundry-Connect-Token": "via_mcp_your-token-here"
     }
   }
 }
@@ -107,7 +107,7 @@ def get_fixed_hostname() -> Optional[str]:
     Get fixed hostname from environment for production deployments.
     
     When a fixed hostname is configured, the server ignores client-provided
-    X-ViaFoundry-Hostname headers, preventing open proxy abuse.
+    X-Foundry-Connect-Hostname headers, preventing open proxy abuse.
     
     Constructed from Foundry Connect environment variables:
       - FRONTEND_HOSTNAME: Required to enable fixed hostname mode

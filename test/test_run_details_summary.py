@@ -58,7 +58,7 @@ _EXTERNAL_DETAILS = {
     "permission": 3,
     "groupId": None,
     # External (nf-core/Nextflow) pipelines: backend returns a dict keyed by
-    # input name, not the ViaFoundry list-of-{name,value,type}.
+    # input name, not the Foundry Connect list-of-{name,value,type}.
     "inputs": {
         "genome": {"value": "/pi/x/genome.fa", "type": "input"},
         "aligner": {"value": "star_salmon", "type": "input"},
