@@ -18,7 +18,7 @@ def _page(data, total=None):
 
 
 def _pipe(pid, name, summary="", version="1.0.0", tags=None):
-    """A row shaped like a real GET /api/pipeline/v1/ entry (verified against
+    """A row shaped like a real GET /api/v1/pipeline/ entry (verified against
     live staging 2026-07-23) — note `pin` is the STRING "true", and every row
     carries the window-function `totalCount` leak."""
     return {
@@ -39,7 +39,7 @@ class TestListFeaturedPipelines:
         with patch.object(server, "get_client", return_value=client):
             server.list_featured_pipelines()
         client.call.assert_called_once_with(
-            method="GET", endpoint="/api/pipeline/v1/",
+            method="GET", endpoint="/api/v1/pipeline/",
             params={"type": "1", "take": 20, "skip": 0},
         )
 
@@ -171,7 +171,7 @@ def _recommend_client(catalog=None, example_run=None):
             "data": [example_run] if example_run else []}
 
     def _call(**kwargs):
-        return page if kwargs.get("endpoint") == "/api/pipeline/v1/" else runs
+        return page if kwargs.get("endpoint") == "/api/v1/pipeline/" else runs
 
     c.call.side_effect = _call
     return c
@@ -260,7 +260,7 @@ class TestRecommendPipeline:
         page = _page(CATALOG)
 
         def _call(**kwargs):
-            if kwargs.get("endpoint") == "/api/pipeline/v1/":
+            if kwargs.get("endpoint") == "/api/v1/pipeline/":
                 return page
             raise RuntimeError("run list exploded")
 

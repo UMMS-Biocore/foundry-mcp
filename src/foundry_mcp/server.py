@@ -1349,7 +1349,7 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
 # Pipeline Discovery Tools
 # ============================================================================
 
-_PIPELINE_LIST_ENDPOINT = "/api/pipeline/v1/"
+_PIPELINE_LIST_ENDPOINT = "/api/v1/pipeline/"
 
 # PipelineViewType.Released. The backend turns this into
 # `pin = 'true' AND perms = Public` and orders pinned-first, then pinOrder, then
@@ -1381,7 +1381,7 @@ def _compact_pipeline(row):
 
     Drops the window-function `totalCount` leak, the `pin`/`pinOrder` curation
     machinery, and `aiEntity`. Summaries arrive HTML-encoded from this endpoint
-    (unlike GET /pipeline/v1/{id}, which decodes), so decode them here.
+    (unlike GET /v1/pipeline/{id}, which decodes), so decode them here.
     """
     return {
         "id": row.get("id"),
@@ -2262,7 +2262,7 @@ def list_results(run_id: str) -> str:
 
 def _installed_apps(via_client):
     """The apps this instance actually has, as [{id, name}]."""
-    response = via_client.call(method="GET", endpoint="/api/app/v1")
+    response = via_client.call(method="GET", endpoint="/api/v1/app")
     if isinstance(response, dict):
         response = response.get("data", [])
     return [a for a in (response or []) if isinstance(a, dict) and a.get("id")]
@@ -2609,7 +2609,7 @@ def _upload_report_enabled(via_client) -> bool:
     """The upload route sits behind the per-user UPLOAD_REPORT feature flag."""
     try:
         flags = via_client.call(
-            method="GET", endpoint="/api/configurations/v1/user")
+            method="GET", endpoint="/api/v1/configurations/user")
         return bool((flags or {}).get("UPLOAD_REPORT"))
     except Exception as e:
         logger.info(f"Could not read feature flags, assuming upload is off: {e}")
@@ -3680,7 +3680,7 @@ def update_process(process_id: str, process_data: dict) -> str:
         # Resolve current user identity
         current_user_id = None
         try:
-            user_info = via_client.call(method="GET", endpoint="/api/auth/v1/user")
+            user_info = via_client.call(method="GET", endpoint="/api/v1/auth/user")
             if isinstance(user_info, dict):
                 current_user_id = user_info.get("id")
         except Exception as e:
@@ -4375,10 +4375,10 @@ def list_apps(search: str = None) -> str:
         via_client = get_client()
         logger.info(f"Listing apps with search filter: {search}")
         
-        # Call the /api/app/v1 endpoint to get all apps
+        # Call the /api/v1/app endpoint to get all apps
         response = via_client.call(
             method="GET",
-            endpoint="/api/app/v1"
+            endpoint="/api/v1/app"
         )
         
         # Extract apps from paginated response
@@ -4441,7 +4441,7 @@ def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = Non
         logger.info(f"Launching app {app_id} with type {run_type}")
         
         # Build the endpoint
-        endpoint = f"/api/app/v1/call/{app_id}"
+        endpoint = f"/api/v1/app/call/{app_id}"
         
         # Prepare the request data
         data = {
