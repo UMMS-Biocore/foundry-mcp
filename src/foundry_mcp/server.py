@@ -4464,6 +4464,172 @@ def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = Non
 
 
 # ============================================================================
+# Process git integration
+#
+# These call the REST API directly through `via_client.call` rather than through
+# an SDK method, because the SDK pin (see the Dockerfile's SDK_GIT_REF) predates
+# these endpoints. Adding SDK methods would couple this change to an SDK release
+# and a deploy ordering problem; calling the endpoint is enough.
+# ============================================================================
+
+
+@mcp.tool()
+def connect_process_repository(
+    process_id: str,
+    repo_url: str,
+    provider: str = "github",
+    default_branch: str = "main",
+    service_token_id: int = None,
+) -> str:
+    """
+    Connect a process to the git repository it publishes to.
+
+    Registers where a process's revisions get exported. `repo_url` must be an https
+    URL; ssh remotes are rejected because they would authenticate from the server's
+    own key material rather than the stored credential.
+
+    WARNING: This modifies a persistent resource. The repository URL cannot be
+    changed once set, because published revision tags live in the repository that
+    is already registered. The branch and the stored credential can be updated.
+
+    Requires write permission on the process.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Connecting process {process_id} to a repository")
+
+        payload = {
+            "repoUrl": repo_url,
+            "provider": provider,
+            "defaultBranch": default_branch,
+        }
+        if service_token_id is not None:
+            payload["serviceTokenId"] = service_token_id
+
+        result = via_client.call(
+            method="POST",
+            endpoint=f"/api/v1/process/{process_id}/git/connect",
+            data=payload,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error connecting process {process_id} to a repository: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def export_process_revision(process_id: str) -> str:
+    """
+    Export a process revision to its connected git repository.
+
+    Materializes the revision (process.yaml, README.md, JSON Schemas, and any
+    attached script assets under bin/), commits it, tags it `foundry/rev-<n>`, and
+    pushes without force.
+
+    Returns `committed: false` when the revision is unchanged since its last
+    export, in which case no commit is made. Exporting a revision older than the
+    highest already in the repository is refused.
+
+    Connect the process to a repository first with connect_process_repository.
+    Requires write permission on the process.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Exporting process revision {process_id}")
+
+        result = via_client.call(
+            method="POST",
+            endpoint=f"/api/v1/process/{process_id}/git/export",
+            data={},
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error exporting process revision {process_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_process_script_assets(process_id: str) -> str:
+    """
+    List the R, Python or shell files attached to a process revision.
+
+    Returns each asset's path, contents, whether it is executable, and a digest of
+    its contents.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Listing script assets for process {process_id}")
+
+        result = via_client.call(
+            method="GET",
+            endpoint=f"/api/v1/process/{process_id}/script-assets",
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing script assets for process {process_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def put_process_script_asset(
+    process_id: str,
+    path: str,
+    contents: str,
+    executable: bool = True,
+) -> str:
+    """
+    Attach a script to a process revision, or replace the one already at that path.
+
+    A `path` with no directory lands in `bin/`, which is the only directory
+    Nextflow puts on PATH, so the script is callable by name from the process
+    body. A path naming a directory is kept as written.
+
+    WARNING: This changes the process itself, not just its metadata. The script is
+    part of the process's content hash, so attaching or editing one returns the
+    revision to draft, regenerates its contract, and marks any validation or test
+    evidence gathered against the old content as stale. It is refused outright on a
+    published revision; create a new revision instead.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Writing script asset {path} on process {process_id}")
+
+        result = via_client.call(
+            method="PUT",
+            endpoint=f"/api/v1/process/{process_id}/script-assets",
+            data={"path": path, "contents": contents, "executable": executable},
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error writing script asset on process {process_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def delete_process_script_asset(process_id: str, path: str) -> str:
+    """
+    Remove a script asset from a process revision.
+
+    WARNING: Like attaching one, this changes the process's content: it returns the
+    revision to draft, regenerates its contract, and marks evidence gathered
+    against the old content as stale. Refused on a published revision.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Deleting script asset {path} from process {process_id}")
+
+        result = via_client.call(
+            method="DELETE",
+            endpoint=f"/api/v1/process/{process_id}/script-assets",
+            data={"path": path},
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error deleting script asset from process {process_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ============================================================================
 # Server Entry Point
 # ============================================================================
 
