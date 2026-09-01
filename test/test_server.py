@@ -2,8 +2,13 @@
 Tests for HTTP server middleware and functionality.
 """
 
+import json
+
 import pytest
-from unittest.mock import AsyncMock
+import requests
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from src.foundry_mcp import server
 
 
 class TestCredentialsMiddleware:
@@ -410,3 +415,74 @@ class TestOAuthBearerSupport:
         assert start_call["status"] == 401
         header_map = dict(start_call["headers"])
         assert b"www-authenticate" not in header_map
+
+
+class TestCompareProcessRevisions:
+    """Tests for the compare_process_revisions tool.
+
+    These mock the SDK client and the outbound HTTP call, so they prove the
+    tool is registered on the server module and shapes its output correctly.
+    They do not exercise the real backend route or a real Foundry Connect
+    deployment.
+    """
+
+    def _client(self, hostname="https://viafoundry.example.com"):
+        client = MagicMock()
+        client.auth.hostname = hostname
+        client.auth.get_headers.return_value = {"Authorization": "Bearer via_mcp_test-token"}
+        return client
+
+    def _response(self, status_code=200, payload=None):
+        response = MagicMock()
+        response.status_code = status_code
+        response.json.return_value = {} if payload is None else payload
+        if status_code >= 400:
+            response.raise_for_status.side_effect = requests.HTTPError(f"{status_code} error")
+        else:
+            response.raise_for_status.return_value = None
+        return response
+
+    def test_requests_the_compare_route_with_revision_ids_as_query_params(self):
+        client = self._client(hostname="https://viafoundry.example.com")
+        response = self._response(payload={"paths": []})
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response) as mock_get:
+            server.compare_process_revisions(process_id="42", revision_a="7", revision_b="9")
+
+        mock_get.assert_called_once_with(
+            "https://viafoundry.example.com/api/v1/process/42/revisions/compare",
+            params={"a": "7", "b": "9"},
+            headers={"Authorization": "Bearer via_mcp_test-token"},
+            timeout=(20, 120),
+        )
+
+    def test_returns_the_serialized_comparison_payload(self):
+        client = self._client()
+        payload = {
+            "paths": [
+                {"path": "process.yaml", "change": "modified", "diff": "--- a\n+++ b\n"},
+            ]
+        }
+        response = self._response(payload=payload)
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response):
+            result = server.compare_process_revisions(process_id="42", revision_a="7", revision_b="9")
+
+        assert json.loads(result) == payload
+
+    def test_http_error_from_the_backend_is_returned_as_an_error_payload(self):
+        client = self._client()
+        response = self._response(status_code=404)
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response):
+            result = server.compare_process_revisions(process_id="42", revision_a="7", revision_b="9")
+
+        parsed = json.loads(result)
+        assert "error" in parsed
+
+    def test_missing_credentials_is_returned_as_an_error_payload_not_raised(self):
+        with patch.object(server, "get_client", side_effect=ValueError("Missing credentials")):
+            result = server.compare_process_revisions(process_id="42", revision_a="7", revision_b="9")
+
+        parsed = json.loads(result)
+        assert "Missing credentials" in parsed["error"]
