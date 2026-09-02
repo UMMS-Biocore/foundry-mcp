@@ -426,7 +426,7 @@ class TestCompareProcessRevisions:
     deployment.
     """
 
-    def _client(self, hostname="https://viafoundry.example.com"):
+    def _client(self, hostname="https://foundry.example.com"):
         client = MagicMock()
         client.auth.hostname = hostname
         client.auth.get_headers.return_value = {"Authorization": "Bearer via_mcp_test-token"}
@@ -443,14 +443,14 @@ class TestCompareProcessRevisions:
         return response
 
     def test_requests_the_compare_route_with_revision_ids_as_query_params(self):
-        client = self._client(hostname="https://viafoundry.example.com")
+        client = self._client(hostname="https://foundry.example.com")
         response = self._response(payload={"paths": []})
         with patch.object(server, "get_client", return_value=client), \
                 patch.object(server.requests, "get", return_value=response) as mock_get:
             server.compare_process_revisions(process_id="42", revision_a="7", revision_b="9")
 
         mock_get.assert_called_once_with(
-            "https://viafoundry.example.com/api/v1/process/42/revisions/compare",
+            "https://foundry.example.com/api/v1/process/42/revisions/compare",
             params={"a": "7", "b": "9"},
             headers={"Authorization": "Bearer via_mcp_test-token"},
             timeout=(20, 120),
@@ -459,14 +459,14 @@ class TestCompareProcessRevisions:
     def test_strips_a_trailing_slash_from_the_hostname_before_concatenating(self):
         # Matches the _upload_run_file precedent: a hostname stored with a trailing
         # slash must not turn into a doubled slash in the request path.
-        client = self._client(hostname="https://viafoundry.example.com/")
+        client = self._client(hostname="https://foundry.example.com/")
         response = self._response(payload={"paths": []})
         with patch.object(server, "get_client", return_value=client), \
                 patch.object(server.requests, "get", return_value=response) as mock_get:
             server.compare_process_revisions(process_id="42", revision_a="7", revision_b="9")
 
         mock_get.assert_called_once_with(
-            "https://viafoundry.example.com/api/v1/process/42/revisions/compare",
+            "https://foundry.example.com/api/v1/process/42/revisions/compare",
             params={"a": "7", "b": "9"},
             headers={"Authorization": "Bearer via_mcp_test-token"},
             timeout=(20, 120),
