@@ -3468,13 +3468,16 @@ def compare_process_revisions(process_id: str, revision_a: str, revision_b: str)
     process.yaml, the input and output schemas, README.md and bin/ scripts.
     Generated files are excluded because they are rebuilt from platform wide
     settings and would show changes the author did not make.
+
+    revision_a and revision_b are the revision row ids returned by
+    get_process_revisions, not the human facing version numbers.
     """
     try:
         via_client = get_client()
         logger.info(f"Comparing revisions {revision_a} and {revision_b} of process {process_id}")
 
         response = requests.get(
-            f"{via_client.auth.hostname}/api/v1/process/{process_id}/revisions/compare",
+            f"{via_client.auth.hostname.rstrip('/')}/api/v1/process/{process_id}/revisions/compare",
             params={"a": revision_a, "b": revision_b},
             headers=via_client.auth.get_headers(),
             timeout=(20, 120),
