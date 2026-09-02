@@ -3460,6 +3460,36 @@ def get_process_revisions(process_id: str) -> str:
 
 
 @mcp.tool()
+def compare_process_revisions(process_id: str, revision_a: str, revision_b: str) -> str:
+    """
+    Compare two revisions of a process and return what changed between them.
+
+    Returns a unified diff per changed file, covering only authored content:
+    process.yaml, the input and output schemas, README.md and bin/ scripts.
+    Generated files are excluded because they are rebuilt from platform wide
+    settings and would show changes the author did not make.
+
+    revision_a and revision_b are the revision row ids returned by
+    get_process_revisions, not the human facing version numbers.
+    """
+    try:
+        via_client = get_client()
+        logger.info(f"Comparing revisions {revision_a} and {revision_b} of process {process_id}")
+
+        response = requests.get(
+            f"{via_client.auth.hostname.rstrip('/')}/api/v1/process/{process_id}/revisions/compare",
+            params={"a": revision_a, "b": revision_b},
+            headers=via_client.auth.get_headers(),
+            timeout=(20, 120),
+        )
+        response.raise_for_status()
+        return json.dumps(serialize_response(response.json()), indent=2)
+    except Exception as e:
+        logger.error(f"Error comparing process revisions: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
 def list_process_parameters() -> str:
     """
     List all available parameters in Foundry Connect.
