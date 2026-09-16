@@ -4390,6 +4390,145 @@ def create_metadata_record(canvas_id: str, collection_name: str, data_entry: dic
         return json.dumps({"error": str(e)})
 
 
+# Keys that identify a record or control who can see it. The update tools
+# refuse them so a field edit can never change a record's identity or access.
+RESERVED_RECORD_KEYS = ("_id", "owner", "perms", "DID")
+
+
+def _record_update_problem(data_id, update_data):
+    """Return why an update cannot be sent, or None when it is valid."""
+    if not isinstance(data_id, str) or not data_id.strip():
+        return "data_id is required"
+    if not isinstance(update_data, dict) or not update_data:
+        return "update_data must be a non-empty object"
+    reserved = [key for key in RESERVED_RECORD_KEYS if key in update_data]
+    if reserved:
+        return f"update_data contains reserved keys that cannot be updated: {', '.join(reserved)}"
+    return None
+
+
+@mcp.tool()
+def update_metadata_record(canvas_id: str, collection_name: str, data_id: str, update_data: dict) -> str:
+    """
+    Update fields on an existing metadata record.
+    Only the keys in update_data change; every other field keeps its value.
+
+    WARNING: This modifies a persistent record on the Foundry Connect server
+    and cannot be undone automatically. Show the user the record and the new
+    values and get confirmation before calling it. To change many records,
+    use update_metadata_records so the user confirms the whole set once.
+
+    Args:
+        canvas_id: The canvas ID where the collection exists.
+        collection_name: Name of the collection that holds the record.
+        data_id: The record's _id.
+        update_data: Dict of field names to new values. The reserved keys
+            _id, owner, perms and DID are refused.
+
+    Returns:
+        The updated record, or {"error": ...}.
+
+    Example:
+        update_metadata_record(
+            canvas_id="65c21d6a593f32e0103daf25",
+            collection_name="samples",
+            data_id="6977762ac783bd6d7ed0db01",
+            update_data={"group": "chow.wt"}
+        )
+    """
+    problem = _record_update_problem(data_id, update_data)
+    if problem:
+        return json.dumps({"error": problem})
+    try:
+        via_client = get_client()
+        logger.info(f"Updating metadata record '{data_id}' in canvas '{canvas_id}', collection '{collection_name}': {update_data}")
+
+        record = via_client.metadata.update_data(canvas_id, collection_name, data_id, update_data)
+        return json.dumps(serialize_response(record), indent=2)
+    except Exception as e:
+        logger.error(f"Error updating metadata record: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def update_metadata_records(canvas_id: str, collection_name: str, updates: list[dict]) -> str:
+    """
+    Update fields on many metadata records in one collection.
+    Each item is {"data_id": "<record _id>", "update_data": {...}}. Only the
+    keys in each update_data change on that record.
+
+    WARNING: This modifies persistent records on the Foundry Connect server
+    and cannot be undone automatically. Before calling it, show the user one
+    table with every record and its new values, and get a single confirmation
+    for the whole set.
+
+    Every item is checked before anything is written. If any item has a
+    missing or repeated data_id, an empty update_data, or a reserved key
+    (_id, owner, perms, DID), nothing is updated and the invalid items are
+    listed. Once writing starts, a failure on one record does not stop the
+    others, and the result reports each record.
+
+    Args:
+        canvas_id: The canvas ID where the collection exists.
+        collection_name: Name of the collection that holds the records.
+        updates: List of {"data_id": str, "update_data": dict}.
+
+    Returns:
+        {"updated": n, "failed": n, "results": [{"data_id", "ok", "record" or "error"}]},
+        or {"error": ..., "invalid_rows": [{"index", "data_id", "error"}]} when
+        nothing was written.
+
+    Example:
+        update_metadata_records(
+            canvas_id="65c21d6a593f32e0103daf25",
+            collection_name="samples",
+            updates=[
+                {"data_id": "6977762ac783bd6d7ed0db01", "update_data": {"group": "chow.wt"}},
+                {"data_id": "6977762ac783bd6d7ed0db02", "update_data": {"group": "hfd.wt"}}
+            ]
+        )
+    """
+    if not isinstance(updates, list) or not updates:
+        return json.dumps({"error": "updates must be a non-empty list"})
+
+    invalid_rows = []
+    seen = set()
+    for index, item in enumerate(updates):
+        if not isinstance(item, dict):
+            invalid_rows.append({"index": index, "data_id": None, "error": "each update must be an object"})
+            continue
+        data_id = item.get("data_id")
+        problem = _record_update_problem(data_id, item.get("update_data"))
+        if not problem and data_id in seen:
+            problem = "data_id appears more than once"
+        if problem:
+            invalid_rows.append({"index": index, "data_id": data_id, "error": problem})
+        if isinstance(data_id, str):
+            seen.add(data_id)
+    if invalid_rows:
+        return json.dumps({"error": "No records were updated because some updates are invalid", "invalid_rows": invalid_rows}, indent=2)
+
+    try:
+        via_client = get_client()
+    except Exception as e:
+        logger.error(f"Error updating metadata records: {e}")
+        return json.dumps({"error": str(e)})
+
+    logger.info(f"Updating {len(updates)} metadata records in canvas '{canvas_id}', collection '{collection_name}'")
+    results = []
+    for item in updates:
+        data_id = item["data_id"]
+        try:
+            record = via_client.metadata.update_data(canvas_id, collection_name, data_id, item["update_data"])
+            results.append({"data_id": data_id, "ok": True, "record": serialize_response(record)})
+        except Exception as e:
+            logger.error(f"Error updating metadata record '{data_id}': {e}")
+            results.append({"data_id": data_id, "ok": False, "error": str(e)})
+
+    updated = sum(1 for r in results if r["ok"])
+    return json.dumps({"updated": updated, "failed": len(results) - updated, "results": results}, indent=2)
+
+
 # ============================================================================
 # App Launch Tools
 # ============================================================================

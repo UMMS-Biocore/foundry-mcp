@@ -205,7 +205,7 @@ Define and explore metadata field schemas.
 
 ---
 
-### 📝 Metadata Record Management (3 tools)
+### 📝 Metadata Record Management (5 tools)
 
 Manage metadata data records.
 
@@ -214,6 +214,8 @@ Manage metadata data records.
 | `search_metadata_records` | Search for metadata data records   |
 | `get_metadata_record`     | Get specific metadata record by ID |
 | `create_metadata_record`  | Create new metadata data record    |
+| `update_metadata_record`  | Update fields on one existing record (confirm first) |
+| `update_metadata_records` | Update fields on many records in one collection, all rows checked before any write (confirm first) |
 
 ---
 
