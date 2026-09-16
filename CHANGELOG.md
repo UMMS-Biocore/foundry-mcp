@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- **Updating metadata records**
+  - `update_metadata_record(canvas_id, collection_name, data_id, update_data)`
+    changes fields on an existing record. Only the keys you send change, so
+    filling in one column leaves the rest of the record as it was.
+  - `update_metadata_records(canvas_id, collection_name, updates)` does the same
+    for many records at once, such as setting a group on every sample in a
+    dataset. Every row is checked before anything is written, so one bad row
+    means nothing changes. After that, each record gets its own result, and one
+    failure does not stop the rest.
+  - Both refuse the keys that identify a record or control access to it
+    (`_id`, `owner`, `perms`, `DID`), and both are writes: assistants should
+    show the changes and ask before calling them.
+
 - **Watching a run, and honest logs (Phase 4)**
   - `watch_run(run_id)` reports how far a run has actually got — steps done,
     which step is running now, which failed and with what exit code — instead of

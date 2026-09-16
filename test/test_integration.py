@@ -124,6 +124,8 @@ class TestMCPTools:
             'search_metadata_records',
             'get_metadata_record',
             'create_metadata_record',
+            'update_metadata_record',
+            'update_metadata_records',
         ]
         
         for tool in expected_metadata_tools:
