@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-30
+
 ### Added
 - **Updating metadata records**
   - `update_metadata_record(canvas_id, collection_name, data_id, update_data)`
