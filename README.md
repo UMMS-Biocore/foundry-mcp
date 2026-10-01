@@ -133,7 +133,7 @@ Create, explore, and manage bioinformatics pipelines.
 | `get_process_revisions`     | Get version history for a pipeline                  |
 | `duplicate_process`         | Clone an existing pipeline for modification         |
 | `create_process`            | Create a new custom process/pipeline                |
-| `update_process`            | Update an existing process (with ownership guard)   |
+| `update_process`            | Update an existing process in place, keeping port ids (with ownership guard) |
 | `create_process_config`     | Generate process configuration helper               |
 | `list_process_parameters`   | List all available parameter definitions            |
 | `get_process_parameters`    | Get parameters filtered by name, type, or qualifier |

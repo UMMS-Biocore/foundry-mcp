@@ -38,6 +38,7 @@ from .config import (
 )
 from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
 from .log import get_logger, get_uvicorn_log_config, mask_token
+from .process_ports import PortMergeError, build_update_body
 
 
 # Get logger for this module
@@ -3682,6 +3683,19 @@ def update_process(process_id: str, process_data: dict) -> str:
     Update an existing process/pipeline.
     Modifies process configuration, scripts, or parameters.
 
+    Ports (inputParameters / outputParameters):
+    - Leave a side out to keep its ports exactly as stored. A script-only edit
+      needs neither list.
+    - A side you send REPLACES every port on that side: stored ports you leave
+      out of the list are deleted.
+    - Each port you send is matched to a stored port by its "id", or else by
+      its displayName, and that stored port is updated in place, keeping its id
+      and any field you did not set (such as an output's regEx). Ports that
+      match nothing are added as new ports. Use get_process_details for ids.
+    - To delete every port on a side, send an empty list and set
+      removeAllInputParameters or removeAllOutputParameters to true.
+    The result lists, per side, which ports were kept, updated, added and removed.
+
     WARNING: This modifies a persistent resource on the Foundry Connect server.
     Changes affect all users who reference this process and cannot be undone
     automatically. The tool performs an ownership check before updating —
@@ -3694,8 +3708,11 @@ def update_process(process_id: str, process_data: dict) -> str:
 
         # --- Ownership guard: fetch process and verify before updating ---
         try:
-            existing = via_client.process.get_process(process_id)
-            existing_data = serialize_response(existing)
+            # Read the raw response: the stored ports are needed with every
+            # field, and the SDK response model drops some of them.
+            existing_data = via_client.call(method="GET", endpoint=f"/api/v1/process/{process_id}")
+            if not isinstance(existing_data, dict):
+                raise ValueError("unexpected response when reading the process")
             process_owner_id = existing_data.get("owner_id")
             process_name = existing_data.get("name", "unknown")
             last_modified_by = existing_data.get("last_modified_user", "unknown")
@@ -3734,7 +3751,25 @@ def update_process(process_id: str, process_data: dict) -> str:
         # --- Validate and clean process_data ---
         cleaned_data = remove_none(process_data)
 
-        from viafoundry.models.domain.process import ProcessConfig
+        from viafoundry.models.domain.process import ConfigParameter, ProcessConfig
+
+        # An SDK without the port id field drops every id during validation,
+        # and the server then deletes and recreates every port. Refuse instead.
+        if "id" not in ConfigParameter.model_fields or "regEx" not in ConfigParameter.model_fields:
+            return json.dumps({
+                "error": "This Foundry MCP server is running an SDK that cannot keep process port ids.",
+                "detail": "Updating the process now would delete and recreate every port. Update refused.",
+                "hint": "Upgrade viafoundry_sdk to 1.1.0 or later."
+            }, indent=2)
+
+        try:
+            cleaned_data, port_changes = build_update_body(cleaned_data, existing_data)
+        except PortMergeError as e:
+            return json.dumps({
+                "error": "Ports could not be applied",
+                "detail": str(e),
+                "hint": "Nothing was changed. Call get_process_details for the stored ports and their ids."
+            }, indent=2)
 
         try:
             process_config = ProcessConfig.model_validate(cleaned_data)
@@ -3749,6 +3784,8 @@ def update_process(process_id: str, process_data: dict) -> str:
         try:
             updated = via_client.process.update_process(process_id, process_config)
             result = serialize_response(updated)
+            if isinstance(result, dict):
+                result["port_changes"] = port_changes
             return json.dumps(result, indent=2)
         except Exception as e:
             error_details = {
