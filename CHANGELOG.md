@@ -97,6 +97,16 @@
   (nf-core/Nextflow) pipelines return instead of a list.
 
 ### Fixed
+- **`update_process` no longer recreates every process port.** Each call used
+  to delete and re-add every input and output port, even for a script-only
+  edit, so every port got a new id and output ports lost their publish pattern.
+  Ports are now matched to the stored ones by id, or else by display name, and
+  updated in place. Only new ports are added, and only ports left out of a side
+  you send are removed. Leave `inputParameters` or `outputParameters` out to
+  keep that side as it is. Emptying a side needs `removeAllInputParameters` or
+  `removeAllOutputParameters`. The result reports which ports were kept,
+  updated, added and removed, and a refused port change sends nothing. Needs
+  viafoundry_sdk 1.1.0, and the tool refuses to update with an older SDK.
 - `list_runs` no longer advertises `pipelineId` as a sort field. The backend
   excludes it from its own whitelist, so any model that followed the tool
   contract got a hard 400; it is now aliased to `pipelineName`.

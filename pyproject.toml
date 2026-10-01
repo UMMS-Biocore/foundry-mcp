@@ -32,7 +32,7 @@ dependencies = [
     # resolve breaks `src/foundry_mcp/server.py` at import time. Migrating to
     # the 2.x API is separate work; until then stay on 1.x.
     "mcp>=1.0.0,<2",
-    "viafoundry_sdk>=1.0.0",
+    "viafoundry_sdk>=1.1.0",
     "uvicorn>=0.30.0",
     "starlette>=0.37.0",
     "requests>=2.25.0",
