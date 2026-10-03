@@ -1324,7 +1324,10 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
     """
     Start execution of a prepared run. run_type: 'newrun' (fresh), 'resumerun'
     (Nextflow -resume, reuses work dir/cache), or 'rerun' (new attempt, same
-    params). Returns status, runUUID, localRunDir. This LAUNCHES real HPC compute
+    params). Returns status, runUUID, localRunDir. When the run environment's
+    cloud head node is stopped, it returns status "waking" without a runUUID:
+    the node is starting and the run launches in the background once it is
+    ready (check it with get_run). This LAUNCHES real HPC compute
     (it can take minutes to hours and consumes cluster time) — always confirm
     with the user before calling.
     """
