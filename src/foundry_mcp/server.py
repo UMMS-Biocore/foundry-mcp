@@ -1120,6 +1120,32 @@ def _strip_html(text):
     return re.sub(r"\s+", " ", html.unescape(_HTML_TAG_RE.sub(" ", text))).strip()
 
 
+_RUN_ENV_FIELDS = ("id", "name", "transport", "executor", "hostname", "username", "defWorkdir", "defPublishdir")
+_SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
+_LOGIN_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _compact_run_environment(env):
+    """The run environment fields a user picks by, without scheduler internals."""
+    return {key: env.get(key) for key in _RUN_ENV_FIELDS}
+
+
+def _default_execution_directory(env, run_name):
+    """Proposed execution directory for a new run, or None when the user must choose.
+
+    Order: the environment's declared default (used as is, as the web UI does), then
+    /home/<login>/foundry-connect-runs/<run name>. No usable login name means no default.
+    """
+    declared = (env.get("defWorkdir") or "").strip()
+    if declared:
+        return declared
+    login = (env.get("username") or "").strip()
+    if not _LOGIN_NAME.fullmatch(login):
+        return None
+    segment = _SAFE_SEGMENT.sub("_", (run_name or "").strip()).lstrip(".") or "run"
+    return f"/home/{login}/foundry-connect-runs/{segment}"
+
+
 def _summarize_run_details(details):
     """Distill a run's full details blob into a compact, plain-language summary
     a bench scientist can read without wading through processOptions."""
