@@ -1122,7 +1122,8 @@ def _strip_html(text):
 
 _RUN_ENV_FIELDS = ("id", "name", "transport", "executor", "hostname", "username", "defWorkdir", "defPublishdir")
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
-_LOGIN_NAME = re.compile(r"[A-Za-z0-9._-]+")
+# A login never starts with a dot, so "." and ".." cannot climb out of /home.
+_LOGIN_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 
 
 def _compact_run_environment(env):
@@ -1259,10 +1260,9 @@ def _run_form(details, run_name):
     env_block = details.get("runEnvironment") or {}
     envs = env_block.get("availableList") or []
     return {
-        "inputs": [
-            {"name": i.get("name"), "type": i.get("type"), "value": i.get("value")}
-            for i in _iter_run_inputs(details.get("inputs") or [])
-        ],
+        # As the server returns them (a list for Foundry pipelines, a dict for
+        # external ones), so ids and collection fields round-trip into update_run.
+        "inputs": details.get("inputs") or [],
         "process_options": details.get("processOptions") or {},
         "run_environments": [_compact_run_environment(e) for e in envs],
         "selected_run_environment_id": env_block.get("selectedId"),
@@ -1405,9 +1405,11 @@ def update_run(
     name: str = None,
 ) -> str:
     """
-    Save a run before launch (PATCH /save). Send only what changes: inputs
-    merge with the saved ones; process_options REPLACES the whole set, so
-    send it complete or leave it out. `permission` is REQUIRED on every call
+    Save a run before launch (PATCH /save). Send only what changes. On a
+    Foundry pipeline, inputs merge with the saved ones; on an external
+    (nf-core) pipeline the inputs dict is REPLACED whole, so send the complete
+    dict from create_run's form. process_options always REPLACES the whole
+    set, so send it complete or leave it out. `permission` is REQUIRED on every call
     (echo it from create_run or get_run_details(run_id, verbose=True));
     `group_id` is REQUIRED only when `permission` is 15 (GroupShared). A new
     run cannot launch until run_environment_id and launch_directory are
@@ -3128,15 +3130,28 @@ def preflight_run(run_id: str) -> str:
         )
 
         # A run created from scratch launches only once both are saved.
-        checks.append(
-            _preflight_check("run_environment", "pass", f"Run environment {cluster_id} is selected.")
-            if cluster_id else
-            _preflight_check(
+        usable_ids = {e.get("id") for e in run_env.get("availableList") or []}
+        if not usable_ids:
+            checks.append(_preflight_check(
+                "run_environment", "fail", "You have no run environment you can launch on.",
+                "Add one under your profile's run environments, or ask your "
+                "organization to share one.",
+            ))
+        elif not cluster_id:
+            checks.append(_preflight_check(
                 "run_environment", "fail", "No run environment is selected.",
                 "Pick one from list_run_environments(run_id) and save it with "
                 "update_run(run_environment_id=...).",
-            )
-        )
+            ))
+        elif cluster_id not in usable_ids:
+            checks.append(_preflight_check(
+                "run_environment", "fail",
+                f"The selected run environment {cluster_id} is not one you can launch on.",
+                "A copied run keeps its source's environment. Pick one of yours from "
+                "list_run_environments(run_id) and save it with update_run(run_environment_id=...).",
+            ))
+        else:
+            checks.append(_preflight_check("run_environment", "pass", f"Run environment {cluster_id} is selected."))
         checks.append(
             _preflight_check("execution_directory", "pass", f"Execution directory is {launch_dir}.")
             if launch_dir else

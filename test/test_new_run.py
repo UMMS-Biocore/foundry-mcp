@@ -194,3 +194,20 @@ def test_tool_is_registered_with_a_description(name):
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
     assert name in tools
     assert tools[name].description and tools[name].description.strip()
+
+
+class TestReviewFixes:
+    def test_dot_logins_give_no_default(self):
+        for login in (".", "..", ".hidden"):
+            assert server._default_execution_directory({**ENV, "username": login}, "r") is None
+
+    def test_form_inputs_round_trip_collection_fields(self):
+        raw = [{"id": 5, "name": "reads", "type": "vmetaCollection", "value": "set A",
+                "collectionId": None, "vmetaCollectionId": "abc"}]
+        form = server._run_form({**DETAILS, "inputs": raw}, "r1")
+        assert form["inputs"] == raw
+
+    def test_form_keeps_the_external_pipeline_dict_shape(self):
+        raw = {"input": {"value": "/data/s.csv", "type": "input"}, "outdir": {"value": "x", "type": "input"}}
+        form = server._run_form({**DETAILS, "inputs": raw}, "r1")
+        assert form["inputs"] == raw
