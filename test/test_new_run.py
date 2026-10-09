@@ -149,3 +149,38 @@ class TestListRunEnvironments:
             out = json.loads(server.list_run_environments("41"))
         client.call.assert_called_once_with(method="GET", endpoint="/api/v1/run/41/details")
         assert out["data"]["run_environments"][0]["username"] == "jdoe"
+
+
+class TestUpdateRunEnvironment:
+    def test_sends_only_the_fields_given(self):
+        client = _patched_client({"ok": True})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run("41", permission=3, run_environment_id=550, launch_directory="/home/jdoe/foundry-connect-runs/r1")
+        client.call.assert_called_once_with(
+            method="PATCH", endpoint="/api/v1/run/41/save",
+            data={"permission": 3, "groupId": None, "runEnvironmentId": 550,
+                  "launchDirectory": "/home/jdoe/foundry-connect-runs/r1"},
+        )
+
+    def test_existing_full_call_is_unchanged(self):
+        client = _patched_client({"ok": True})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run("41", [{"name": "a", "value": "b"}], {"g": {}}, 3)
+        client.call.assert_called_once_with(
+            method="PATCH", endpoint="/api/v1/run/41/save",
+            data={"inputs": [{"name": "a", "value": "b"}], "processOptions": {"g": {}}, "permission": 3, "groupId": None},
+        )
+
+    def test_permission_still_required(self):
+        client = _patched_client({})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.update_run("41", run_environment_id=550))
+        assert "error" in out
+        client.call.assert_not_called()
+
+    def test_relative_launch_directory_is_refused(self):
+        client = _patched_client({})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.update_run("41", permission=3, launch_directory="runs/r1"))
+        assert "absolute" in out["error"]
+        client.call.assert_not_called()

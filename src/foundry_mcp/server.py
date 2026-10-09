@@ -1359,10 +1359,15 @@ def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _validate_update_run(inputs, process_options, permission, group_id):
+def _validate_update_run(inputs, process_options, permission, group_id, launch_directory=None):
     """Raise ValueError if the update_run body would be rejected by the server."""
     if permission is None:
         raise ValueError("'permission' is required")
+    if launch_directory and not launch_directory.startswith("/"):
+        raise ValueError(
+            "launch_directory must be an absolute path on the run environment, "
+            "for example /home/<login>/foundry-connect-runs/<run>."
+        )
     if permission == 15 and group_id is None:
         raise ValueError("'groupId' is required when permission is GroupShared (15)")
     for i, inp in enumerate(inputs or []):
@@ -1389,33 +1394,46 @@ def _validate_update_run(inputs, process_options, permission, group_id):
 @mcp.tool()
 def update_run(
     run_id: str,
-    inputs: list,
-    process_options: dict,
-    permission: int,
+    inputs: list = None,
+    process_options: dict = None,
+    permission: int = None,
     group_id: int = None,
+    run_environment_id: int = None,
+    launch_directory: str = None,
+    publish_dir: str = None,
+    name: str = None,
 ) -> str:
     """
-    Patch a run's inputs and processOptions (PATCH /save). `permission` is
-    REQUIRED (echo it from get_run_details(run_id, verbose=True)); `group_id`
-    is REQUIRED only when `permission` is 15 (GroupShared) — otherwise it
-    may be omitted/None. No input `value` may be an empty string — use "NA"
-    or omit the input. Within one processOptions entry, all spreadsheet
-    (list) columns must be equal length. This mutates the run; confirm with
-    the user before calling.
+    Save a run before launch (PATCH /save). Send only what changes: inputs
+    merge with the saved ones; process_options REPLACES the whole set, so
+    send it complete or leave it out. `permission` is REQUIRED on every call
+    (echo it from create_run or get_run_details(run_id, verbose=True));
+    `group_id` is REQUIRED only when `permission` is 15 (GroupShared). A new
+    run cannot launch until run_environment_id and launch_directory are
+    saved: take them from create_run or list_run_environments and show the
+    proposed directory to the user first. No input `value` may be an empty
+    string; use "NA" or omit the input. Within one processOptions entry, all
+    spreadsheet (list) columns must be equal length. This mutates the run;
+    confirm with the user before calling.
     """
     try:
-        _validate_update_run(inputs, process_options, permission, group_id)
+        _validate_update_run(inputs, process_options, permission, group_id, launch_directory)
         via_client = get_client()
-        saved = via_client.call(
-            method="PATCH",
-            endpoint=f"/api/v1/run/{run_id}/save",
-            data={
-                "inputs": inputs,
-                "processOptions": process_options,
-                "permission": permission,
-                "groupId": group_id,
-            },
-        )
+        data = {}
+        if inputs is not None:
+            data["inputs"] = inputs
+        if process_options is not None:
+            data["processOptions"] = process_options
+        data["permission"] = permission
+        data["groupId"] = group_id
+        optional = {
+            "runEnvironmentId": run_environment_id,
+            "launchDirectory": launch_directory,
+            "publishDir": publish_dir,
+            "name": name,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
+        saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
         return json.dumps(saved, indent=2)
     except Exception as e:
         logger.error(f"Error updating run {run_id}: {e}")
