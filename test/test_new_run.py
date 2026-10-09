@@ -97,3 +97,55 @@ class TestListPipelines:
         client = _patched_client(side_effect=RuntimeError("boom"))
         with patch.object(server, "get_client", return_value=client):
             assert json.loads(server.list_pipelines()) == {"error": "boom"}
+
+
+DETAILS = {
+    "name": "r1", "permission": 3, "groupId": None,
+    "runEnvironment": {"selectedId": None, "availableList": [ENV]},
+    "inputs": [], "processOptions": {"grp": {"a": 1}},
+}
+
+
+class TestCreateRun:
+    def test_creates_then_returns_the_form(self):
+        client = _patched_client(side_effect=[{"id": 41, "projectPipelineId": 41}, DETAILS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
+        assert client.call.call_args_list[0].kwargs == {
+            "method": "POST", "endpoint": "/api/v1/run/new-run-attempt",
+            "data": {"pipelineId": 3, "projectId": 7, "name": "r1"},
+        }
+        assert client.call.call_args_list[1].kwargs == {"method": "GET", "endpoint": "/api/v1/run/41/details"}
+        data = out["data"]
+        assert data["run_id"] == 41
+        assert data["run_environments"][0]["id"] == 550
+        assert "bashVariable" not in data["run_environments"][0]
+        assert data["proposed_execution_directory"] == {"550": "/home/jdoe/foundry-connect-runs/r1"}
+        assert data["process_options"] == {"grp": {"a": 1}}
+
+    def test_works_with_a_server_that_only_returns_projectPipelineId(self):
+        client = _patched_client(side_effect=[{"projectPipelineId": 42}, DETAILS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
+        assert out["data"]["run_id"] == 42
+
+    def test_no_usable_environment_is_said_plainly(self):
+        empty = {**DETAILS, "runEnvironment": {"selectedId": None, "availableList": []}}
+        client = _patched_client(side_effect=[{"id": 43}, empty])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
+        assert "no run environment" in out["summary"].lower()
+
+    def test_refusal_from_the_server_is_passed_through(self):
+        client = _patched_client(side_effect=RuntimeError("No permission to read this project"))
+        with patch.object(server, "get_client", return_value=client):
+            assert json.loads(server.create_run(3, 7, "r1")) == {"error": "No permission to read this project"}
+
+
+class TestListRunEnvironments:
+    def test_reads_the_runs_details(self):
+        client = _patched_client(DETAILS)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.list_run_environments("41"))
+        client.call.assert_called_once_with(method="GET", endpoint="/api/v1/run/41/details")
+        assert out["data"]["run_environments"][0]["username"] == "jdoe"

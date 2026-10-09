@@ -1253,6 +1253,86 @@ def create_vmeta_dataset(name: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _run_form(details, run_name):
+    """Everything a user fills before launching a freshly created run."""
+    env_block = details.get("runEnvironment") or {}
+    envs = env_block.get("availableList") or []
+    return {
+        "inputs": [
+            {"name": i.get("name"), "type": i.get("type"), "value": i.get("value")}
+            for i in _iter_run_inputs(details.get("inputs") or [])
+        ],
+        "process_options": details.get("processOptions") or {},
+        "run_environments": [_compact_run_environment(e) for e in envs],
+        "selected_run_environment_id": env_block.get("selectedId"),
+        "proposed_execution_directory": {str(e.get("id")): _default_execution_directory(e, run_name) for e in envs},
+        "permission": details.get("permission"),
+        "groupId": details.get("groupId"),
+    }
+
+
+def _run_form_envelope(run_id, details, run_name, verb):
+    form = _run_form(details, run_name)
+    if form["run_environments"]:
+        summary = f"{verb} run {run_id}. Choose a run environment and confirm its execution directory."
+    else:
+        summary = (
+            f"{verb} run {run_id}, but you have no run environment you can launch on. "
+            "Add one under your profile's run environments, or ask your organization to share one."
+        )
+    return envelope(
+        summary=summary,
+        data={"run_id": run_id, **form},
+        next_steps=[
+            "Ask the user for each input, the run environment, and whether the proposed execution directory is right "
+            "(null means none could be proposed: ask for one).",
+            "update_run(run_id, inputs=..., run_environment_id=..., launch_directory=..., permission=...) after the user confirms.",
+            "preflight_run(run_id), then initiate_run(run_id) after the user confirms the launch.",
+        ],
+    )
+
+
+@mcp.tool()
+def create_run(pipeline_id: int, project_id: int, name: str) -> str:
+    """
+    Create a new, unlaunched run of a pipeline in one of your projects and
+    return its form: inputs, process options, the run environments you can
+    launch on, and a proposed execution directory per environment. This
+    writes; confirm the pipeline, project and run name with the user first.
+    Nothing is launched.
+    """
+    try:
+        via_client = get_client()
+        created = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/new-run-attempt",
+            data={"pipelineId": pipeline_id, "projectId": project_id, "name": name},
+        )
+        run_id = (created or {}).get("id") or (created or {}).get("projectPipelineId")
+        if not run_id:
+            raise RuntimeError(f"The server did not return the new run's id: {created}")
+        details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+        return json.dumps(_run_form_envelope(run_id, details, name, "Created"), indent=2)
+    except Exception as e:
+        logger.error(f"Error creating run of pipeline {pipeline_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_run_environments(run_id: str) -> str:
+    """
+    Show the run environments you can launch this run on, with the proposed
+    execution directory for each, plus the run's current form.
+    """
+    try:
+        via_client = get_client()
+        details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+        return json.dumps(_run_form_envelope(run_id, details, details.get("name", ""), "Read"), indent=2)
+    except Exception as e:
+        logger.error(f"Error listing run environments for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
 @mcp.tool()
 def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
     """
