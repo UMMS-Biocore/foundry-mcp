@@ -1439,6 +1439,94 @@ def _fetch_featured_pipelines(via_client, search: str = "", limit: int = 20):
 
 
 @mcp.tool()
+def list_projects(name: str = "", limit: int = 20) -> str:
+    """
+    List the projects you own, newest first. Use a project id with create_run.
+    If none fits, offer create_project.
+
+    Args:
+        name: Optional text matched against the project name.
+        limit: How many to return (1-100, default 20).
+    """
+    try:
+        via_client = get_client()
+        params = {"type": "1", "take": max(1, min(int(limit), 100))}
+        if name.strip():
+            params["name"] = name.strip()
+        page = via_client.call(method="GET", endpoint="/api/v1/project/", params=params)
+        projects = [{"id": p.get("id"), "name": p.get("name"), "owner": p.get("owner")} for p in page.get("data", [])]
+        result = envelope(
+            summary=f"{len(projects)} of {page.get('total', len(projects))} projects.",
+            data={"projects": projects, "total": page.get("total")},
+            next_steps=["Pick a project id for create_run, or create_project(name) after the user confirms."],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing projects: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_project(name: str, summary: str = "") -> str:
+    """
+    Create a new private project owned by you. This writes; confirm the name
+    with the user before calling.
+
+    Args:
+        name: Project name (required).
+        summary: Optional one line description.
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("A project name is required.")
+        via_client = get_client()
+        data = {"name": name.strip()}
+        if summary:
+            data["summary"] = summary
+        project = via_client.call(method="POST", endpoint="/api/v1/project/", data=data)
+        result = envelope(
+            summary=f"Created project {project.get('name')} (id {project.get('id')}).",
+            data={"project": {"id": project.get("id"), "name": project.get("name")}},
+            next_steps=["list_pipelines(search) to choose a pipeline, then create_run(pipeline_id, project_id, name)."],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating project: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_pipelines(search: str = "", limit: int = 20) -> str:
+    """
+    Search every pipeline you can read (released, public, your own and shared
+    with your groups). For the short curated list use list_featured_pipelines.
+
+    Args:
+        search: Optional keyword matched against pipeline names and content.
+        limit: How many to return (1-100, default 20).
+    """
+    try:
+        via_client = get_client()
+        params = {"type": "1,2,3,4", "take": max(1, min(int(limit), 100))}
+        if search.strip():
+            params["searchKeyword"] = search.strip()
+        page = via_client.call(method="GET", endpoint="/api/v1/pipeline/", params=params)
+        pipelines = [
+            {"id": p.get("id"), "name": p.get("name"), "version": p.get("version"), "summary": p.get("summary")}
+            for p in page.get("data", [])
+        ]
+        result = envelope(
+            summary=f"{len(pipelines)} of {page.get('total', len(pipelines))} pipelines.",
+            data={"pipelines": pipelines, "total": page.get("total")},
+            next_steps=["create_run(pipeline_id, project_id, name) after the user confirms the pipeline and project."],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing pipelines: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
 def list_featured_pipelines(search: str = "", limit: int = 20) -> str:
     """
     Show the curated, ready-to-run pipelines — the right starting point when a

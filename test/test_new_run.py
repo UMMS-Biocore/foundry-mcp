@@ -53,3 +53,47 @@ class TestCompactRunEnvironment:
             "hostname": "hpc.example.org", "username": "jdoe",
             "defWorkdir": None, "defPublishdir": None,
         }
+
+
+class TestProjects:
+    def test_list_projects_reads_the_callers_projects(self):
+        client = _patched_client({"total": 1, "data": [{"id": 7, "name": "P", "owner": {"username": "u"}, "own": 1, "createdAt": "x"}]})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.list_projects(name="P", limit=5))
+        client.call.assert_called_once_with(
+            method="GET", endpoint="/api/v1/project/", params={"type": "1", "take": 5, "name": "P"},
+        )
+        assert out["data"]["projects"] == [{"id": 7, "name": "P", "owner": {"username": "u"}}]
+
+    def test_create_project_posts_a_private_project(self):
+        client = _patched_client({"id": 9, "name": "New"})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_project("New", summary="s"))
+        client.call.assert_called_once_with(
+            method="POST", endpoint="/api/v1/project/", data={"name": "New", "summary": "s"},
+        )
+        assert out["data"]["project"]["id"] == 9
+
+    def test_create_project_refuses_a_blank_name_without_calling(self):
+        client = _patched_client({})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_project("  "))
+        assert "error" in out
+        client.call.assert_not_called()
+
+
+class TestListPipelines:
+    def test_lists_every_pipeline_the_caller_can_read(self):
+        client = _patched_client({"total": 1, "data": [{"id": 3, "name": "RNA-seq", "summary": "s", "version": "2", "pipelineType": "x"}]})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.list_pipelines(search="rna", limit=10))
+        client.call.assert_called_once_with(
+            method="GET", endpoint="/api/v1/pipeline/",
+            params={"type": "1,2,3,4", "take": 10, "searchKeyword": "rna"},
+        )
+        assert out["data"]["pipelines"][0]["id"] == 3
+
+    def test_error_is_returned_not_raised(self):
+        client = _patched_client(side_effect=RuntimeError("boom"))
+        with patch.object(server, "get_client", return_value=client):
+            assert json.loads(server.list_pipelines()) == {"error": "boom"}
