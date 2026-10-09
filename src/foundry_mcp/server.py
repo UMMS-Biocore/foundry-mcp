@@ -1196,6 +1196,7 @@ def get_run_details(run_id: str, verbose: bool = False) -> str:
     summary (pipeline, samples, key settings, count of process-option groups).
     Pass verbose=True to get the FULL editable inputs[] and processOptions{}
     needed to build an update_run body — do this before duplicate_run/update_run.
+    For a fresh run of a pipeline, create_run returns the same form directly.
     get_run shows a run's status; this shows the settings that produced it.
     """
     try:
@@ -1943,7 +1944,8 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
             next_steps.append(
                 f"Run {best['example_run']['id']} is a working example on this "
                 f"pipeline — get_run_details(run_id='{best['example_run']['id']}', "
-                "verbose=True), then duplicate_run + update_run to adapt it."
+                "verbose=True), then duplicate_run + update_run to adapt it, or "
+                "create_run for a fresh run of the same pipeline."
             )
         next_steps.append(
             "Launching a run uses HPC compute — confirm with the user before "
@@ -3125,6 +3127,26 @@ def preflight_run(run_id: str) -> str:
             _preflight_check("empty_inputs", "pass", "All inputs have values.")
         )
 
+        # A run created from scratch launches only once both are saved.
+        checks.append(
+            _preflight_check("run_environment", "pass", f"Run environment {cluster_id} is selected.")
+            if cluster_id else
+            _preflight_check(
+                "run_environment", "fail", "No run environment is selected.",
+                "Pick one from list_run_environments(run_id) and save it with "
+                "update_run(run_environment_id=...).",
+            )
+        )
+        checks.append(
+            _preflight_check("execution_directory", "pass", f"Execution directory is {launch_dir}.")
+            if launch_dir else
+            _preflight_check(
+                "execution_directory", "fail", "No execution directory is set.",
+                "Confirm the proposed directory from list_run_environments(run_id) "
+                "with the user and save it with update_run(launch_directory=...).",
+            )
+        )
+
         # Genome build.
         build = next((i for i in inputs
                       if "genome_build" in (i["name"] or "").lower()), None)
@@ -3280,13 +3302,18 @@ _RECIPES = [
             "plan_run(pipeline_id=<chosen>) — shows only the handful of "
             "decisions that matter. Ask the user about THOSE, not about "
             "reference paths or process options.",
-            "get_run_details(run_id='<example run>', verbose=True) — the full "
-            "editable config that update_run needs.",
-            "duplicate_run(run_id='<example run>', project_id=..., "
-            "pipeline_id=...) — clone the working run.",
-            "update_run(...) on the NEW run to apply the user's answers.",
+            "list_projects() or create_project(name): pick where the run lives.",
+            "create_run(pipeline_id=<chosen>, project_id=..., name=...): a new "
+            "run of the pipeline; returns its form, your run environments and a "
+            "proposed execution directory. Works with no earlier run.",
+            "update_run(run_id='<new run>', inputs=..., run_environment_id=..., "
+            "launch_directory=..., permission=...) to apply the user's answers.",
+            "preflight_run(run_id='<new run>'): fix every failed check.",
             "initiate_run(run_id='<new run>') — launching uses HPC compute, so "
             "confirm with the user before this step.",
+            "To copy a working example's settings instead: duplicate_run(run_id="
+            "'<example run>', project_id=..., pipeline_id=...), then update_run "
+            "on the NEW run (set run_environment_id if the example's is not yours).",
         ],
     },
     {
@@ -3603,9 +3630,13 @@ def plan_run(pipeline_id: int, run_id: str = "") -> str:
             data=data,
             next_steps=[
                 "Confirm or change the values above with the user first.",
-                f"Then: duplicate_run(run_id='{example['id']}', project_id=..., "
-                f"pipeline_id={pipeline.get('id', pipeline_id)}) -> update_run "
-                "on the new run to apply the answers -> initiate_run to launch.",
+                f"Then: create_run(pipeline_id={pipeline.get('id', pipeline_id)}, "
+                "project_id=..., name=...) -> update_run with the answers, run "
+                "environment and execution directory -> preflight_run -> "
+                "initiate_run to launch.",
+                f"Or, to copy this example's settings: duplicate_run(run_id="
+                f"'{example['id']}', project_id=..., pipeline_id="
+                f"{pipeline.get('id', pipeline_id)}) -> update_run on the new run.",
                 "Call get_run_details(run_id='%s', verbose=True) for the full "
                 "editable config that update_run needs." % example["id"],
                 "Launching a run uses HPC compute — confirm with the user "

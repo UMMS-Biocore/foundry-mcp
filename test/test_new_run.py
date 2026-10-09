@@ -184,3 +184,13 @@ class TestUpdateRunEnvironment:
             out = json.loads(server.update_run("41", permission=3, launch_directory="runs/r1"))
         assert "absolute" in out["error"]
         client.call.assert_not_called()
+
+
+NEW_TOOLS = ["list_projects", "create_project", "list_pipelines", "create_run", "list_run_environments"]
+
+
+@pytest.mark.parametrize("name", NEW_TOOLS)
+def test_tool_is_registered_with_a_description(name):
+    tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+    assert name in tools
+    assert tools[name].description and tools[name].description.strip()
