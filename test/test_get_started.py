@@ -32,12 +32,17 @@ class TestGetStarted:
         recipe = next(r for r in _recipes()["data"]["recipes"]
                       if r["id"] == "start_an_analysis")
         chained = " ".join(recipe["steps"])
-        for tool in ("recommend_pipeline", "plan_run", "duplicate_run",
-                     "update_run", "initiate_run"):
+        for tool in ("recommend_pipeline", "plan_run", "create_run", "update_run",
+                     "preflight_run", "initiate_run", "duplicate_run"):
             assert tool in chained
+        # A fresh run is the main path, so it works for someone with no earlier run;
+        # copying an example's settings stays available after it.
         assert chained.index("recommend_pipeline") < chained.index("plan_run")
-        assert chained.index("plan_run") < chained.index("duplicate_run")
-        assert chained.index("duplicate_run") < chained.index("initiate_run")
+        assert chained.index("plan_run") < chained.index("create_run")
+        assert chained.index("create_run") < chained.index("update_run")
+        assert chained.index("update_run") < chained.index("preflight_run")
+        assert chained.index("preflight_run") < chained.index("initiate_run")
+        assert chained.index("initiate_run") < chained.index("duplicate_run")
 
     def test_the_failure_recipe_reaches_for_the_log(self):
         recipe = next(r for r in _recipes()["data"]["recipes"]

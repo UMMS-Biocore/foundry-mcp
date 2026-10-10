@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- **Starting a run from scratch**
+  - `list_projects`, `create_project` and `list_pipelines` find or create where a
+    run lives and which pipeline it runs.
+  - `create_run(pipeline_id, project_id, name)` creates an unlaunched run and
+    returns its form, the run environments you can launch on, and a proposed
+    execution directory for each (the environment's declared default, else
+    `/home/<login>/foundry-connect-runs/<run name>`).
+  - `list_run_environments(run_id)` shows the same for an existing run.
+  - `update_run` can now set the run environment, launch and publish
+    directories, and the run name, and sends only the fields you give it.
+    `preflight_run` reports a missing run environment or execution directory
+    before launch.
+
 ## [1.3.0] - 2026-09-30
 
 ### Added

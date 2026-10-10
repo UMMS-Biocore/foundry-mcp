@@ -1120,6 +1120,33 @@ def _strip_html(text):
     return re.sub(r"\s+", " ", html.unescape(_HTML_TAG_RE.sub(" ", text))).strip()
 
 
+_RUN_ENV_FIELDS = ("id", "name", "transport", "executor", "hostname", "username", "defWorkdir", "defPublishdir")
+_SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]")
+# A login never starts with a dot, so "." and ".." cannot climb out of /home.
+_LOGIN_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+def _compact_run_environment(env):
+    """The run environment fields a user picks by, without scheduler internals."""
+    return {key: env.get(key) for key in _RUN_ENV_FIELDS}
+
+
+def _default_execution_directory(env, run_name):
+    """Proposed execution directory for a new run, or None when the user must choose.
+
+    Order: the environment's declared default (used as is, as the web UI does), then
+    /home/<login>/foundry-connect-runs/<run name>. No usable login name means no default.
+    """
+    declared = (env.get("defWorkdir") or "").strip()
+    if declared:
+        return declared
+    login = (env.get("username") or "").strip()
+    if not _LOGIN_NAME.fullmatch(login):
+        return None
+    segment = _SAFE_SEGMENT.sub("_", (run_name or "").strip()).lstrip(".") or "run"
+    return f"/home/{login}/foundry-connect-runs/{segment}"
+
+
 def _summarize_run_details(details):
     """Distill a run's full details blob into a compact, plain-language summary
     a bench scientist can read without wading through processOptions."""
@@ -1170,6 +1197,7 @@ def get_run_details(run_id: str, verbose: bool = False) -> str:
     summary (pipeline, samples, key settings, count of process-option groups).
     Pass verbose=True to get the FULL editable inputs[] and processOptions{}
     needed to build an update_run body — do this before duplicate_run/update_run.
+    For a fresh run of a pipeline, create_run returns the same form directly.
     get_run shows a run's status; this shows the settings that produced it.
     """
     try:
@@ -1227,6 +1255,85 @@ def create_vmeta_dataset(name: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _run_form(details, run_name):
+    """Everything a user fills before launching a freshly created run."""
+    env_block = details.get("runEnvironment") or {}
+    envs = env_block.get("availableList") or []
+    return {
+        # As the server returns them (a list for Foundry pipelines, a dict for
+        # external ones), so ids and collection fields round-trip into update_run.
+        "inputs": details.get("inputs") or [],
+        "process_options": details.get("processOptions") or {},
+        "run_environments": [_compact_run_environment(e) for e in envs],
+        "selected_run_environment_id": env_block.get("selectedId"),
+        "proposed_execution_directory": {str(e.get("id")): _default_execution_directory(e, run_name) for e in envs},
+        "permission": details.get("permission"),
+        "groupId": details.get("groupId"),
+    }
+
+
+def _run_form_envelope(run_id, details, run_name, verb):
+    form = _run_form(details, run_name)
+    if form["run_environments"]:
+        summary = f"{verb} run {run_id}. Choose a run environment and confirm its execution directory."
+    else:
+        summary = (
+            f"{verb} run {run_id}, but you have no run environment you can launch on. "
+            "Add one under your profile's run environments, or ask your organization to share one."
+        )
+    return envelope(
+        summary=summary,
+        data={"run_id": run_id, **form},
+        next_steps=[
+            "Ask the user for each input, the run environment, and whether the proposed execution directory is right "
+            "(null means none could be proposed: ask for one).",
+            "update_run(run_id, inputs=..., run_environment_id=..., launch_directory=..., permission=...) after the user confirms.",
+            "preflight_run(run_id), then initiate_run(run_id) after the user confirms the launch.",
+        ],
+    )
+
+
+@mcp.tool()
+def create_run(pipeline_id: int, project_id: int, name: str) -> str:
+    """
+    Create a new, unlaunched run of a pipeline in one of your projects and
+    return its form: inputs, process options, the run environments you can
+    launch on, and a proposed execution directory per environment. This
+    writes; confirm the pipeline, project and run name with the user first.
+    Nothing is launched.
+    """
+    try:
+        via_client = get_client()
+        created = via_client.call(
+            method="POST",
+            endpoint="/api/v1/run/new-run-attempt",
+            data={"pipelineId": pipeline_id, "projectId": project_id, "name": name},
+        )
+        run_id = (created or {}).get("id") or (created or {}).get("projectPipelineId")
+        if not run_id:
+            raise RuntimeError(f"The server did not return the new run's id: {created}")
+        details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+        return json.dumps(_run_form_envelope(run_id, details, name, "Created"), indent=2)
+    except Exception as e:
+        logger.error(f"Error creating run of pipeline {pipeline_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_run_environments(run_id: str) -> str:
+    """
+    Show the run environments you can launch this run on, with the proposed
+    execution directory for each, plus the run's current form.
+    """
+    try:
+        via_client = get_client()
+        details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+        return json.dumps(_run_form_envelope(run_id, details, details.get("name", ""), "Read"), indent=2)
+    except Exception as e:
+        logger.error(f"Error listing run environments for run {run_id}: {e}")
+        return json.dumps({"error": str(e)})
+
+
 @mcp.tool()
 def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
     """
@@ -1253,10 +1360,15 @@ def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _validate_update_run(inputs, process_options, permission, group_id):
+def _validate_update_run(inputs, process_options, permission, group_id, launch_directory=None):
     """Raise ValueError if the update_run body would be rejected by the server."""
     if permission is None:
         raise ValueError("'permission' is required")
+    if launch_directory and not launch_directory.startswith("/"):
+        raise ValueError(
+            "launch_directory must be an absolute path on the run environment, "
+            "for example /home/<login>/foundry-connect-runs/<run>."
+        )
     if permission == 15 and group_id is None:
         raise ValueError("'groupId' is required when permission is GroupShared (15)")
     for i, inp in enumerate(inputs or []):
@@ -1283,33 +1395,48 @@ def _validate_update_run(inputs, process_options, permission, group_id):
 @mcp.tool()
 def update_run(
     run_id: str,
-    inputs: list,
-    process_options: dict,
-    permission: int,
+    inputs: list = None,
+    process_options: dict = None,
+    permission: int = None,
     group_id: int = None,
+    run_environment_id: int = None,
+    launch_directory: str = None,
+    publish_dir: str = None,
+    name: str = None,
 ) -> str:
     """
-    Patch a run's inputs and processOptions (PATCH /save). `permission` is
-    REQUIRED (echo it from get_run_details(run_id, verbose=True)); `group_id`
-    is REQUIRED only when `permission` is 15 (GroupShared) — otherwise it
-    may be omitted/None. No input `value` may be an empty string — use "NA"
-    or omit the input. Within one processOptions entry, all spreadsheet
-    (list) columns must be equal length. This mutates the run; confirm with
-    the user before calling.
+    Save a run before launch (PATCH /save). Send only what changes. On a
+    Foundry pipeline, inputs merge with the saved ones; on an external
+    (nf-core) pipeline the inputs dict is REPLACED whole, so send the complete
+    dict from create_run's form. process_options always REPLACES the whole
+    set, so send it complete or leave it out. `permission` is REQUIRED on every call
+    (echo it from create_run or get_run_details(run_id, verbose=True));
+    `group_id` is REQUIRED only when `permission` is 15 (GroupShared). A new
+    run cannot launch until run_environment_id and launch_directory are
+    saved: take them from create_run or list_run_environments and show the
+    proposed directory to the user first. No input `value` may be an empty
+    string; use "NA" or omit the input. Within one processOptions entry, all
+    spreadsheet (list) columns must be equal length. This mutates the run;
+    confirm with the user before calling.
     """
     try:
-        _validate_update_run(inputs, process_options, permission, group_id)
+        _validate_update_run(inputs, process_options, permission, group_id, launch_directory)
         via_client = get_client()
-        saved = via_client.call(
-            method="PATCH",
-            endpoint=f"/api/v1/run/{run_id}/save",
-            data={
-                "inputs": inputs,
-                "processOptions": process_options,
-                "permission": permission,
-                "groupId": group_id,
-            },
-        )
+        data = {}
+        if inputs is not None:
+            data["inputs"] = inputs
+        if process_options is not None:
+            data["processOptions"] = process_options
+        data["permission"] = permission
+        data["groupId"] = group_id
+        optional = {
+            "runEnvironmentId": run_environment_id,
+            "launchDirectory": launch_directory,
+            "publishDir": publish_dir,
+            "name": name,
+        }
+        data.update({key: value for key, value in optional.items() if value is not None})
+        saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
         return json.dumps(saved, indent=2)
     except Exception as e:
         logger.error(f"Error updating run {run_id}: {e}")
@@ -1410,6 +1537,94 @@ def _fetch_featured_pipelines(via_client, search: str = "", limit: int = 20):
     rows = response.get("data", []) if isinstance(response, dict) else []
     total = response.get("total", len(rows)) if isinstance(response, dict) else len(rows)
     return rows, total
+
+
+@mcp.tool()
+def list_projects(name: str = "", limit: int = 20) -> str:
+    """
+    List the projects you own, newest first. Use a project id with create_run.
+    If none fits, offer create_project.
+
+    Args:
+        name: Optional text matched against the project name.
+        limit: How many to return (1-100, default 20).
+    """
+    try:
+        via_client = get_client()
+        params = {"type": "1", "take": max(1, min(int(limit), 100))}
+        if name.strip():
+            params["name"] = name.strip()
+        page = via_client.call(method="GET", endpoint="/api/v1/project/", params=params)
+        projects = [{"id": p.get("id"), "name": p.get("name"), "owner": p.get("owner")} for p in page.get("data", [])]
+        result = envelope(
+            summary=f"{len(projects)} of {page.get('total', len(projects))} projects.",
+            data={"projects": projects, "total": page.get("total")},
+            next_steps=["Pick a project id for create_run, or create_project(name) after the user confirms."],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing projects: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_project(name: str, summary: str = "") -> str:
+    """
+    Create a new private project owned by you. This writes; confirm the name
+    with the user before calling.
+
+    Args:
+        name: Project name (required).
+        summary: Optional one line description.
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("A project name is required.")
+        via_client = get_client()
+        data = {"name": name.strip()}
+        if summary:
+            data["summary"] = summary
+        project = via_client.call(method="POST", endpoint="/api/v1/project/", data=data)
+        result = envelope(
+            summary=f"Created project {project.get('name')} (id {project.get('id')}).",
+            data={"project": {"id": project.get("id"), "name": project.get("name")}},
+            next_steps=["list_pipelines(search) to choose a pipeline, then create_run(pipeline_id, project_id, name)."],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating project: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def list_pipelines(search: str = "", limit: int = 20) -> str:
+    """
+    Search every pipeline you can read (released, public, your own and shared
+    with your groups). For the short curated list use list_featured_pipelines.
+
+    Args:
+        search: Optional keyword matched against pipeline names and content.
+        limit: How many to return (1-100, default 20).
+    """
+    try:
+        via_client = get_client()
+        params = {"type": "1,2,3,4", "take": max(1, min(int(limit), 100))}
+        if search.strip():
+            params["searchKeyword"] = search.strip()
+        page = via_client.call(method="GET", endpoint="/api/v1/pipeline/", params=params)
+        pipelines = [
+            {"id": p.get("id"), "name": p.get("name"), "version": p.get("version"), "summary": p.get("summary")}
+            for p in page.get("data", [])
+        ]
+        result = envelope(
+            summary=f"{len(pipelines)} of {page.get('total', len(pipelines))} pipelines.",
+            data={"pipelines": pipelines, "total": page.get("total")},
+            next_steps=["create_run(pipeline_id, project_id, name) after the user confirms the pipeline and project."],
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing pipelines: {e}")
+        return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
@@ -1731,7 +1946,8 @@ def recommend_pipeline(goal: str, limit: int = 3) -> str:
             next_steps.append(
                 f"Run {best['example_run']['id']} is a working example on this "
                 f"pipeline — get_run_details(run_id='{best['example_run']['id']}', "
-                "verbose=True), then duplicate_run + update_run to adapt it."
+                "verbose=True), then duplicate_run + update_run to adapt it, or "
+                "create_run for a fresh run of the same pipeline."
             )
         next_steps.append(
             "Launching a run uses HPC compute — confirm with the user before "
@@ -2913,6 +3129,39 @@ def preflight_run(run_id: str) -> str:
             _preflight_check("empty_inputs", "pass", "All inputs have values.")
         )
 
+        # A run created from scratch launches only once both are saved.
+        usable_ids = {e.get("id") for e in run_env.get("availableList") or []}
+        if not usable_ids:
+            checks.append(_preflight_check(
+                "run_environment", "fail", "You have no run environment you can launch on.",
+                "Add one under your profile's run environments, or ask your "
+                "organization to share one.",
+            ))
+        elif not cluster_id:
+            checks.append(_preflight_check(
+                "run_environment", "fail", "No run environment is selected.",
+                "Pick one from list_run_environments(run_id) and save it with "
+                "update_run(run_environment_id=...).",
+            ))
+        elif cluster_id not in usable_ids:
+            checks.append(_preflight_check(
+                "run_environment", "fail",
+                f"The selected run environment {cluster_id} is not one you can launch on.",
+                "A copied run keeps its source's environment. Pick one of yours from "
+                "list_run_environments(run_id) and save it with update_run(run_environment_id=...).",
+            ))
+        else:
+            checks.append(_preflight_check("run_environment", "pass", f"Run environment {cluster_id} is selected."))
+        checks.append(
+            _preflight_check("execution_directory", "pass", f"Execution directory is {launch_dir}.")
+            if launch_dir else
+            _preflight_check(
+                "execution_directory", "fail", "No execution directory is set.",
+                "Confirm the proposed directory from list_run_environments(run_id) "
+                "with the user and save it with update_run(launch_directory=...).",
+            )
+        )
+
         # Genome build.
         build = next((i for i in inputs
                       if "genome_build" in (i["name"] or "").lower()), None)
@@ -3068,13 +3317,18 @@ _RECIPES = [
             "plan_run(pipeline_id=<chosen>) — shows only the handful of "
             "decisions that matter. Ask the user about THOSE, not about "
             "reference paths or process options.",
-            "get_run_details(run_id='<example run>', verbose=True) — the full "
-            "editable config that update_run needs.",
-            "duplicate_run(run_id='<example run>', project_id=..., "
-            "pipeline_id=...) — clone the working run.",
-            "update_run(...) on the NEW run to apply the user's answers.",
+            "list_projects() or create_project(name): pick where the run lives.",
+            "create_run(pipeline_id=<chosen>, project_id=..., name=...): a new "
+            "run of the pipeline; returns its form, your run environments and a "
+            "proposed execution directory. Works with no earlier run.",
+            "update_run(run_id='<new run>', inputs=..., run_environment_id=..., "
+            "launch_directory=..., permission=...) to apply the user's answers.",
+            "preflight_run(run_id='<new run>'): fix every failed check.",
             "initiate_run(run_id='<new run>') — launching uses HPC compute, so "
             "confirm with the user before this step.",
+            "To copy a working example's settings instead: duplicate_run(run_id="
+            "'<example run>', project_id=..., pipeline_id=...), then update_run "
+            "on the NEW run (set run_environment_id if the example's is not yours).",
         ],
     },
     {
@@ -3391,9 +3645,13 @@ def plan_run(pipeline_id: int, run_id: str = "") -> str:
             data=data,
             next_steps=[
                 "Confirm or change the values above with the user first.",
-                f"Then: duplicate_run(run_id='{example['id']}', project_id=..., "
-                f"pipeline_id={pipeline.get('id', pipeline_id)}) -> update_run "
-                "on the new run to apply the answers -> initiate_run to launch.",
+                f"Then: create_run(pipeline_id={pipeline.get('id', pipeline_id)}, "
+                "project_id=..., name=...) -> update_run with the answers, run "
+                "environment and execution directory -> preflight_run -> "
+                "initiate_run to launch.",
+                f"Or, to copy this example's settings: duplicate_run(run_id="
+                f"'{example['id']}', project_id=..., pipeline_id="
+                f"{pipeline.get('id', pipeline_id)}) -> update_run on the new run.",
                 "Call get_run_details(run_id='%s', verbose=True) for the full "
                 "editable config that update_run needs." % example["id"],
                 "Launching a run uses HPC compute — confirm with the user "

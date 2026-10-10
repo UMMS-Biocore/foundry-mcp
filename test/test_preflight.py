@@ -27,7 +27,7 @@ def _details(inputs=None, launch_dir=LAUNCH_DIR):
         "runUUID": UUID,
         "launchDirectory": launch_dir,
         "mainPipeline": {"id": 1405, "name": "RNA-seq Pipeline", "version": "2.7.4"},
-        "runEnvironment": {"selectedId": 550, "availableList": []},
+        "runEnvironment": {"selectedId": 550, "availableList": [{"id": 550}]},
         "inputs": inputs if inputs is not None else DEFAULT_INPUTS,
         "processOptions": {},
     }
@@ -206,3 +206,38 @@ class TestPreflightRun:
         with patch.object(server, "get_client", return_value=client):
             result = server.preflight_run("12194")
         assert json.loads(result) == {"error": "boom"}
+
+
+class TestPreflightLaunchGates:
+    """A run created from scratch has no environment or directory until update_run sets them."""
+
+    @staticmethod
+    def _check(parsed, check_id):
+        return next(c for c in parsed["data"]["checks"] if c["id"] == check_id)
+
+    def test_missing_environment_and_directory_fail_by_name(self):
+        details = _details(launch_dir=None)
+        details["runEnvironment"] = {"selectedId": None, "availableList": []}
+        parsed, _ = _preflight(details=details, files=ALL_GOOD)
+        assert self._check(parsed, "run_environment")["status"] == "fail"
+        assert self._check(parsed, "execution_directory")["status"] == "fail"
+        assert parsed["data"]["ok"] is False
+
+    def test_set_environment_and_directory_pass(self):
+        parsed, _ = _preflight(files=ALL_GOOD)
+        assert self._check(parsed, "run_environment")["status"] == "pass"
+        assert self._check(parsed, "execution_directory")["status"] == "pass"
+
+    def test_an_environment_you_cannot_launch_on_fails(self):
+        details = _details()
+        details["runEnvironment"] = {"selectedId": 550, "availableList": [{"id": 777}]}
+        parsed, _ = _preflight(details=details, files=ALL_GOOD)
+        check = self._check(parsed, "run_environment")
+        assert check["status"] == "fail"
+        assert "not one you can launch on" in check["detail"]
+
+    def test_no_usable_environment_is_named(self):
+        details = _details()
+        details["runEnvironment"] = {"selectedId": None, "availableList": []}
+        parsed, _ = _preflight(details=details, files=ALL_GOOD)
+        assert "no run environment you can launch on" in self._check(parsed, "run_environment")["detail"]
