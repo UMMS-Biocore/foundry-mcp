@@ -15,6 +15,16 @@
     directories, and the run name, and sends only the fields you give it.
     `preflight_run` reports a missing run environment or execution directory
     before launch.
+- **Task resources for a run**
+  - `update_run(exec_settings=...)` sets the queue, memory, cpu, time and
+    scheduler options every task asks for (`globalExec`) and per process
+    overrides (`processExec`), in the shape `get_run_details(verbose=True)`
+    reports, so settings copied from a run that worked can be saved as is.
+  - `update_run(singularity_options=...)` sets the Singularity run options,
+    for example extra `-B` binds, and keeps the run's image.
+  - `preflight_run` warns (`executor_resources`) when tasks go to a batch
+    scheduler such as LSF or Slurm and neither the run nor its environment
+    sets memory, since the scheduler's site default can kill large tasks.
 
 ### Fixed
 - `list_pipelines` returned nothing for a user who owns no pipelines. It now
@@ -25,6 +35,9 @@
   required ones first. A fresh run has no saved inputs, so the form used to
   show none.
 - `create_project` now reports the project's name instead of `None`.
+- `update_run` no longer refuses a call that leaves out `permission`. It
+  keeps the run's saved permission and group, so a client changing only the
+  inputs or the environment does not have to look them up first.
 
 ## [1.3.0] - 2026-09-30
 

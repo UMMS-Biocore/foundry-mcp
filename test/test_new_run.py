@@ -224,12 +224,41 @@ class TestUpdateRunEnvironment:
             data={"inputs": [{"name": "a", "value": "b", "type": "input"}], "processOptions": {"g": {}}, "permission": 3, "groupId": None},
         )
 
-    def test_permission_still_required(self):
-        client = _patched_client({})
+    @staticmethod
+    def _details_client(details):
+        client = MagicMock()
+        client.call.side_effect = lambda **kw: details if kw["endpoint"].endswith("/details") else ""
+        return client
+
+    def test_permission_defaults_to_the_saved_one(self):
+        client = self._details_client({"permission": 3, "groupId": None})
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.update_run("41", run_environment_id=550))
-        assert "error" in out
-        client.call.assert_not_called()
+        assert "error" not in out
+        assert client.call.call_args_list[-1].kwargs == {
+            "method": "PATCH", "endpoint": "/api/v1/run/41/save",
+            "data": {"permission": 3, "groupId": None, "runEnvironmentId": 550},
+        }
+
+    def test_a_group_shared_run_keeps_its_saved_group(self):
+        client = self._details_client({"permission": 15, "groupId": 7})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run("41", name="r2")
+        data = client.call.call_args_list[-1].kwargs["data"]
+        assert (data["permission"], data["groupId"]) == (15, 7)
+
+    def test_a_run_with_no_saved_permission_is_refused(self):
+        client = self._details_client({})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.update_run("41", name="r2"))
+        assert "permission" in out["error"]
+        assert not any(c.kwargs["method"] == "PATCH" for c in client.call.call_args_list)
+
+    def test_a_given_permission_skips_the_lookup(self):
+        client = self._details_client({"permission": 63})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run("41", permission=3, name="r2")
+        assert [c.kwargs["method"] for c in client.call.call_args_list] == ["PATCH"]
 
     def test_relative_launch_directory_is_refused(self):
         client = _patched_client({})
