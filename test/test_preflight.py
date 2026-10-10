@@ -241,3 +241,96 @@ class TestPreflightLaunchGates:
         details["runEnvironment"] = {"selectedId": None, "availableList": []}
         parsed, _ = _preflight(details=details, files=ALL_GOOD)
         assert "no run environment you can launch on" in self._check(parsed, "run_environment")["detail"]
+
+
+def _with_definitions(client, parameter_list):
+    """Serve GET /run/{id}/parameter-list on top of a _client mock."""
+    base = client.call.side_effect
+
+    def _call(**kwargs):
+        if kwargs.get("endpoint", "").endswith("/parameter-list"):
+            return parameter_list
+        return base(**kwargs)
+
+    client.call.side_effect = _call
+    return client
+
+
+def _preflight_with(parameter_list, **kwargs):
+    client = _with_definitions(_client(**kwargs), parameter_list)
+    with patch.object(server, "get_client", return_value=client):
+        return json.loads(server.preflight_run("12194"))
+
+
+RNASEQ_PARAMS = {"pipelineType": "via", "inputs": {
+    "pipe": {
+        "schema": [{"varName": "params.run_STAR", "type": "dropdown", "defaultVal": "yes"}],
+        "inputNodes": [
+            {"varName": "params.reads", "qualifier": "set", "optional": True},
+            {"varName": "params.bam_files", "qualifier": "set", "optional": True},
+            {"varName": "params.mate", "qualifier": "val"},
+            {"varName": "params.genome_build", "qualifier": "val"},
+        ],
+    },
+    "processes": {},
+}}
+
+
+class TestPreflightAgainstDefinitions:
+    """#30 (c) and (d): judge the saved inputs against what the pipeline takes."""
+
+    def _check(self, parsed, check_id):
+        return next(c for c in parsed["data"]["checks"] if c["id"] == check_id)
+
+    def test_no_saved_inputs_fails_naming_required_ones_without_a_default(self):
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=[]), files=ALL_GOOD)
+        check = self._check(parsed, "empty_inputs")
+        assert check["status"] == "fail"
+        assert "mate" in check["detail"] and "genome_build" in check["detail"]
+        assert "run_STAR" not in check["detail"]  # it has a default
+        assert parsed["data"]["ok"] is False
+
+    def test_required_inputs_with_values_pass(self):
+        inputs = [_inp("mate", "single"), _inp("genome_build", "hg38"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        assert self._check(parsed, "empty_inputs")["status"] == "pass"
+        assert self._check(parsed, "data_inputs")["status"] == "pass"
+
+    def test_no_data_input_fails_listing_the_candidates(self):
+        inputs = [_inp("mate", "single"), _inp("genome_build", "hg38")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        check = self._check(parsed, "data_inputs")
+        assert check["status"] == "fail"
+        assert "reads" in check["detail"] and "bam_files" in check["detail"]
+        assert check["fix"]
+
+    def test_either_data_input_is_enough(self):
+        inputs = [_inp("mate", "single"), _inp("genome_build", "hg38"), _inp("bam_files", "/d/bams")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        assert self._check(parsed, "data_inputs")["status"] == "pass"
+
+    def test_external_pipeline_sections_count_as_saved(self):
+        params = {"pipelineType": "nfcore", "inputs": {"main": {"schema": [
+            {"varName": "params.input", "type": "input", "file": True},
+            {"varName": "params.outdir", "type": "input"},
+        ]}}}
+        details = _details(inputs={"main": {"input": "/d/sheet.csv", "outdir": "/d/out"}})
+        parsed = _preflight_with(params, details=details, files=ALL_GOOD)
+        assert self._check(parsed, "empty_inputs")["status"] == "pass"
+        assert self._check(parsed, "data_inputs")["status"] == "pass"
+
+    def test_unreadable_definitions_skip_the_definition_checks(self):
+        client = _client(details=_details(inputs=[]), files=ALL_GOOD)
+        base = client.call.side_effect
+
+        def _call(**kwargs):
+            if kwargs.get("endpoint", "").endswith("/parameter-list"):
+                raise RuntimeError("boom")
+            return base(**kwargs)
+
+        client.call.side_effect = _call
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.preflight_run("12194"))
+        assert "error" not in parsed
+        assert not any(c["id"] == "data_inputs" for c in parsed["data"]["checks"])

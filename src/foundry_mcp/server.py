@@ -1444,6 +1444,46 @@ def duplicate_run(run_id: str, project_id: int, pipeline_id: int) -> str:
         return json.dumps({"error": str(e)})
 
 
+# The types a saved Foundry run input may have. input_definitions report the
+# pipeline's own kinds (val, dropdown, file, ...), which the server refuses.
+_SAVED_INPUT_TYPES = ("input", "collection", "vmetaCollection")
+
+
+def _saved_input_type(inp):
+    if inp.get("type") in _SAVED_INPUT_TYPES:
+        return inp["type"]
+    if inp.get("vmetaCollectionId"):
+        return "vmetaCollection"
+    if inp.get("collectionId"):
+        return "collection"
+    return "input"
+
+
+def _normalize_run_inputs(inputs):
+    """Give every Foundry run input a type the server accepts; leave the
+    external pipeline dict shape alone."""
+    if not isinstance(inputs, list):
+        return inputs
+    return [{**inp, "type": _saved_input_type(inp)} if isinstance(inp, dict) else inp
+            for inp in inputs]
+
+
+def _saved_fields(data):
+    """What update_run sent, named rather than repeated in full."""
+    saved = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+        if key == "inputs" and isinstance(value, list):
+            value = [i.get("name") for i in value if isinstance(i, dict)]
+        elif key == "inputs" and isinstance(value, dict):
+            value = {section: sorted(v) if isinstance(v, dict) else v for section, v in value.items()}
+        elif key == "processOptions":
+            value = sorted(value)
+        saved[key] = value
+    return saved
+
+
 def _validate_update_run(inputs, process_options, permission, group_id, launch_directory=None):
     """Raise ValueError if the update_run body would be rejected by the server."""
     if permission is None:
@@ -1455,7 +1495,8 @@ def _validate_update_run(inputs, process_options, permission, group_id, launch_d
         )
     if permission == 15 and group_id is None:
         raise ValueError("'groupId' is required when permission is GroupShared (15)")
-    for i, inp in enumerate(inputs or []):
+    # An external pipeline's inputs are a {section: {name: value}} dict.
+    for i, inp in enumerate(inputs if isinstance(inputs, list) else []):
         if not isinstance(inp, dict):
             raise ValueError(f"inputs[{i}] must be an object")
         if inp.get("value") == "":
@@ -1498,7 +1539,10 @@ def update_run(
     `group_id` is REQUIRED only when `permission` is 15 (GroupShared). A new
     run cannot launch until run_environment_id and launch_directory are
     saved: take them from create_run or list_run_environments and show the
-    proposed directory to the user first. No input `value` may be an empty
+    proposed directory to the user first. A Foundry input is {name, value};
+    its type defaults to 'input' ('vmetaCollection' when vmetaCollectionId is
+    given, 'collection' when collectionId is), so the types in create_run's
+    input_definitions are never copied. No input `value` may be an empty
     string; use "NA" or omit the input. Within one processOptions entry, all
     spreadsheet (list) columns must be equal length. This mutates the run;
     confirm with the user before calling.
@@ -1508,7 +1552,7 @@ def update_run(
         via_client = get_client()
         data = {}
         if inputs is not None:
-            data["inputs"] = inputs
+            data["inputs"] = _normalize_run_inputs(inputs)
         if process_options is not None:
             data["processOptions"] = process_options
         data["permission"] = permission
@@ -1521,7 +1565,14 @@ def update_run(
         }
         data.update({key: value for key, value in optional.items() if value is not None})
         saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
-        return json.dumps(saved, indent=2)
+        if saved:
+            return json.dumps(saved, indent=2)
+        # The server answers a successful save with an empty body.
+        return json.dumps(envelope(
+            summary=f"Saved run {run_id}.",
+            data={"run_id": run_id, "saved": _saved_fields(data)},
+            next_steps=["preflight_run(run_id) to check the run before launching it."],
+        ), indent=2)
     except Exception as e:
         logger.error(f"Error updating run {run_id}: {e}")
         return json.dumps({"error": str(e)})
@@ -3076,6 +3127,46 @@ _PREFLIGHT_UNLAUNCHED = ("init", "Waiting", "NotSubmitted", "")
 _PREFLIGHT_MIN_REPLICATES = 2
 
 
+# Input definition types that carry the run's data files.
+_DATA_INPUT_TYPES = ("file", "set", "singleFile")
+
+
+def _preflight_definitions(via_client, run_id):
+    """The pipeline's input definitions, or None when they cannot be read."""
+    try:
+        return _input_definitions(via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list"))
+    except Exception as e:
+        logger.info(f"Pre-flight could not read input definitions: {e}")
+        return None
+
+
+def _filled(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() not in _PREFLIGHT_PLACEHOLDERS
+    return True
+
+
+def _filled_input_names(inputs):
+    """Names of saved inputs that hold a value, from either run-input shape."""
+    names = set()
+    if isinstance(inputs, dict):
+        for key, val in inputs.items():
+            if isinstance(val, dict) and "value" not in val:
+                # External pipeline section: {name: value}.
+                names.update(n for n, v in val.items() if _filled(v))
+            elif _filled(val.get("value") if isinstance(val, dict) else val):
+                names.add(key)
+        return names
+    for inp in inputs or []:
+        if isinstance(inp, dict) and (inp.get("vmetaCollectionId") or inp.get("collectionId")
+                                      or _filled(inp.get("value"))):
+            names.add(inp.get("name"))
+    return names
+
+
 def _preflight_check(check_id, status, detail, fix="", **extra):
     check = {"id": check_id, "status": status, "detail": detail, "fix": fix}
     check.update(extra)
@@ -3212,19 +3303,44 @@ def preflight_run(run_id: str) -> str:
         dataset_check, dataset_names = _preflight_dataset(via_client, sample_inputs)
         checks.append(dataset_check)
 
-        # Empty / placeholder values.
+        # Empty / placeholder values, and required inputs never saved at all.
         blanks = [i["name"] for i in inputs
                   if isinstance(i["value"], str)
                   and i["value"].strip() in _PREFLIGHT_PLACEHOLDERS]
+        definitions = _preflight_definitions(via_client, run_id)
+        filled = _filled_input_names(details.get("inputs"))
+        unset = [d["name"] for d in definitions or []
+                 if d["required"] and d["default"] in (None, "")
+                 and d["name"] not in filled and d["name"] not in blanks]
+        problems = []
+        if blanks:
+            problems.append(f"{len(blanks)} input(s) have no value: {', '.join(blanks)}.")
+        if unset:
+            problems.append(f"{len(unset)} required input(s) are not set: {', '.join(unset)}.")
         checks.append(
             _preflight_check(
-                "empty_inputs", "fail",
-                f"{len(blanks)} input(s) have no value: {', '.join(blanks)}.",
+                "empty_inputs", "fail", " ".join(problems),
                 "Set them with update_run — the pipeline treats these as "
                 "missing and may skip steps rather than fail loudly.",
-            ) if blanks else
+            ) if problems else
             _preflight_check("empty_inputs", "pass", "All inputs have values.")
         )
+
+        # A pipeline may take its data from one of several optional inputs
+        # (reads or bam_files), so none is required, yet one must be set.
+        data_names = [d["name"] for d in definitions or [] if d["type"] in _DATA_INPUT_TYPES]
+        if data_names:
+            given = [n for n in data_names if n in filled]
+            checks.append(
+                _preflight_check("data_inputs", "pass", f"Data input set: {', '.join(given)}.")
+                if given else
+                _preflight_check(
+                    "data_inputs", "fail",
+                    f"No data input is set (one of: {', '.join(data_names)}).",
+                    "Set one with update_run, for example a sample dataset as "
+                    "{name, vmetaCollectionId} from search_datasets.",
+                )
+            )
 
         # A run created from scratch launches only once both are saved.
         usable_ids = {e.get("id") for e in run_env.get("availableList") or []}
