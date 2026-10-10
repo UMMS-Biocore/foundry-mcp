@@ -3,7 +3,10 @@ warning for a batch scheduler run that asks for no memory."""
 import json
 from unittest.mock import MagicMock, patch
 
+import anyio
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from src.foundry_mcp import server
 
@@ -23,7 +26,10 @@ def _client(details=None):
 def _update(details=None, **kwargs):
     client = _client(details)
     with patch.object(server, "get_client", return_value=client):
-        out = json.loads(server.update_run("41", permission=3, **kwargs))
+        try:
+            out = json.loads(server.update_run("41", permission=3, **kwargs))
+        except ToolError as e:
+            out = json.loads(str(e))
     return out, client
 
 
@@ -74,8 +80,18 @@ class TestExecSettings:
         _, client = _update(exec_settings=settings)
         assert _saved_body(client)["execEach"]["procGnum-3"]["check"] is False
 
+    @pytest.mark.parametrize("key", ["procGnum-31p264", "procGnum-21p216_16", "procGnum-2p12_4_7"])
+    def test_a_module_process_key_is_accepted(self, key):
+        # get_run_details reports a process inside a module as procGnum-<n>p<module>[_<child>...].
+        out, client = _update(exec_settings={"processExec": {"options": {key: {"memory": "72"}}}})
+        assert "error" not in out
+        assert _saved_body(client)["execEach"][key]["memory"] == "72"
+
     @pytest.mark.parametrize("settings, fragment", [
         ({"processExec": {"options": {"STAR": {"memory": "200"}}}}, "procGnum-"),
+        ({"processExec": {"options": {"procGnum-31p": {"memory": "72"}}}}, "procGnum-"),
+        ({"processExec": {"options": {"procGnum-31p264_": {"memory": "72"}}}}, "procGnum-"),
+        ({"processExec": {"options": {"procGnum-31_264": {"memory": "72"}}}}, "procGnum-"),
         ({"globalExec": {"options": {"ram": "32"}}}, "ram"),
         ({"docker": {"enabled": True}}, "docker"),
         ({"globalExec": {"enabled": "yes"}}, "enabled"),
@@ -92,6 +108,20 @@ class TestExecSettings:
         saved = out["data"]["saved"]
         assert saved["execAll"]["memory"] == "32"
         assert saved["execEach"] == ["procGnum-12"]
+
+
+def test_a_refusal_reaches_the_client_as_an_error():
+    """The MCP reply to a refused save carries isError, so a client cannot read it as success."""
+    async def call():
+        async with create_connected_server_and_client_session(server.mcp._mcp_server) as session:
+            return await session.call_tool("update_run", {
+                "run_id": "41", "permission": 3,
+                "exec_settings": {"processExec": {"options": {"STAR": {"memory": "200"}}}}})
+
+    with patch.object(server, "get_client", return_value=_client()):
+        result = anyio.run(call)
+    assert result.isError is True
+    assert "procGnum-" in result.content[0].text
 
 
 SINGULARITY_DETAILS = {"advancedSettings": {"singularity": {
