@@ -1478,10 +1478,100 @@ def _saved_fields(data):
             value = [i.get("name") for i in value if isinstance(i, dict)]
         elif key == "inputs" and isinstance(value, dict):
             value = {section: sorted(v) if isinstance(v, dict) else v for section, v in value.items()}
-        elif key == "processOptions":
+        elif key in ("processOptions", "execEach"):
             value = sorted(value)
         saved[key] = value
     return saved
+
+
+# Executor settings: get_run_details(verbose=True) reports them as
+# advancedSettings.globalExec / processExec; PATCH /save takes execAll / execEach.
+_GLOBAL_EXEC_KEYS = {"queue": "queue", "memory": "memory", "cpu": "cpu", "time": "time", "options": "options",
+                     "job_queue": "queue", "job_memory": "memory", "job_cpu": "cpu", "job_time": "time",
+                     "job_clu_opt": "options"}
+_PROCESS_EXEC_KEYS = {"queue": "queue", "memory": "memory", "cpu": "cpu", "time": "time", "options": "options",
+                      "opt": "options"}
+_EXEC_FIELDS = ("queue", "memory", "cpu", "time", "options")
+
+
+def _exec_values(options, keys, where):
+    """Map one executor row onto the save field names, values as strings."""
+    if not isinstance(options, dict):
+        raise ValueError(f"{where} must be an object")
+    row = {field: "" for field in _EXEC_FIELDS}
+    for key, value in options.items():
+        if key == "check":
+            continue
+        if key not in keys:
+            raise ValueError(f"{where} has an unknown field '{key}'; use {', '.join(_EXEC_FIELDS)}")
+        if value is not None and not isinstance(value, (str, int, float)):
+            raise ValueError(f"{where}.{key} must be text or a number")
+        row[keys[key]] = "" if value is None else str(value)
+    return row
+
+
+def _exec_enabled(block, where):
+    enabled = block.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{where}.enabled must be true or false")
+    return enabled
+
+
+def _exec_settings_body(exec_settings):
+    """Turn update_run's exec_settings into PATCH /save fields."""
+    if not isinstance(exec_settings, dict):
+        raise ValueError("exec_settings must be an object with globalExec and/or processExec")
+    unknown = set(exec_settings) - {"globalExec", "processExec"}
+    if unknown:
+        raise ValueError(
+            f"exec_settings takes only globalExec and processExec, not {', '.join(sorted(unknown))}; "
+            "Singularity bind options go in singularity_options"
+        )
+    body = {}
+    block = exec_settings.get("globalExec")
+    if block is not None:
+        if not isinstance(block, dict):
+            raise ValueError("globalExec must be an object")
+        body["execAllCheck"] = _exec_enabled(block, "globalExec")
+        if block.get("options") is not None:
+            body["execAll"] = _exec_values(block["options"], _GLOBAL_EXEC_KEYS, "globalExec.options")
+    block = exec_settings.get("processExec")
+    if block is not None:
+        if not isinstance(block, dict):
+            raise ValueError("processExec must be an object")
+        body["execEachCheck"] = _exec_enabled(block, "processExec")
+        options = block.get("options")
+        if options is not None:
+            if not isinstance(options, dict):
+                raise ValueError("processExec.options must be an object keyed by procGnum-<n>")
+            each = {}
+            for key, row in options.items():
+                if not re.fullmatch(r"procGnum-\d+", str(key)):
+                    raise ValueError(
+                        f"processExec.options key '{key}' must be procGnum-<n>, "
+                        "as get_run_details(verbose=True) reports it"
+                    )
+                where = f"processExec.options['{key}']"
+                values = _exec_values(row, _PROCESS_EXEC_KEYS, where)
+                check = row.get("check", True)
+                check = check if isinstance(check, bool) else str(check).lower() in ("on", "true")
+                each[key] = {"check": check, **values}
+            body["execEach"] = each
+    return body
+
+
+def _singularity_body(via_client, run_id, singularity_options):
+    """Save Singularity run options with the run's current image, which the
+    server would otherwise overwrite."""
+    details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+    singularity = ((details or {}).get("advancedSettings") or {}).get("singularity") or {}
+    image = singularity.get("image")
+    if not singularity.get("enabled") or not image:
+        raise ValueError(
+            f"Run {run_id} does not use a Singularity image, so singularity_options has nothing to apply to. "
+            "Save the run environment first; a Singularity environment fills in the pipeline's image."
+        )
+    return {"useSingularity": True, "singularityConfig": {"imagePath": image, "runOptions": singularity_options}}
 
 
 def _validate_update_run(inputs, process_options, permission, group_id, launch_directory=None):
@@ -1528,6 +1618,8 @@ def update_run(
     launch_directory: str = None,
     publish_dir: str = None,
     name: str = None,
+    exec_settings: dict = None,
+    singularity_options: str = None,
 ) -> str:
     """
     Save a run before launch (PATCH /save). Send only what changes. On a
@@ -1544,11 +1636,38 @@ def update_run(
     given, 'collection' when collectionId is), so the types in create_run's
     input_definitions are never copied. No input `value` may be an empty
     string; use "NA" or omit the input. Within one processOptions entry, all
-    spreadsheet (list) columns must be equal length. This mutates the run;
-    confirm with the user before calling.
+    spreadsheet (list) columns must be equal length.
+
+    exec_settings sets the resources each task asks the scheduler for (queue,
+    memory in GB, cpu, time in minutes, extra scheduler options). Without them
+    a batch scheduler applies its site default, often too little memory for
+    aligners. Pass the shape get_run_details(run_id, verbose=True) reports
+    under advancedSettings, for example from a run that worked:
+    {"globalExec": {"enabled": true, "options": {"job_queue": "short",
+    "job_memory": "32", "job_cpu": "1", "job_time": "240"}},
+    "processExec": {"enabled": true, "options": {"procGnum-12": {"memory":
+    "200", "cpu": "5"}}}}. globalExec applies to every task; processExec
+    overrides it per process (keys procGnum-<n>). Each block given replaces
+    the saved one; "enabled": false switches it off.
+
+    singularity_options replaces the Singularity run options (for example
+    "-B /home:/home -B /share:/share" so tasks can read data under /share).
+    The run must already use a Singularity image; save run_environment_id in
+    an earlier call, then the options.
+
+    This mutates the run; confirm with the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id, launch_directory)
+        exec_body = _exec_settings_body(exec_settings) if exec_settings is not None else {}
+        if singularity_options is not None:
+            if not singularity_options.strip():
+                raise ValueError("singularity_options must not be empty")
+            if run_environment_id is not None:
+                raise ValueError(
+                    "Save run_environment_id first, then singularity_options in a second update_run call: "
+                    "the environment fills in the run's container image."
+                )
         via_client = get_client()
         data = {}
         if inputs is not None:
@@ -1564,6 +1683,9 @@ def update_run(
             "name": name,
         }
         data.update({key: value for key, value in optional.items() if value is not None})
+        data.update(exec_body)
+        if singularity_options is not None:
+            data.update(_singularity_body(via_client, run_id, singularity_options.strip()))
         saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
         if saved:
             return json.dumps(saved, indent=2)
@@ -3253,6 +3375,41 @@ def _preflight_dataset(via_client, sample_inputs):
         "samples", "pass", f"{len(names)} sample(s) attached."), names
 
 
+# Task executors that submit each task to a batch scheduler, which applies its
+# own site default memory when a task asks for none.
+_BATCH_SCHEDULERS = ("lsf", "slurm", "sge", "uge", "pbs", "pbspro", "moab", "condor", "oar", "hq")
+
+
+def _preflight_executor_resources(details, env):
+    """Warn when tasks go to a batch scheduler and nothing sets their memory.
+    Returns None when the check does not apply."""
+    executor = ((env or {}).get("executorJob") or "").strip().lower()
+    if executor not in _BATCH_SCHEDULERS:
+        return None
+    advanced = details.get("advancedSettings") or {}
+    global_exec = advanced.get("globalExec") or {}
+    process_exec = advanced.get("processExec") or {}
+    if global_exec.get("enabled") and _filled((global_exec.get("options") or {}).get("job_memory")):
+        return _preflight_check("executor_resources", "pass", "The run sets memory for every task.")
+    if process_exec.get("enabled") and any(
+            isinstance(row, dict) and _filled(row.get("memory"))
+            for row in (process_exec.get("options") or {}).values()):
+        return _preflight_check("executor_resources", "pass", "The run sets memory for some processes.")
+    # The environment's defaults apply only to a run that has saved executor
+    # settings and switched them off; a run with none saved emits no directive.
+    uses_env_defaults = not global_exec.get("enabled") and global_exec.get("options") is not None
+    if uses_env_defaults and _filled(env.get("jobMemory")):
+        return _preflight_check(
+            "executor_resources", "pass", f"The run environment asks {env['jobMemory']} GB per task.")
+    return _preflight_check(
+        "executor_resources", "warn",
+        f"Tasks are submitted to {executor}, but neither the run nor its environment sets memory, "
+        "so the scheduler applies its site default and large tasks may be killed for exceeding it.",
+        "Set resources with update_run(exec_settings=...), for example copied from a run that worked "
+        "(get_run_details(run_id, verbose=True), advancedSettings.globalExec and processExec).",
+    )
+
+
 @mcp.tool()
 def preflight_run(run_id: str) -> str:
     """
@@ -3374,6 +3531,10 @@ def preflight_run(run_id: str) -> str:
                 "with the user and save it with update_run(launch_directory=...).",
             )
         )
+        resources = _preflight_executor_resources(
+            details, next((e for e in run_env.get("availableList") or [] if e.get("id") == cluster_id), None))
+        if resources:
+            checks.append(resources)
 
         # Genome build.
         build = next((i for i in inputs
