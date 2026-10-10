@@ -1574,10 +1574,25 @@ def _singularity_body(via_client, run_id, singularity_options):
     return {"useSingularity": True, "singularityConfig": {"imagePath": image, "runOptions": singularity_options}}
 
 
+def _saved_permission(via_client, run_id, group_id):
+    """The run's saved permission and group, for a save that leaves them out.
+    The save endpoint requires a permission on every call."""
+    details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details") or {}
+    permission = details.get("permission")
+    if permission is None:
+        raise ValueError(
+            f"Run {run_id} has no saved permission; pass permission "
+            "(3 private, 15 group shared, 63 public)."
+        )
+    if group_id is None:
+        group_id = details.get("groupId")
+    if permission == 15 and group_id is None:
+        raise ValueError("'groupId' is required when permission is GroupShared (15)")
+    return permission, group_id
+
+
 def _validate_update_run(inputs, process_options, permission, group_id, launch_directory=None):
     """Raise ValueError if the update_run body would be rejected by the server."""
-    if permission is None:
-        raise ValueError("'permission' is required")
     if launch_directory and not launch_directory.startswith("/"):
         raise ValueError(
             "launch_directory must be an absolute path on the run environment, "
@@ -1626,9 +1641,10 @@ def update_run(
     Foundry pipeline, inputs merge with the saved ones; on an external
     (nf-core) pipeline the inputs dict is REPLACED whole, so send the complete
     dict from create_run's form. process_options always REPLACES the whole
-    set, so send it complete or leave it out. `permission` is REQUIRED on every call
-    (echo it from create_run or get_run_details(run_id, verbose=True));
-    `group_id` is REQUIRED only when `permission` is 15 (GroupShared). A new
+    set, so send it complete or leave it out. `permission` defaults to the
+    run's saved permission (and `group_id` to its saved group); pass it only to
+    change who can see the run. `group_id` is REQUIRED when `permission` is 15
+    (GroupShared) and the run has no saved group. A new
     run cannot launch until run_environment_id and launch_directory are
     saved: take them from create_run or list_run_environments and show the
     proposed directory to the user first. A Foundry input is {name, value};
@@ -1669,6 +1685,8 @@ def update_run(
                     "the environment fills in the run's container image."
                 )
         via_client = get_client()
+        if permission is None:
+            permission, group_id = _saved_permission(via_client, run_id, group_id)
         data = {}
         if inputs is not None:
             data["inputs"] = _normalize_run_inputs(inputs)

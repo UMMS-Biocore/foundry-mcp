@@ -35,6 +35,9 @@
   required ones first. A fresh run has no saved inputs, so the form used to
   show none.
 - `create_project` now reports the project's name instead of `None`.
+- `update_run` no longer refuses a call that leaves out `permission`. It
+  keeps the run's saved permission and group, so a client changing only the
+  inputs or the environment does not have to look them up first.
 
 ## [1.3.0] - 2026-09-30
 
