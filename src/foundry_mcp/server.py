@@ -4548,11 +4548,115 @@ def get_menu_group_by_name(group_name: str) -> str:
 # Metadata & Dataset Search Tools
 # ============================================================================
 
+DATASET_LIST_SCOPES = ("mine", "shared", "public", "all")
+
+
+def _dataset_scope_filter(via_client, scope: str) -> dict:
+    """Build the dataset-search filter for a scope, as the web Datasets tabs do.
+
+    "mine" and "shared" compare against the caller's vmeta user id, read from
+    GET /api/v1/auth/user. "public" and "all" need no lookup.
+    """
+    if scope == "all":
+        return {}
+    if scope == "public":
+        return {"perms.read.user": {"in": "everyone"}}
+    user_info = via_client.call(method="GET", endpoint="/api/v1/auth/user")
+    vmeta_user_id = ((user_info or {}).get("vmeta") or {}).get("userId")
+    if not vmeta_user_id:
+        raise ValueError("Could not resolve your dataset owner id from /api/v1/auth/user")
+    if scope == "mine":
+        return {"owner._id": {"eq": vmeta_user_id}}
+    return {"owner._id": {"ne": vmeta_user_id}, "perms.read.user": {"nin": "everyone"}}
+
+
+def _summarize_dataset(row: dict) -> dict:
+    """Trim a dataset-search row to what a model needs to pick a dataset."""
+    owner = row.get("owner") or {}
+    return {
+        "id": row.get("_id"),
+        "name": row.get("name"),
+        "owner": owner.get("username") if isinstance(owner, dict) else owner,
+        "file_count": row.get("fileCount"),
+        "canvas_ids": list((row.get("file_ids") or {}).keys()),
+        "created_at": row.get("createdAt"),
+        "updated_at": row.get("updatedAt"),
+        "tags": [t.get("name") for t in (row.get("tags") or []) if isinstance(t, dict) and t.get("name")],
+    }
+
+
+@mcp.tool()
+def list_datasets(
+    scope: str = "mine",
+    search_query: str = "",
+    take: int = 20,
+    skip: int = 0,
+    sort: str = "updatedAt",
+    order: str = "desc",
+) -> str:
+    """
+    List vmeta datasets (sample/file sets) you can use, newest first.
+    Use this to find a dataset ID, e.g. to set a run's reads input
+    (update_run with type "vmetaCollection") or to inspect its files with
+    search_datasets / list_files.
+
+    Args:
+        scope: Which datasets to list (default "mine"):
+            - "mine": datasets you own.
+            - "shared": datasets other users shared with you or your groups (not public ones).
+            - "public": datasets readable by everyone.
+            - "all": everything you can read (mine + shared + public).
+        search_query: Case-insensitive text to match in the dataset name (optional).
+        take: Page size (default 20).
+        skip: Offset for pagination (default 0).
+        sort: Sort field, e.g. "updatedAt" (default), "createdAt", "name".
+        order: "desc" (default) or "asc".
+
+    Returns:
+        {"scope", "total", "returned", "datasets": [{id, name, owner, file_count,
+        canvas_ids, created_at, updated_at, tags}]}. "total" counts all matches,
+        so page with skip when total > returned.
+    """
+    try:
+        scope = (scope or "mine").strip().lower()
+        if scope not in DATASET_LIST_SCOPES:
+            return json.dumps({
+                "error": f"Unknown scope '{scope}'. Use one of: {', '.join(DATASET_LIST_SCOPES)}."
+            })
+        order = order if order in ("asc", "desc") else "desc"
+
+        via_client = get_client()
+        flt = _dataset_scope_filter(via_client, scope)
+        if search_query and search_query.strip():
+            flt["name"] = {"regex": re.escape(search_query.strip())}
+
+        body = {"take": take, "skip": skip, "sort": sort or "updatedAt", "order": order}
+        if flt:
+            body["filter"] = flt
+
+        logger.info(f"Listing datasets (scope: {scope}, search: '{search_query}', take: {take}, skip: {skip})")
+        response = via_client.call(method="POST", endpoint="/api/v1/vmeta/dataset/search", data=body)
+
+        rows = response.get("data", []) if isinstance(response, dict) else []
+        datasets = [_summarize_dataset(r) for r in rows if isinstance(r, dict)]
+        return json.dumps({
+            "scope": scope,
+            "total": response.get("results", len(datasets)) if isinstance(response, dict) else len(datasets),
+            "returned": len(datasets),
+            "datasets": datasets,
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing datasets: {e}")
+        return json.dumps({"error": str(e)})
+
+
 @mcp.tool()
 def search_datasets(dataset_id: str, filter_data: dict = None) -> str:
     """
     Search for files in a vmeta dataset with filtering, sorting, and pagination.
-    
+    This searches the FILES INSIDE one known dataset. To find datasets
+    themselves (and their IDs), use list_datasets.
+
     Args:
         dataset_id: ID of the vmeta dataset to search files in.
         filter_data: Search options dict with the following keys:

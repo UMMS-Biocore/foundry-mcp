@@ -170,13 +170,14 @@ Discover and launch applications in Foundry Connect.
 
 ---
 
-### 🗂️ Dataset & Collection Management (6 tools)
+### 🗂️ Dataset & Collection Management (7 tools)
 
 Search and organize datasets and collections.
 
 | Tool                     | What It Does                                 |
 | ------------------------ | -------------------------------------------- |
-| `search_datasets`        | Search for dataset files by name or criteria |
+| `list_datasets`          | List datasets you own, were shared or public |
+| `search_datasets`        | Search the files inside one dataset          |
 | `search_collections`     | Search for dataset collections               |
 | `get_collection_details` | Get detailed collection information          |
 | `get_collection_fields`  | Get metadata schema for a collection         |

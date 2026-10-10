@@ -108,6 +108,7 @@ class TestMCPTools:
         tool_names = list(tools.keys())
         
         expected_metadata_tools = [
+            'list_datasets',
             'search_datasets',
             'search_collections',
             'get_collection_details',

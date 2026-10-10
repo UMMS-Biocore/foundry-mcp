@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Listing datasets**
+  - `list_datasets(scope=...)` lists the datasets you own (`mine`, the
+    default), those shared with you or your groups (`shared`), public ones
+    (`public`), or all you can read (`all`), with an optional name search and
+    paging. Each row gives the dataset id, name, owner, file count, canvas
+    ids, dates and tags, so a dataset can be picked as a run's reads input.
+    `search_datasets` now says it searches the files inside one dataset.
 - **Starting a run from scratch**
   - `list_projects`, `create_project` and `list_pipelines` find or create where a
     run lives and which pipeline it runs.
