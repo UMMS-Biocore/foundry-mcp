@@ -221,7 +221,7 @@ class TestUpdateRunEnvironment:
             server.update_run("41", [{"name": "a", "value": "b"}], {"g": {}}, 3)
         client.call.assert_called_once_with(
             method="PATCH", endpoint="/api/v1/run/41/save",
-            data={"inputs": [{"name": "a", "value": "b"}], "processOptions": {"g": {}}, "permission": 3, "groupId": None},
+            data={"inputs": [{"name": "a", "value": "b", "type": "input"}], "processOptions": {"g": {}}, "permission": 3, "groupId": None},
         )
 
     def test_permission_still_required(self):
@@ -329,3 +329,67 @@ class TestInputDefinitions:
         assert out["data"]["run_id"] == 41
         assert out["data"]["input_definitions"] is None
         assert "boom" in out["data"]["input_definitions_error"]
+
+
+class TestUpdateRunInputType:
+    """#30 (a): the form's definition types are not the saved input types."""
+
+    def _sent_inputs(self, inputs):
+        client = _patched_client({"ok": True})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run("41", inputs, permission=3)
+        return client.call.call_args.kwargs["data"]["inputs"]
+
+    def test_a_plain_value_without_a_type_is_saved_as_input(self):
+        assert self._sent_inputs([{"name": "mate", "value": "single"}]) == [
+            {"name": "mate", "type": "input", "value": "single"}]
+
+    @pytest.mark.parametrize("form_type", ["dropdown", "val", "file", "number"])
+    def test_a_definition_type_from_the_form_becomes_input(self, form_type):
+        sent = self._sent_inputs([{"name": "x", "type": form_type, "value": "v"}])
+        assert sent[0]["type"] == "input"
+
+    def test_collection_ids_decide_the_type(self):
+        sent = self._sent_inputs([
+            {"name": "reads", "vmetaCollectionId": "abc"},
+            {"name": "bam_files", "collectionId": 9},
+        ])
+        assert [i["type"] for i in sent] == ["vmetaCollection", "collection"]
+
+    @pytest.mark.parametrize("saved_type", ["input", "collection", "vmetaCollection"])
+    def test_a_saved_type_is_kept(self, saved_type):
+        sent = self._sent_inputs([{"name": "x", "type": saved_type, "value": "v", "collectionId": 1, "vmetaCollectionId": "a"}])
+        assert sent[0]["type"] == saved_type
+
+    def test_the_callers_list_is_not_changed(self):
+        inputs = [{"name": "mate", "value": "single"}]
+        self._sent_inputs(inputs)
+        assert inputs == [{"name": "mate", "value": "single"}]
+
+    def test_external_pipeline_dict_is_sent_as_is(self):
+        inputs = {"main": {"input": "/data/sheet.csv"}}
+        assert self._sent_inputs(inputs) == inputs
+
+
+class TestUpdateRunReply:
+    """#30 (b): a save the server answers with an empty body still says what was saved."""
+
+    @pytest.mark.parametrize("reply", ["", None, {}])
+    def test_an_empty_server_reply_echoes_the_saved_fields(self, reply):
+        client = _patched_client(reply)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.update_run(
+                "41", [{"name": "mate", "value": "single"}], permission=3,
+                run_environment_id=550, launch_directory="/home/jdoe/foundry-connect-runs/r1"))
+        assert "41" in out["summary"]
+        assert out["data"]["run_id"] == "41"
+        assert out["data"]["saved"] == {
+            "inputs": ["mate"], "permission": 3, "runEnvironmentId": 550,
+            "launchDirectory": "/home/jdoe/foundry-connect-runs/r1",
+        }
+        assert "preflight_run" in " ".join(out["next_steps"])
+
+    def test_a_server_reply_with_content_is_passed_through(self):
+        client = _patched_client({"ok": True})
+        with patch.object(server, "get_client", return_value=client):
+            assert json.loads(server.update_run("41", permission=3)) == {"ok": True}
