@@ -16,6 +16,16 @@
     `preflight_run` reports a missing run environment or execution directory
     before launch.
 
+### Fixed
+- `list_pipelines` returned nothing for a user who owns no pipelines. It now
+  asks for released, your own and shared pipelines one view at a time and
+  merges them, since the server narrows a combined filter to their overlap.
+- `create_run` and `list_run_environments` now list the pipeline's inputs in
+  `input_definitions` (name, type, required, default, description, options),
+  required ones first. A fresh run has no saved inputs, so the form used to
+  show none.
+- `create_project` now reports the project's name instead of `None`.
+
 ## [1.3.0] - 2026-09-30
 
 ### Added

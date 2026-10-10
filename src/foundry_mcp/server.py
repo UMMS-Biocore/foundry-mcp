@@ -1255,6 +1255,74 @@ def create_vmeta_dataset(name: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _input_type(item):
+    """The input's kind, derived the way the run page derives it."""
+    if item.get("file"):
+        return "file"
+    if item.get("singleFile"):
+        return "singleFile"
+    if item.get("type") == "input":
+        return "val"
+    return item.get("qualifier") or item.get("type")
+
+
+def _input_definition(item, section=None):
+    options = item.get("opt") or item.get("dropDown")
+    if isinstance(options, str):
+        options = [o.strip() for o in options.split(",") if o.strip()]
+    default = item.get("defaultVal")
+    if default is None:
+        default = item.get("defVal")
+    definition = {"name": item["varName"].split(".")[-1]}
+    if section is not None:
+        definition["section"] = section
+    definition.update({
+        "type": _input_type(item),
+        "required": not item.get("optional"),
+        "default": default,
+        "description": item.get("desc") or item.get("inDescOpt"),
+        "options": options or None,
+    })
+    return definition
+
+
+def _input_definitions(parameter_list):
+    """
+    The inputs a run of this pipeline takes, from GET /run/{id}/parameter-list.
+    A fresh run's details carry no inputs until one is saved, so this is the
+    only place a client can learn what to fill. Required inputs come first.
+    Foundry pipelines: main inputs are the `params.*` items of the pipeline
+    schema, its process schemas and its input nodes. External (nf-core)
+    pipelines: one schema per section, and `section` says where it is saved.
+    """
+    inputs = (parameter_list or {}).get("inputs")
+    if not isinstance(inputs, dict):
+        return []
+    definitions, seen = [], set()
+
+    def add(items, section=None):
+        for item in items or []:
+            var_name = item.get("varName") or ""
+            if not var_name.startswith("params."):
+                continue
+            definition = _input_definition(item, section)
+            ident = (section, definition["name"])
+            if ident not in seen:
+                seen.add(ident)
+                definitions.append(definition)
+
+    if isinstance(inputs.get("pipe"), dict):
+        pipe = inputs["pipe"]
+        add(pipe.get("schema"))
+        for process in (inputs.get("processes") or {}).values():
+            add((process or {}).get("schema"))
+        add(pipe.get("inputNodes"))
+    else:
+        for section, block in inputs.items():
+            add((block or {}).get("schema"), section)
+    return [d for d in definitions if d["required"]] + [d for d in definitions if not d["required"]]
+
+
 def _run_form(details, run_name):
     """Everything a user fills before launching a freshly created run."""
     env_block = details.get("runEnvironment") or {}
@@ -1272,8 +1340,15 @@ def _run_form(details, run_name):
     }
 
 
-def _run_form_envelope(run_id, details, run_name, verb):
+def _run_form_envelope(run_id, details, run_name, verb, via_client):
     form = _run_form(details, run_name)
+    try:
+        parameter_list = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
+        form["input_definitions"] = _input_definitions(parameter_list)
+    except Exception as e:
+        # The rest of the form still helps; say plainly what is missing.
+        form["input_definitions"] = None
+        form["input_definitions_error"] = f"Could not read the pipeline's inputs: {e}"
     if form["run_environments"]:
         summary = f"{verb} run {run_id}. Choose a run environment and confirm its execution directory."
     else:
@@ -1285,8 +1360,16 @@ def _run_form_envelope(run_id, details, run_name, verb):
         summary=summary,
         data={"run_id": run_id, **form},
         next_steps=[
-            "Ask the user for each input, the run environment, and whether the proposed execution directory is right "
-            "(null means none could be proposed: ask for one).",
+            (
+                "Ask the user for each entry of input_definitions (required ones first; a default can be kept), "
+                "the run environment, and whether the proposed execution directory is right "
+                "(null means none could be proposed: ask for one)."
+            ),
+            (
+                "Foundry pipeline: update_run inputs is a list of {name, type: 'input', value} (value a string), or "
+                "type 'vmetaCollection' with vmetaCollectionId for a file input. External pipeline: a dict "
+                "{section: {name: value}} holding every value, since it replaces the saved inputs whole."
+            ),
             "update_run(run_id, inputs=..., run_environment_id=..., launch_directory=..., permission=...) after the user confirms.",
             "preflight_run(run_id), then initiate_run(run_id) after the user confirms the launch.",
         ],
@@ -1297,7 +1380,8 @@ def _run_form_envelope(run_id, details, run_name, verb):
 def create_run(pipeline_id: int, project_id: int, name: str) -> str:
     """
     Create a new, unlaunched run of a pipeline in one of your projects and
-    return its form: inputs, process options, the run environments you can
+    return its form: the pipeline's input definitions (name, type, required,
+    default), process options, the run environments you can
     launch on, and a proposed execution directory per environment. This
     writes; confirm the pipeline, project and run name with the user first.
     Nothing is launched.
@@ -1313,7 +1397,7 @@ def create_run(pipeline_id: int, project_id: int, name: str) -> str:
         if not run_id:
             raise RuntimeError(f"The server did not return the new run's id: {created}")
         details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
-        return json.dumps(_run_form_envelope(run_id, details, name, "Created"), indent=2)
+        return json.dumps(_run_form_envelope(run_id, details, name, "Created", via_client), indent=2)
     except Exception as e:
         logger.error(f"Error creating run of pipeline {pipeline_id}: {e}")
         return json.dumps({"error": str(e)})
@@ -1328,7 +1412,7 @@ def list_run_environments(run_id: str) -> str:
     try:
         via_client = get_client()
         details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
-        return json.dumps(_run_form_envelope(run_id, details, details.get("name", ""), "Read"), indent=2)
+        return json.dumps(_run_form_envelope(run_id, details, details.get("name", ""), "Read", via_client), indent=2)
     except Exception as e:
         logger.error(f"Error listing run environments for run {run_id}: {e}")
         return json.dumps({"error": str(e)})
@@ -1585,9 +1669,11 @@ def create_project(name: str, summary: str = "") -> str:
         if summary:
             data["summary"] = summary
         project = via_client.call(method="POST", endpoint="/api/v1/project/", data=data)
+        # The server may answer with the id alone; the name is the one we sent.
+        project_name = project.get("name") or data["name"]
         result = envelope(
-            summary=f"Created project {project.get('name')} (id {project.get('id')}).",
-            data={"project": {"id": project.get("id"), "name": project.get("name")}},
+            summary=f"Created project {project_name} (id {project.get('id')}).",
+            data={"project": {"id": project.get("id"), "name": project_name}},
             next_steps=["list_pipelines(search) to choose a pipeline, then create_run(pipeline_id, project_id, name)."],
         )
         return json.dumps(result, indent=2)
@@ -1608,17 +1694,28 @@ def list_pipelines(search: str = "", limit: int = 20) -> str:
     """
     try:
         via_client = get_client()
-        params = {"type": "1,2,3,4", "take": max(1, min(int(limit), 100))}
-        if search.strip():
-            params["searchKeyword"] = search.strip()
-        page = via_client.call(method="GET", endpoint="/api/v1/pipeline/", params=params)
-        pipelines = [
-            {"id": p.get("id"), "name": p.get("name"), "version": p.get("version"), "summary": p.get("summary")}
-            for p in page.get("data", [])
-        ]
+        take = max(1, min(int(limit), 100))
+        # The server ANDs the views in a multi value `type`, so a user who owns
+        # nothing gets an empty list for "1,2,3". Ask each view alone and merge:
+        # 1 released, 2 my pipelines, 3 shared with me.
+        pipelines, seen, total = [], set(), 0
+        for view_type in ("1", "2", "3"):
+            params = {"type": view_type, "take": take}
+            if search.strip():
+                params["searchKeyword"] = search.strip()
+            page = via_client.call(method="GET", endpoint="/api/v1/pipeline/", params=params)
+            total += page.get("total") or 0
+            for p in page.get("data", []):
+                if p.get("id") in seen:
+                    continue
+                seen.add(p.get("id"))
+                pipelines.append(
+                    {"id": p.get("id"), "name": p.get("name"), "version": p.get("version"), "summary": p.get("summary")}
+                )
+        pipelines = pipelines[:take]
         result = envelope(
-            summary=f"{len(pipelines)} of {page.get('total', len(pipelines))} pipelines.",
-            data={"pipelines": pipelines, "total": page.get("total")},
+            summary=f"{len(pipelines)} of about {max(total, len(pipelines))} pipelines.",
+            data={"pipelines": pipelines, "total": max(total, len(pipelines))},
             next_steps=["create_run(pipeline_id, project_id, name) after the user confirms the pipeline and project."],
         )
         return json.dumps(result, indent=2)
