@@ -38,6 +38,13 @@
 - `update_run` no longer refuses a call that leaves out `permission`. It
   keeps the run's saved permission and group, so a client changing only the
   inputs or the environment does not have to look them up first.
+- `update_run(exec_settings=...)` now accepts the `processExec` key of a
+  process inside a module (`procGnum-<n>p<module>`, as
+  `get_run_details(verbose=True)` reports it). It used to refuse every
+  process that a pipeline pulls in through a module.
+- A refused or failed `update_run` now comes back as an MCP error
+  (`isError`), so a client can no longer read a save that did not happen as
+  a success. The text is the same `{"error": ...}` JSON as before.
 
 ## [1.3.0] - 2026-09-30
 

@@ -28,6 +28,7 @@ import requests
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Import from our modules
@@ -1492,6 +1493,9 @@ _GLOBAL_EXEC_KEYS = {"queue": "queue", "memory": "memory", "cpu": "cpu", "time":
 _PROCESS_EXEC_KEYS = {"queue": "queue", "memory": "memory", "cpu": "cpu", "time": "time", "options": "options",
                       "opt": "options"}
 _EXEC_FIELDS = ("queue", "memory", "cpu", "time", "options")
+# A processExec key as the backend writes it: procGnum-<n> for a process in the
+# pipeline itself, procGnum-<n>p<module>[_<child>...] for one inside a module.
+_PROCESS_EXEC_KEY = re.compile(r"procGnum-\d+(?:p\d+(?:_\d+)*)?")
 
 
 def _exec_values(options, keys, where):
@@ -1543,12 +1547,12 @@ def _exec_settings_body(exec_settings):
         options = block.get("options")
         if options is not None:
             if not isinstance(options, dict):
-                raise ValueError("processExec.options must be an object keyed by procGnum-<n>")
+                raise ValueError("processExec.options must be an object keyed by procGnum-<n> or procGnum-<n>p<module>")
             each = {}
             for key, row in options.items():
-                if not re.fullmatch(r"procGnum-\d+", str(key)):
+                if not _PROCESS_EXEC_KEY.fullmatch(str(key)):
                     raise ValueError(
-                        f"processExec.options key '{key}' must be procGnum-<n>, "
+                        f"processExec.options key '{key}' must be procGnum-<n> or procGnum-<n>p<module>, "
                         "as get_run_details(verbose=True) reports it"
                     )
                 where = f"processExec.options['{key}']"
@@ -1663,7 +1667,8 @@ def update_run(
     "job_memory": "32", "job_cpu": "1", "job_time": "240"}},
     "processExec": {"enabled": true, "options": {"procGnum-12": {"memory":
     "200", "cpu": "5"}}}}. globalExec applies to every task; processExec
-    overrides it per process (keys procGnum-<n>). Each block given replaces
+    overrides it per process (keys procGnum-<n>, or procGnum-<n>p<module> for
+    a process inside a module). Each block given replaces
     the saved one; "enabled": false switches it off.
 
     singularity_options replaces the Singularity run options (for example
@@ -1715,7 +1720,9 @@ def update_run(
         ), indent=2)
     except Exception as e:
         logger.error(f"Error updating run {run_id}: {e}")
-        return json.dumps({"error": str(e)})
+        # Raised, not returned, so the MCP reply carries isError: a refused save
+        # must never read as a successful one.
+        raise ToolError(json.dumps({"error": str(e)})) from e
 
 
 _VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")

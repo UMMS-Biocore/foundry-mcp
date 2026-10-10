@@ -3,6 +3,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from src.foundry_mcp import server
 
@@ -250,8 +251,9 @@ class TestUpdateRunEnvironment:
     def test_a_run_with_no_saved_permission_is_refused(self):
         client = self._details_client({})
         with patch.object(server, "get_client", return_value=client):
-            out = json.loads(server.update_run("41", name="r2"))
-        assert "permission" in out["error"]
+            with pytest.raises(ToolError) as refused:
+                server.update_run("41", name="r2")
+        assert "permission" in json.loads(str(refused.value))["error"]
         assert not any(c.kwargs["method"] == "PATCH" for c in client.call.call_args_list)
 
     def test_a_given_permission_skips_the_lookup(self):
@@ -263,8 +265,9 @@ class TestUpdateRunEnvironment:
     def test_relative_launch_directory_is_refused(self):
         client = _patched_client({})
         with patch.object(server, "get_client", return_value=client):
-            out = json.loads(server.update_run("41", permission=3, launch_directory="runs/r1"))
-        assert "absolute" in out["error"]
+            with pytest.raises(ToolError) as refused:
+                server.update_run("41", permission=3, launch_directory="runs/r1")
+        assert "absolute" in json.loads(str(refused.value))["error"]
         client.call.assert_not_called()
 
 

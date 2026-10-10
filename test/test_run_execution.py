@@ -2,6 +2,9 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+
 from src.foundry_mcp import server
 
 
@@ -109,8 +112,9 @@ class TestUpdateRun:
         args = self._valid_args()
         args["inputs"] = [{"id": 1, "type": "input", "name": "x", "value": ""}]
         with patch.object(server, "get_client", return_value=client):
-            result = server.update_run(**args)
-        assert "not allowed to be empty" in json.loads(result)["error"]
+            with pytest.raises(ToolError) as refused:
+                server.update_run(**args)
+        assert "not allowed to be empty" in json.loads(str(refused.value))["error"]
         client.call.assert_not_called()
 
     def test_rejects_missing_group_id(self):
@@ -119,8 +123,9 @@ class TestUpdateRun:
         args["permission"] = 15  # GroupShared: groupId is required
         args["group_id"] = None
         with patch.object(server, "get_client", return_value=client):
-            result = server.update_run(**args)
-        assert "groupId" in json.loads(result)["error"]
+            with pytest.raises(ToolError) as refused:
+                server.update_run(**args)
+        assert "groupId" in json.loads(str(refused.value))["error"]
         client.call.assert_not_called()
 
     def test_allows_missing_group_id_when_not_group_shared(self):
@@ -147,8 +152,9 @@ class TestUpdateRun:
         args = self._valid_args()
         args["process_options"] = {"5": {"sample_id": ["a", "b"], "group": ["g"]}}
         with patch.object(server, "get_client", return_value=client):
-            result = server.update_run(**args)
-        assert "length" in json.loads(result)["error"].lower()
+            with pytest.raises(ToolError) as refused:
+                server.update_run(**args)
+        assert "length" in json.loads(str(refused.value))["error"].lower()
         client.call.assert_not_called()
 
     def test_rejects_non_dict_input_item(self):
@@ -156,8 +162,9 @@ class TestUpdateRun:
         args = self._valid_args()
         args["inputs"] = ["not-a-dict"]
         with patch.object(server, "get_client", return_value=client):
-            result = server.update_run(**args)
-        assert "inputs[0]" in json.loads(result)["error"]
+            with pytest.raises(ToolError) as refused:
+                server.update_run(**args)
+        assert "inputs[0]" in json.loads(str(refused.value))["error"]
         client.call.assert_not_called()
 
 
