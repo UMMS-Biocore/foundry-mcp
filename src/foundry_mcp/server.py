@@ -5600,6 +5600,253 @@ def delete_process_script_asset(process_id: str, path: str) -> str:
 
 
 # ============================================================================
+# Git import and pipeline git integration
+#
+# Like the process git tools above, these call the REST API directly. Failures
+# are raised as ToolError rather than returned as text, so a refused import or
+# export never reads as a successful one.
+# ============================================================================
+
+
+def _git_call(method: str, endpoint: str, action: str, data: dict = None) -> str:
+    """Call a git endpoint and return its JSON, raising ToolError on failure."""
+    try:
+        via_client = get_client()
+        logger.info(f"{action}: {method} {endpoint}")
+        kwargs = {"method": method, "endpoint": endpoint}
+        if data is not None:
+            kwargs["data"] = data
+        return json.dumps(via_client.call(**kwargs), indent=2)
+    except Exception as e:
+        logger.error(f"Error {action}: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+
+
+@mcp.tool()
+def check_process_import(
+    repo_url: str,
+    provider: str = "github",
+    repo_path: str = None,
+    revision: int = None,
+    service_token_id: int = None,
+) -> str:
+    """
+    Read a git repository and report what importing a process from it would do.
+    Writes nothing.
+
+    Without `repo_path`, lists every process the repository publishes and its
+    revisions. With `repo_path`, resolves one revision (the highest published when
+    `revision` is omitted) and returns its tag, `commitId`, a contract summary
+    (name, inputs, outputs, script assets), which local process family it would
+    join, and `consentText`.
+
+    `repo_url` must be https. Pass `service_token_id` (a stored login) for a
+    private repository.
+
+    Show the contract and `consentText` to the user before calling
+    import_process_from_repository, and pass it this check's `revision.revId` and
+    `revision.commitId`.
+    """
+    payload = {"repoUrl": repo_url, "provider": provider}
+    if repo_path is not None:
+        payload["repoPath"] = repo_path
+    if revision is not None:
+        payload["revision"] = revision
+    if service_token_id is not None:
+        payload["serviceTokenId"] = service_token_id
+    return _git_call("POST", "/api/v1/process/git/import/check", "checking a process import", payload)
+
+
+@mcp.tool()
+def import_process_from_repository(
+    repo_url: str,
+    repo_path: str,
+    revision: int,
+    expected_commit_id: str,
+    menu_group_id: int,
+    confirm_import: bool,
+    provider: str = "github",
+    service_token_id: int = None,
+) -> str:
+    """
+    Import a process revision from a git repository as a new process.
+
+    WARNING: This creates a process from code that has not been reviewed on this
+    installation. Run check_process_import first, show the user its contract and
+    `consentText`, and set `confirm_import` to true only after the user agrees.
+
+    `revision` and `expected_commit_id` are the check's `revision.revId` and
+    `revision.commitId`. The import is refused if the repository no longer has
+    that commit for the revision, so the user gets exactly what they reviewed.
+    `menu_group_id` is the process menu group for the new process (see
+    list_menu_groups).
+
+    Returns the new process id, its family id (`processGid`) and its name.
+    """
+    if confirm_import is not True:
+        raise ToolError(json.dumps({
+            "error": "confirm_import must be true. Show the user the check_process_import "
+                     "result and its consentText, and import only after they agree."
+        }))
+    payload = {
+        "repoUrl": repo_url,
+        "provider": provider,
+        "repoPath": repo_path,
+        "revision": revision,
+        "expectedCommitId": expected_commit_id,
+        "menuGroupId": menu_group_id,
+        "confirmImport": True,
+    }
+    if service_token_id is not None:
+        payload["serviceTokenId"] = service_token_id
+    return _git_call("POST", "/api/v1/process/git/import", "importing a process", payload)
+
+
+@mcp.tool()
+def connect_pipeline_repository(
+    pipeline_id: int,
+    repo_url: str,
+    repo_path: str,
+    provider: str = "github",
+    default_branch: str = "main",
+    service_token_id: int = None,
+) -> str:
+    """
+    Connect a pipeline to the git repository it publishes to, or update that
+    connection.
+
+    `repo_path` is the pipeline's folder in the repository. The processes the
+    pipeline uses are exported beside it. `repo_url` must be https. Pass
+    `service_token_id` (a stored login with write access) to be able to export.
+
+    WARNING: This modifies a persistent resource. Calling it again replaces the
+    connection, including the stored login: omit `service_token_id` and the
+    connection is left without one.
+
+    Requires write permission on the pipeline.
+    """
+    payload = {
+        "repoUrl": repo_url,
+        "repoPath": repo_path,
+        "provider": provider,
+        "defaultBranch": default_branch,
+        "serviceTokenId": service_token_id,
+    }
+    return _git_call(
+        "POST", f"/api/v1/pipeline/{pipeline_id}/git/connect", f"connecting pipeline {pipeline_id}", payload
+    )
+
+
+@mcp.tool()
+def get_pipeline_repository(pipeline_id: int) -> str:
+    """
+    Read the git repository a pipeline publishes to: URL, folder, branch,
+    provider, stored login id and the last exported tag. Returns null when the
+    pipeline is not connected.
+
+    Requires write permission on the pipeline.
+    """
+    return _git_call(
+        "GET", f"/api/v1/pipeline/{pipeline_id}/git/connection", f"reading pipeline {pipeline_id}'s repository"
+    )
+
+
+@mcp.tool()
+def export_pipeline_revision(pipeline_id: int) -> str:
+    """
+    Export a pipeline, with every process and module it uses, to its connected
+    git repository.
+
+    Each process and module is written to its own folder with its own tag, then
+    the pipeline itself is tagged. Pushes without force. Returns the pipeline's
+    tag, whether a commit was made (`committed: false` when nothing changed since
+    the last export), and the tag of each process and module.
+
+    WARNING: This pushes to a remote repository. Connect the pipeline first with
+    connect_pipeline_repository, using a login with write access.
+
+    Requires write permission on the pipeline.
+    """
+    return _git_call(
+        "POST", f"/api/v1/pipeline/{pipeline_id}/git/export", f"exporting pipeline {pipeline_id}", {}
+    )
+
+
+@mcp.tool()
+def check_pipeline_import(
+    repo_url: str,
+    slug: str,
+    rev: int = None,
+    service_token_id: int = None,
+) -> str:
+    """
+    Read a pipeline from a git repository and report what importing it would do.
+    Writes nothing.
+
+    `slug` is the pipeline's folder in the repository. `rev` is the revision to
+    check, or omit it for the highest published. Returns the resolved `rev` and
+    `tag`, one plan item per process, module and the pipeline itself with its
+    `status` (`new`, `update-available`, `already-imported`, or a blocking status
+    such as `uuid-conflict`) and `statusReason`, and `canApply`, which is false
+    when any item blocks the import.
+
+    `repo_url` must be https. Pass `service_token_id` (a stored login) for a
+    private repository.
+
+    Show the plan to the user before calling import_pipeline_from_repository, and
+    pass it this check's `rev`.
+    """
+    payload = {"repoUrl": repo_url, "slug": slug, "rev": rev, "serviceTokenId": service_token_id}
+    return _git_call("POST", "/api/v1/pipeline/git/import/check", "checking a pipeline import", payload)
+
+
+@mcp.tool()
+def import_pipeline_from_repository(
+    repo_url: str,
+    slug: str,
+    rev: int,
+    menu_group_id: int,
+    pipeline_group_id: int,
+    service_token_id: int = None,
+) -> str:
+    """
+    Import a pipeline, with the processes and modules it uses, from a git
+    repository.
+
+    WARNING: This creates processes and a pipeline from code that has not been
+    reviewed on this installation. Run check_pipeline_import first, show the user
+    the plan, and import only if `canApply` is true and the user agrees.
+
+    `rev` is the check's `rev`, so the import is the revision the user reviewed.
+    `menu_group_id` is the process menu group for new processes (see
+    list_menu_groups). `pipeline_group_id` is the pipeline menu group for the
+    pipeline (see list_pipeline_menu_groups).
+
+    Returns `pipelineId` (null when the pipeline already exists here and you may
+    not read it), `created`, and the ids of the processes used.
+    """
+    payload = {
+        "repoUrl": repo_url,
+        "slug": slug,
+        "rev": rev,
+        "serviceTokenId": service_token_id,
+        "menuGroupId": menu_group_id,
+        "pipelineGroupId": pipeline_group_id,
+    }
+    return _git_call("POST", "/api/v1/pipeline/git/import", "importing a pipeline", payload)
+
+
+@mcp.tool()
+def list_pipeline_menu_groups() -> str:
+    """
+    List the pipeline menu groups, the groups pipelines are listed under.
+    Use one as `pipeline_group_id` in import_pipeline_from_repository.
+    Process menu groups are a separate list (see list_menu_groups).
+    """
+    return _git_call("GET", "/api/v1/menu-group/pipeline", "listing pipeline menu groups")
+
+
+# ============================================================================
 # Server Entry Point
 # ============================================================================
 
