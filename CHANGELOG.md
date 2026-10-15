@@ -3,6 +3,20 @@
 ## [Unreleased]
 
 ### Added
+- **Pipelines and processes from git**
+  - `connect_pipeline_repository`, `get_pipeline_repository` and
+    `export_pipeline_revision` connect a pipeline to a git repository and
+    export it, with every process and module it uses, each under its own tag.
+  - `check_pipeline_import` reports what importing a pipeline folder would do
+    (one status per process, module and the pipeline, and whether it can be
+    applied). `import_pipeline_from_repository` imports the revision that was
+    checked. `list_pipeline_menu_groups` lists the groups a pipeline can go in.
+  - `check_process_import` lists the processes a repository publishes, or
+    resolves one revision with its contract and consent text.
+    `import_process_from_repository` imports it as a new process, only with
+    `confirm_import=True` and the commit id the check reported.
+  - Refusals from these tools are raised as MCP errors, so a refused import or
+    export never reads as a success.
 - **Listing datasets**
   - `list_datasets(scope=...)` lists the datasets you own (`mine`, the
     default), those shared with you or your groups (`shared`), public ones
