@@ -502,3 +502,96 @@ class TestCompareProcessRevisions:
 
         parsed = json.loads(result)
         assert "Missing credentials" in parsed["error"]
+
+
+class TestDownloadFile:
+    """Tests for the download_file tool.
+
+    These mock the SDK client and the outbound HTTP call. They prove the tool
+    returns small files inline and hands back a link for large ones, without
+    reading a large body into memory. They do not exercise a real deployment.
+    """
+
+    def _client(self, route_path="/report-resources/run1/pubweb/out/file.txt"):
+        import pandas as pd
+        client = MagicMock()
+        client.auth.hostname = "https://foundry.example.com"
+        client.auth.get_headers.return_value = {"Authorization": "Bearer via_mcp_test-token"}
+        client.reports.get_all_files.return_value = pd.DataFrame(
+            [{"file_path": "out/file.txt", "routePath": route_path}]
+        )
+        return client
+
+    def _response(self, chunks):
+        response = MagicMock()
+        response.status_code = 200
+        response.iter_content.return_value = iter(chunks)
+        return response
+
+    def test_small_file_comes_back_inline_as_base64(self):
+        import base64
+        client = self._client()
+        response = self._response([b"hello ", b"world"])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response) as mock_get:
+            result = json.loads(server.download_file(report_id="1", file_path="out/file.txt"))
+
+        assert mock_get.call_args.kwargs["stream"] is True
+        assert result["success"] is True
+        assert result["delivery"] == "inline"
+        assert base64.b64decode(result["file_content_base64"]) == b"hello world"
+        assert result["file_size"] == 11
+
+    def test_large_file_returns_a_link_and_stops_reading(self):
+        client = self._client()
+        chunk = b"x" * (1024 * 1024)
+        consumed = []
+
+        def chunks():
+            for _ in range(50):
+                consumed.append(1)
+                yield chunk
+
+        response = self._response(chunks())
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response), \
+                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 5 * 1024 * 1024):
+            result = json.loads(server.download_file(report_id="1", file_path="out/file.txt"))
+
+        assert result["success"] is True
+        assert result["delivery"] == "url"
+        assert "file_content_base64" not in result
+        assert result["download_url"] == "https://foundry.example.com/report-resources/run1/pubweb/out/file.txt"
+        assert result["download_command"] == (
+            "curl -fL -o file.txt "
+            "https://foundry.example.com/report-resources/run1/pubweb/out/file.txt"
+        )
+        assert len(consumed) <= 6
+        response.close.assert_called()
+
+    def test_link_answer_never_carries_the_credential(self):
+        client = self._client()
+        response = self._response([b"x" * 20])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response), \
+                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 10):
+            raw = server.download_file(report_id="1", file_path="out/file.txt")
+
+        assert "via_mcp_test" not in raw
+        assert "Authorization" not in raw
+
+    def test_link_url_with_spaces_is_encoded_and_quoted(self):
+        client = self._client(route_path="/report-resources/run1/pubweb/my out/a b.txt")
+        response = self._response([b"x" * 20])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response), \
+                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 10):
+            result = json.loads(server.download_file(report_id="1", file_path="out/file.txt"))
+
+        assert result["download_url"] == (
+            "https://foundry.example.com/report-resources/run1/pubweb/my%20out/a%20b.txt"
+        )
+        assert result["download_command"] == (
+            "curl -fL -o file.txt "
+            "https://foundry.example.com/report-resources/run1/pubweb/my%20out/a%20b.txt"
+        )

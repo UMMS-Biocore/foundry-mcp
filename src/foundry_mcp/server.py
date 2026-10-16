@@ -22,6 +22,7 @@ import argparse
 import base64
 import html
 import re
+import shlex
 import tempfile
 import os
 import requests
@@ -48,6 +49,12 @@ logger = get_logger(__name__)
 # Maximum file size for upload/download via base64 (200MB)
 # Base64 encoding increases size by ~33%, so 200MB file becomes ~267MB in transport
 MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
+
+# Largest file download_file returns inline as base64. The whole tool result
+# has to fit in one MCP response and in the model's context, and clients fail
+# well below MAX_FILE_SIZE_BYTES (seen at 15 to 20MB). Above this, the tool
+# returns a download link instead of the bytes.
+INLINE_DOWNLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5MB
 
 
 class CredentialsMiddleware:
@@ -336,18 +343,21 @@ def list_files(report_id: str, process_name: str = None) -> str:
 @mcp.tool()
 def download_file(report_id: str, file_path: str) -> str:
     """
-    Download a file from a report and return its content as base64.
-    This allows downloading files regardless of server filesystem access.
-    The client can then decode and save the file locally.
-    
+    Download a file from a report.
+    A file up to 5MB comes back inline as base64 ("delivery": "inline").
+    A larger file comes back as a link ("delivery": "url") with a ready
+    curl command; run that command to save the file to disk, so the bytes
+    never pass through the conversation.
+
     Args:
         report_id: The ID of the report containing the file.
         file_path: The path of the file within the report (from list_files output).
-    
+
     Returns:
-        JSON with file_name, file_content_base64, and file_size.
+        Inline: JSON with file_name, file_content_base64, and file_size.
         The client should decode the base64 content and save to disk.
-    
+        Link: JSON with file_name, download_url, and download_command.
+
     Example:
         # Get the file content (returns JSON string)
         result_json = download_file(report_id="12524", file_path="fastqc/control_rep1.R1_fastqc.html")
@@ -394,10 +404,10 @@ def download_file(report_id: str, file_path: str) -> str:
         # Build the file URL
         file_url = via_client.auth.hostname + route_path
         file_name = os.path.basename(file_path)
-        
-        # Download the file content
+
+        # Stream the body so a large file is never read whole into memory.
         # Timeout: (connect_timeout, read_timeout) in seconds
-        response = requests.get(file_url, headers=via_client.auth.get_headers(), timeout=(20, 300))
+        response = requests.get(file_url, headers=via_client.auth.get_headers(), timeout=(20, 300), stream=True)
         if response.status_code != 200:
             # Include detailed error info for debugging
             reason = getattr(response, 'reason', 'Unknown')
@@ -410,25 +420,46 @@ def download_file(report_id: str, file_path: str) -> str:
                 "url": file_url
             }, indent=2)
         
-        # Check file size before base64 encoding
-        content_size = len(response.content)
-        if content_size > MAX_FILE_SIZE_BYTES:
-            size_mb = content_size / (1024 * 1024)
-            max_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+        # Read at most one byte past the inline limit, then stop.
+        try:
+            content = bytearray()
+            too_large = False
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                content.extend(chunk)
+                if len(content) > INLINE_DOWNLOAD_MAX_BYTES:
+                    too_large = True
+                    break
+        finally:
+            response.close()
+
+        if too_large:
+            # The link is the report's own public resource path. It never
+            # carries the caller's credentials.
+            download_url = requests.utils.requote_uri(file_url)
+            limit_mb = INLINE_DOWNLOAD_MAX_BYTES / (1024 * 1024)
+            logger.info(f"File '{file_name}' is over {limit_mb:.0f}MB, returning a link")
             return json.dumps({
-                "error": f"File too large for download: {size_mb:.1f}MB exceeds {max_mb:.0f}MB limit",
-                "hint": "Use the SDK directly for large file downloads"
+                "success": True,
+                "delivery": "url",
+                "file_name": file_name,
+                "download_url": download_url,
+                "download_command": f"curl -fL -o {shlex.quote(file_name)} {shlex.quote(download_url)}",
+                "message": (
+                    f"File is larger than {limit_mb:.0f}MB, too large to return inline. "
+                    "Run download_command to save it to disk, or open download_url in a browser."
+                )
             }, indent=2)
-        
-        # Encode content as base64
-        file_content_base64 = base64.b64encode(response.content).decode('utf-8')
-        
+
+        content_size = len(content)
+        file_content_base64 = base64.b64encode(bytes(content)).decode('utf-8')
+
         logger.info(f"Downloaded file '{file_name}' ({content_size} bytes)")
-        
+
         return json.dumps({
             "success": True,
+            "delivery": "inline",
             "file_name": file_name,
-            "file_size": len(response.content),
+            "file_size": content_size,
             "file_content_base64": file_content_base64,
             "message": f"File downloaded successfully. Decode base64 content and save to disk."
         }, indent=2)
