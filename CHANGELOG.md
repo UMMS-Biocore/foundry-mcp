@@ -48,6 +48,11 @@
     sets memory, since the scheduler's site default can kill large tasks.
 
 ### Fixed
+- `download_file` failed for files larger than about 15MB, because the whole
+  file came back base64 encoded in one tool result. A file up to 5MB still
+  comes back inline. A larger one now comes back as `download_url` with a
+  ready `download_command` (curl) that saves it to disk, and the server stops
+  reading it after 5MB instead of holding the whole file in memory.
 - `list_pipelines` returned nothing for a user who owns no pipelines. It now
   asks for released, your own and shared pipelines one view at a time and
   merges them, since the server narrows a combined filter to their overlap.
