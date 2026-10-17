@@ -117,6 +117,8 @@ def request_json(
     """
     Send one logical request and return (HTTP status, parsed body).
 
+    The body is None when the response carries no JSON.
+
     Unlike the SDK's `call`, this sends extra headers (such as `Idempotency-Key`)
     and does not raise on an HTTP error status, so a caller can read the typed
     refusal the server put in the body.
@@ -151,11 +153,14 @@ def request_json(
             continue
         break
 
+    # A body that is not JSON (an HTML error page from a disabled route or a
+    # gateway) is never shown to the caller as the server's message: it comes
+    # back as None, so the caller falls back to its own plain sentence.
     try:
         body = response.json()
     except ValueError:
-        text = (response.text or "").strip()
-        body = {"message": text[:500]} if text else None
+        logger.warning(f"{method} {endpoint} answered {response.status_code} with a body that is not JSON")
+        body = None
     return response.status_code, body
 
 

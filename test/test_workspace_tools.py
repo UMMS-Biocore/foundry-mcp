@@ -52,6 +52,28 @@ def http():
         yield req
 
 
+# What a disabled workspace route answers: disableRouteHandler sends the
+# backend's ERROR_PAGE_TEMPLATE as a 404 HTML page.
+_DISABLED_ROUTE_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Error</title>
+</head>
+<body>
+    <pre>Cannot POST /api/v1/agent-workspace/ws-abc123/jobs</pre>
+</body>
+</html>"""
+
+
+def _html_response(status, text):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.json.side_effect = ValueError("not json")
+    resp.text = text
+    return resp
+
+
 def _error(exc_info):
     return json.loads(str(exc_info.value))
 
@@ -73,6 +95,10 @@ class TestRequestJson:
         http.side_effect = [requests.ConnectionError("reset"), _response(200, {"ok": True})]
         assert client_module.request_json(via_client, "GET", "/x", retry=True) == (200, {"ok": True})
         assert http.call_count == 2
+
+    def test_a_body_that_is_not_json_comes_back_as_none(self, via_client, http):
+        http.return_value = _html_response(404, _DISABLED_ROUTE_PAGE)
+        assert client_module.request_json(via_client, "POST", "/x") == (404, None)
 
     def test_no_retry_by_default(self, via_client, http):
         http.side_effect = requests.ConnectionError("reset")
@@ -210,6 +236,28 @@ class TestWorkspaceRun:
         err = _error(exc)
         assert err["reason"] == "not_found_or_disabled"
         assert err["http_status"] == 404
+
+    def test_the_disabled_route_html_404_gives_the_plain_sentence(self, via_client, http):
+        http.return_value = _html_response(404, _DISABLED_ROUTE_PAGE)
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "not_found_or_disabled"
+        assert err["http_status"] == 404
+        assert err["error"] == server._NOT_FOUND_MESSAGE
+        assert "<" not in err["error"] and "Cannot POST" not in err["error"]
+
+    def test_a_gateway_html_page_on_the_last_attempt_gives_the_fallback(self, via_client, http):
+        page = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+        http.return_value = _html_response(502, page)
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["http_status"] == 502
+        assert err["reason"] == "submit_refused"
+        assert err["error"] == "The job was not submitted."
+        assert "<" not in err["error"]
+        assert http.call_count == 3
 
     def test_the_tool_offers_no_mount_or_docker_host_parameter(self):
         import inspect
