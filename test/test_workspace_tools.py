@@ -441,6 +441,19 @@ class TestWorkspaceRun:
         assert out["server_outcome"] == body["kind"]
         assert "not submitted" not in out["message"]
 
+    @pytest.mark.parametrize("lost_first", [False, True])
+    @pytest.mark.parametrize("status", [400, 404, 409])
+    @pytest.mark.parametrize("kind", [["conflict"], {"name": "conflict"}])
+    def test_a_kind_that_is_not_a_string_is_uncertain_and_keeps_the_key(self, via_client, http, kind, status, lost_first):
+        answer = _response(status, {"kind": kind, "reason": "x"})
+        http.side_effect = [requests.Timeout("slow"), answer] if lost_first else [answer]
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["submission_key"] == "k"
+        assert out["http_status"] == status
+        assert out["server_outcome"] == kind
+        assert "not submitted" not in out["message"]
+
     @pytest.mark.parametrize("status", [200, 201, 500, 503])
     def test_a_known_refusal_kind_outside_a_4xx_is_uncertain(self, via_client, http, status):
         http.return_value = _response(status, {"kind": "conflict"})

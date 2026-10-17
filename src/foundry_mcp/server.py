@@ -6138,6 +6138,10 @@ def workspace_run(
         })) from e
     outcome = body if isinstance(body, dict) else {}
     kind = outcome.get("kind")
+    # Only a string kind can name an outcome. Any other kind (a list or an
+    # object) is unhashable, so a set or dict lookup on it would raise and lose
+    # the key; it is an outcome this client cannot read, so it stays uncertain.
+    kind_readable = kind is None or isinstance(kind, str)
     result = {"submission_key": key, "workspace_id": workspace_id}
 
     if kind == "submitted":
@@ -6165,7 +6169,7 @@ def workspace_run(
     # or 5xx is never a refusal, a 4xx with no outcome after a lost attempt (a
     # gateway 408 or 429) says nothing about that attempt, and an outcome kind
     # this client does not know (a newer or older server) cannot be read.
-    refused = 400 <= status < 500 and (
+    refused = 400 <= status < 500 and kind_readable and (
         kind in _SUBMIT_REFUSAL_KINDS or (kind is None and not earlier_attempt_lost)
     )
     if kind == "uncertain" or not refused:
