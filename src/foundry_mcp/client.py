@@ -103,6 +103,35 @@ def get_client() -> ViaFoundryClient:
 _RETRYABLE_STATUSES = frozenset({502, 504})
 _REQUEST_TIMEOUT_SECONDS = 60
 
+# The request may have reached the server and the answer was lost. Retried.
+_TRANSPORT_ERRORS = (
+    requests.ConnectionError,
+    requests.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+# The configured address cannot be used, so nothing was sent. Never retried.
+_ADDRESS_ERRORS = (
+    requests.exceptions.MissingSchema,
+    requests.exceptions.InvalidSchema,
+    requests.exceptions.InvalidURL,
+)
+
+
+class RequestFailed(Exception):
+    """
+    A request that got no HTTP answer.
+
+    `reason` is "connection_failed" when the request may have reached the
+    server (`may_have_arrived` is True), or "invalid_hostname" when the
+    configured address is unusable and nothing was sent.
+    """
+
+    def __init__(self, reason: str, message: str, may_have_arrived: bool):
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.may_have_arrived = may_have_arrived
+
 
 def request_json(
     via_client: ViaFoundryClient,
@@ -126,7 +155,11 @@ def request_json(
     With `retry=True` a dropped connection, a timeout or a gateway 502/504 is
     retried up to `attempts` times with the same method, body and headers. Only
     ask for it on a read, or on a write the server deduplicates by a key the
-    caller sends in `headers`. The last transport error is raised.
+    caller sends in `headers`.
+
+    Raises RequestFailed when no HTTP answer came back: after the last
+    transport error, or at once when the configured address is not a usable
+    URL.
     """
     url = f"{via_client.auth.hostname}{endpoint}"
     merged = dict(via_client.auth.get_headers() or {})
@@ -141,9 +174,20 @@ def request_json(
                 method.upper(), url, params=params, json=data, headers=merged,
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
-        except (requests.ConnectionError, requests.Timeout) as e:
+        except _ADDRESS_ERRORS as e:
+            raise RequestFailed(
+                "invalid_hostname",
+                "The Foundry Connect address this client is configured with is not a usable URL. "
+                "Set the hostname to a full address such as https://foundry.example.org.",
+                may_have_arrived=False,
+            ) from e
+        except _TRANSPORT_ERRORS as e:
             if attempt == tries:
-                raise
+                raise RequestFailed(
+                    "connection_failed",
+                    f"Foundry Connect could not be reached ({type(e).__name__}).",
+                    may_have_arrived=True,
+                ) from e
             logger.warning(f"{method} {endpoint} attempt {attempt} failed ({type(e).__name__}), retrying")
             time.sleep(0.5 * attempt)
             continue

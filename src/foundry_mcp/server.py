@@ -34,7 +34,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Import from our modules
-from .client import get_client, request_json
+from .client import RequestFailed, get_client, request_json
 from .config import (
     set_credentials, validate_credentials, get_fixed_hostname, get_credentials,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
@@ -5928,24 +5928,52 @@ _NOT_FOUND_MESSAGE = (
 )
 
 
+_AUTH_MESSAGE = (
+    "Foundry Connect did not accept this request's credentials. Check the token this client is "
+    "configured with: it must be set, current (not expired or revoked) and belong to a user who "
+    "may use this workspace."
+)
+
+_STATUS_FALLBACKS = {
+    401: ("unauthorized", _AUTH_MESSAGE),
+    403: ("forbidden", _AUTH_MESSAGE),
+    404: ("not_found_or_disabled", _NOT_FOUND_MESSAGE),
+}
+
+
 def _workspace_error(body, http_status: int, fallback_reason: str, fallback_message: str, **extra):
     """Raise a ToolError from a refusal body, keeping the server's reason and message."""
     body = body if isinstance(body, dict) else {}
-    reason = body.get("reason") or (
-        "not_found_or_disabled" if http_status == 404 else fallback_reason
-    )
-    message = body.get("message") or (
-        _NOT_FOUND_MESSAGE if http_status == 404 else fallback_message
-    )
+    fallback_reason, fallback_message = _STATUS_FALLBACKS.get(http_status, (fallback_reason, fallback_message))
+    reason = body.get("reason") or fallback_reason
+    message = body.get("message") or fallback_message
     error = {"error": message, "reason": reason, "http_status": http_status}
     if body.get("remedy"):
         error["remedy"] = body["remedy"]
+    elif http_status in (401, 403) and message != _AUTH_MESSAGE:
+        error["remedy"] = _AUTH_MESSAGE
     error.update({k: v for k, v in extra.items() if v is not None})
     raise ToolError(json.dumps(error))
 
 
 def _refuse(reason: str, message: str):
     raise ToolError(json.dumps({"error": message, "reason": reason}))
+
+
+def _workspace_request(method: str, endpoint: str, if_it_may_have_arrived: str = "", **kwargs):
+    """
+    `request_json` for the workspace tools, with a request that got no HTTP
+    answer raised as a ToolError. `if_it_may_have_arrived` is the sentence added
+    when the request may have reached the server, saying how to check before
+    trying again.
+    """
+    try:
+        return request_json(get_client(), method, endpoint, **kwargs)
+    except RequestFailed as e:
+        message = e.message
+        if e.may_have_arrived:
+            message = f"{message} {if_it_may_have_arrived or 'Try again.'}"
+        raise ToolError(json.dumps({"error": message, "reason": e.reason})) from e
 
 
 def _check_workspace_id(workspace_id: str) -> None:
@@ -5994,7 +6022,7 @@ def workspace_list(run_environment_id: str = "") -> str:
     params = None
     if str(run_environment_id or "").strip():
         params = {"profileClusterId": _positive_int(run_environment_id, "run_environment_id")}
-    status, body = request_json(get_client(), "GET", "/api/v1/agent-workspace", params=params, retry=True)
+    status, body = _workspace_request("GET", "/api/v1/agent-workspace", params=params, retry=True)
     if status != 200:
         _workspace_error(body, status, "list_failed", "Could not list your workspaces.")
     return json.dumps({"workspaces": (body or {}).get("workspaces", [])}, indent=2)
@@ -6020,7 +6048,13 @@ def workspace_create(run_environment_id: str, project_id: str, name: str, image:
     if not data["name"] or not data["image"]:
         _refuse("invalid_argument", "name and image are required.")
     # Not retried: a create has no key, so a retry could make a second workspace.
-    status, body = request_json(get_client(), "POST", "/api/v1/agent-workspace", data=data)
+    status, body = _workspace_request(
+        "POST", "/api/v1/agent-workspace", data=data,
+        if_it_may_have_arrived=(
+            "The workspace may have been created before the answer was lost. Call workspace_list "
+            "to check before trying again, so a second workspace is not made."
+        ),
+    )
     if status not in (200, 201):
         workspace_id = body.get("workspaceId") if isinstance(body, dict) else None
         _workspace_error(body, status, "create_refused", "The workspace could not be created.", workspace_id=workspace_id)
@@ -6046,10 +6080,18 @@ def workspace_run(
     To check or retry the same job, call again with the submission_key this
     returned. A new key starts a new job.
 
-    When the run environment needs a person's approval, this returns status
-    "awaiting_approval" and an `approve_at` link. A person must open it in
-    Foundry Connect and approve; no tool can approve. Share the link, then call
-    workspace_job_status.
+    `status` in the answer is one of:
+    - "submitted": the job is on the scheduler (`scheduler_job_id`).
+    - "awaiting_approval": the run environment needs a person's approval. A
+      person must open the `approve_at` link in Foundry Connect and approve; no
+      tool can approve. Share the link, then call workspace_job_status.
+    - "review_stale": the run environment changed after the approval, so a
+      person must review the job again at the `approve_at` link.
+    - "uncertain": the job may have started but its outcome is not known
+      (`reason` says why when the server gave one). Call workspace_job_status,
+      or call again with the SAME submission_key. Never use a new key for it.
+    A refusal is raised as an error with a `reason`; a lost connection is
+    raised with reason "uncertain" and the submission_key to check with.
 
     `command` is at most 32 KiB. Folders the job can see are set on the
     workspace in Foundry Connect; this tool cannot add or change them.
@@ -6077,15 +6119,20 @@ def workspace_run(
             get_client(), "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs",
             data=data, headers={"Idempotency-Key": key}, retry=True,
         )
-    except (requests.ConnectionError, requests.Timeout) as e:
+    except RequestFailed as e:
+        if not e.may_have_arrived:
+            # Nothing was sent, so no job started.
+            raise ToolError(json.dumps({
+                "error": e.message, "reason": e.reason, "submission_key": key, "workspace_id": workspace_id,
+            })) from e
         # The server may have received the submit before the connection failed,
         # so the job may have started. The key is the only way to find it again.
         raise ToolError(json.dumps({
-            "error": f"Foundry Connect could not be reached ({type(e).__name__}). {_ANSWER_LOST_MESSAGE}",
+            "error": f"{e.message} {_ANSWER_LOST_MESSAGE}",
             "reason": "uncertain",
             "submission_key": key,
             "workspace_id": workspace_id,
-        }))
+        })) from e
     outcome = body if isinstance(body, dict) else {}
     kind = outcome.get("kind")
     result = {"submission_key": key, "workspace_id": workspace_id}
@@ -6114,6 +6161,8 @@ def workspace_run(
     answer_lost = kind is None and (status in (502, 504) or not 400 <= status < 500)
     if kind == "uncertain" or answer_lost:
         result.update(status="uncertain", message=_ANSWER_LOST_MESSAGE)
+        if outcome.get("reason"):
+            result["reason"] = outcome["reason"]
         if answer_lost:
             result["http_status"] = status
         return json.dumps(result, indent=2)
@@ -6148,8 +6197,8 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     """
     _check_workspace_id(workspace_id)
     _check_submission_key(submission_key)
-    status, body = request_json(
-        get_client(), "GET", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}", retry=True,
+    status, body = _workspace_request(
+        "GET", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}", retry=True,
     )
     if status != 200:
         _workspace_error(body, status, "job_read_failed", "Could not read the job.")
@@ -6172,8 +6221,11 @@ def workspace_cancel(workspace_id: str, submission_key: str) -> str:
     _check_workspace_id(workspace_id)
     _check_submission_key(submission_key)
     # Not retried: a lost answer is read back with workspace_job_status.
-    status, body = request_json(
-        get_client(), "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}/cancel",
+    status, body = _workspace_request(
+        "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}/cancel",
+        if_it_may_have_arrived=(
+            "The cancel may have reached the scheduler. Call workspace_job_status to check before trying again."
+        ),
     )
     if status in (200, 202):
         return json.dumps({

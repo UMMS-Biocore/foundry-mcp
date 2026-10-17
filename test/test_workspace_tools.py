@@ -102,9 +102,29 @@ class TestRequestJson:
 
     def test_no_retry_by_default(self, via_client, http):
         http.side_effect = requests.ConnectionError("reset")
-        with pytest.raises(requests.ConnectionError):
+        with pytest.raises(client_module.RequestFailed) as exc:
             client_module.request_json(via_client, "POST", "/x")
         assert http.call_count == 1
+        assert exc.value.reason == "connection_failed"
+        assert exc.value.may_have_arrived is True
+
+    def test_a_broken_chunked_answer_is_retried_then_a_clear_error(self, via_client, http):
+        http.side_effect = requests.exceptions.ChunkedEncodingError("cut short")
+        with pytest.raises(client_module.RequestFailed) as exc:
+            client_module.request_json(via_client, "GET", "/x", retry=True)
+        assert http.call_count == 3
+        assert exc.value.reason == "connection_failed"
+        assert "ChunkedEncodingError" in exc.value.message
+        assert isinstance(exc.value.__cause__, requests.exceptions.ChunkedEncodingError)
+
+    def test_a_hostname_with_no_scheme_is_a_clear_error_and_not_retried(self, via_client, http):
+        http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
+        with pytest.raises(client_module.RequestFailed) as exc:
+            client_module.request_json(via_client, "GET", "/x", retry=True)
+        assert http.call_count == 1
+        assert exc.value.reason == "invalid_hostname"
+        assert exc.value.may_have_arrived is False
+        assert "https://" in exc.value.message
 
 
 class TestWorkspaceRun:
@@ -196,6 +216,14 @@ class TestWorkspaceRun:
         out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
         assert out["status"] == "uncertain"
         assert "same submission_key" in out["message"]
+        assert out["reason"] == "dispatch_unconfirmed"
+
+    def test_a_success_status_with_no_outcome_is_uncertain(self, via_client, http):
+        http.return_value = _response(200, {})
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["http_status"] == 200
+        assert "do not use a new key" in out["message"]
 
     def test_a_refusal_is_an_error_with_the_servers_reason(self, via_client, http):
         http.return_value = _response(409, {
@@ -274,7 +302,7 @@ class TestWorkspaceRun:
         assert err["reason"] == "invalid_body"
         assert err["submission_key"] == "k"
 
-    @pytest.mark.parametrize("exc_type", [requests.Timeout, requests.ConnectionError])
+    @pytest.mark.parametrize("exc_type", [requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError])
     def test_every_attempt_failing_in_transport_keeps_the_minted_key(self, via_client, http, exc_type):
         http.side_effect = exc_type("read timed out")
         with pytest.raises(ToolError) as exc:
@@ -288,6 +316,34 @@ class TestWorkspaceRun:
         assert err["workspace_id"] == WS
         assert "same submission_key" in err["error"] and "do not use a new key" in err["error"]
 
+    def test_a_bad_hostname_is_refused_with_the_key_and_not_called_uncertain(self, via_client, http):
+        http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "invalid_hostname"
+        assert err["submission_key"] == "k"
+        assert http.call_count == 1
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_an_auth_refusal_says_to_check_the_token(self, via_client, http, status):
+        http.return_value = _response(status, {"error": "Unauthorized"})
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["http_status"] == status
+        assert "token" in err["error"]
+        assert err["submission_key"] == "k"
+
+    def test_an_auth_refusal_with_a_server_message_keeps_it_and_adds_the_token_hint(self, via_client, http):
+        http.return_value = _response(403, {"reason": "workspace_forbidden", "message": "Not your workspace."})
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "workspace_forbidden"
+        assert err["error"] == "Not your workspace."
+        assert "token" in err["remedy"]
+
     def test_the_tool_offers_no_mount_or_docker_host_parameter(self):
         import inspect
         params = set(inspect.signature(server.workspace_run).parameters)
@@ -297,6 +353,8 @@ class TestWorkspaceRun:
         doc = " ".join(server.workspace_run.__doc__.split())
         assert "LAUNCHES" in doc and "confirm with the user" in doc
         assert "A new key starts a new job." in doc
+        for status in ("submitted", "awaiting_approval", "review_stale", "uncertain"):
+            assert status in doc
 
 
 class TestWorkspaceJobStatus:
@@ -363,6 +421,59 @@ class TestWorkspaceCancel:
         with pytest.raises(ToolError) as exc:
             server.workspace_cancel(WS, "k")
         assert _error(exc)["reason"] == "environment_unreachable"
+
+
+class TestTransportErrorsInTheOtherTools:
+    @pytest.mark.parametrize("exc_type", [requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError])
+    def test_list_and_status_turn_transport_errors_into_tool_errors(self, via_client, http, exc_type):
+        http.side_effect = exc_type("down")
+        for call in (lambda: server.workspace_list(), lambda: server.workspace_job_status(WS, "k")):
+            with pytest.raises(ToolError) as exc:
+                call()
+            err = _error(exc)
+            assert err["reason"] == "connection_failed"
+            assert "could not be reached" in err["error"]
+
+    def test_a_create_timeout_says_to_check_the_list_before_retrying(self, via_client, http):
+        http.side_effect = requests.Timeout("read timed out")
+        with pytest.raises(ToolError) as exc:
+            server.workspace_create("12", "34", "s", "img")
+        err = _error(exc)
+        assert http.call_count == 1
+        assert err["reason"] == "connection_failed"
+        assert "workspace_list" in err["error"]
+
+    def test_a_cancel_transport_error_says_to_read_the_job(self, via_client, http):
+        http.side_effect = requests.ConnectionError("reset")
+        with pytest.raises(ToolError) as exc:
+            server.workspace_cancel(WS, "k")
+        err = _error(exc)
+        assert http.call_count == 1
+        assert "workspace_job_status" in err["error"]
+
+    def test_a_bad_hostname_is_a_clear_error_in_every_tool(self, via_client, http):
+        http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
+        for call in (
+            lambda: server.workspace_list(),
+            lambda: server.workspace_create("12", "34", "s", "img"),
+            lambda: server.workspace_job_status(WS, "k"),
+            lambda: server.workspace_cancel(WS, "k"),
+        ):
+            with pytest.raises(ToolError) as exc:
+                call()
+            err = _error(exc)
+            assert err["reason"] == "invalid_hostname"
+            assert "workspace_list" not in err["error"]
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_an_auth_refusal_in_list_says_to_check_the_token(self, via_client, http, status):
+        http.return_value = _html_response(status, "<html>Unauthorized</html>")
+        with pytest.raises(ToolError) as exc:
+            server.workspace_list()
+        err = _error(exc)
+        assert err["reason"] == ("unauthorized" if status == 401 else "forbidden")
+        assert "token" in err["error"]
+        assert "<" not in err["error"]
 
 
 class TestWorkspaceListAndCreate:

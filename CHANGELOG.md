@@ -21,7 +21,11 @@
     a queued or running one.
   - Refusals (a cap reached, a rejected or expired request, a key reused with a
     different job, a job that cannot be cancelled) are raised as MCP errors
-    with the server's `reason` and a sentence saying what to do.
+    with the server's `reason` and a sentence saying what to do. A 401 or 403
+    says to check the client's token, a lost connection in any workspace tool
+    is a clear error (after a `workspace_create` one, check `workspace_list`
+    before trying again), and a hostname that is not a full URL is named as
+    the problem.
 - **Pipelines and processes from git**
   - `connect_pipeline_repository`, `get_pipeline_repository` and
     `export_pipeline_revision` connect a pipeline to a git repository and
