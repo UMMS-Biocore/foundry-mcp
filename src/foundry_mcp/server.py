@@ -25,6 +25,7 @@ import re
 import shlex
 import tempfile
 import os
+import uuid
 import requests
 
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -33,7 +34,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Import from our modules
-from .client import get_client
+from .client import RequestFailed, get_client, request_json, send_request
 from .config import (
     set_credentials, validate_credentials, get_fixed_hostname, get_credentials,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
@@ -5875,6 +5876,386 @@ def list_pipeline_menu_groups() -> str:
     Process menu groups are a separate list (see list_menu_groups).
     """
     return _git_call("GET", "/api/v1/menu-group/pipeline", "listing pipeline menu groups")
+
+
+# ============================================================================
+# Workspace Tools
+#
+# Run code in a container on a run environment's workspace. These call the REST
+# API through `request_json` rather than the SDK's `call`, because a submit
+# needs an `Idempotency-Key` header and the typed refusal in the error body.
+#
+# Approval is a person's step in a signed in browser session. The server refuses
+# an approve or reject made with a token, and no tool here offers one: a tool
+# hands back the approval link and the client shares it.
+#
+# Refusals are raised as ToolError carrying `reason`, so a refused job never
+# reads as a submitted one.
+# ============================================================================
+
+_WORKSPACE_ID_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+_SUBMISSION_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_MAX_COMMAND_BYTES = 32 * 1024
+
+# What a person should do about a submit outcome that did not start a job. The
+# server's own message wins when it sends one.
+_SUBMIT_REFUSALS = {
+    "conflict": (
+        "submission_key_conflict",
+        "This submission_key was already used for a different job. Call again with the same "
+        "command and resources to read that job, or use a new submission_key for a new job.",
+    ),
+    "configuration_changed": (
+        "configuration_changed",
+        "The run environment's settings changed while the job was being submitted. Call again "
+        "with the same submission_key.",
+    ),
+    "dispatch_refused": (
+        "dispatch_refused",
+        "The run environment refused to start the job. Check the run environment, then use a new "
+        "submission_key to try again.",
+    ),
+}
+
+# Every outcome kind that says the job was not submitted.
+_SUBMIT_REFUSAL_KINDS = frozenset(_SUBMIT_REFUSALS) | {"refused", "request_terminal"}
+
+_ANSWER_LOST_MESSAGE = (
+    "The job may have started but its answer was lost. Call workspace_job_status, or call "
+    "again with the same submission_key; do not use a new key."
+)
+
+_NOT_FOUND_MESSAGE = (
+    "Not found. Either the workspace or job does not exist for you, or workspace jobs are not "
+    "turned on in this Foundry Connect installation."
+)
+
+
+_AUTH_MESSAGE = (
+    "Foundry Connect did not accept this request's credentials. Check the token this client is "
+    "configured with: it must be set, current (not expired or revoked) and belong to a user who "
+    "may use this workspace."
+)
+
+_STATUS_FALLBACKS = {
+    401: ("unauthorized", _AUTH_MESSAGE),
+    403: ("forbidden", _AUTH_MESSAGE),
+    404: ("not_found_or_disabled", _NOT_FOUND_MESSAGE),
+}
+
+
+def _workspace_error(body, http_status: int, fallback_reason: str, fallback_message: str, **extra):
+    """Raise a ToolError from a refusal body, keeping the server's reason and message."""
+    body = body if isinstance(body, dict) else {}
+    fallback_reason, fallback_message = _STATUS_FALLBACKS.get(http_status, (fallback_reason, fallback_message))
+    reason = body.get("reason") or fallback_reason
+    message = body.get("message") or fallback_message
+    error = {"error": message, "reason": reason, "http_status": http_status}
+    if body.get("remedy"):
+        error["remedy"] = body["remedy"]
+    elif http_status in (401, 403) and message != _AUTH_MESSAGE:
+        error["remedy"] = _AUTH_MESSAGE
+    error.update({k: v for k, v in extra.items() if v is not None})
+    raise ToolError(json.dumps(error))
+
+
+def _refuse(reason: str, message: str):
+    raise ToolError(json.dumps({"error": message, "reason": reason}))
+
+
+def _workspace_request(method: str, endpoint: str, if_it_may_have_arrived: str = "", **kwargs):
+    """
+    `request_json` for the workspace tools, with a request that got no HTTP
+    answer raised as a ToolError. `if_it_may_have_arrived` is the sentence added
+    when the request may have reached the server, saying how to check before
+    trying again.
+    """
+    try:
+        return request_json(get_client(), method, endpoint, **kwargs)
+    except RequestFailed as e:
+        message = e.message
+        if e.may_have_arrived:
+            message = f"{message} {if_it_may_have_arrived or 'Try again.'}"
+        raise ToolError(json.dumps({"error": message, "reason": e.reason})) from e
+
+
+def _check_workspace_id(workspace_id: str) -> None:
+    if not isinstance(workspace_id, str) or not _WORKSPACE_ID_PATTERN.match(workspace_id):
+        _refuse("invalid_workspace_id", "workspace_id must be a workspace id as workspace_list or workspace_create returned it.")
+
+
+def _check_submission_key(key: str) -> None:
+    if not isinstance(key, str) or not _SUBMISSION_KEY_PATTERN.match(key):
+        _refuse(
+            "invalid_submission_key",
+            "submission_key must be 1 to 128 characters of letters, digits and . _ : -",
+        )
+
+
+def _positive_int(value, name: str) -> int:
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        number = 0
+    if number < 1:
+        _refuse("invalid_argument", f"{name} must be a positive whole number.")
+    return number
+
+
+def _web_base_url() -> str:
+    """The Foundry Connect address the client is configured with, for links a person opens."""
+    hostname, _ = get_credentials()
+    base = (hostname or get_fixed_hostname() or "").rstrip("/")
+    if base.endswith("/api"):
+        base = base[: -len("/api")]
+    return base
+
+
+def _approve_link(workspace_id: str, request_id) -> str:
+    return f"{_web_base_url()}/workspaces/{workspace_id}/requests/{request_id}"
+
+
+@mcp.tool()
+def workspace_list(run_environment_id: str = "") -> str:
+    """
+    List your workspaces, newest first, optionally only those on one run
+    environment. Each gives its workspace_id, name, run environment, image and
+    state (provisioning, ready, archived, destroyed).
+    """
+    params = None
+    if str(run_environment_id or "").strip():
+        params = {"profileClusterId": _positive_int(run_environment_id, "run_environment_id")}
+    status, body = _workspace_request("GET", "/api/v1/agent-workspace", params=params, retry=True)
+    if status != 200:
+        _workspace_error(body, status, "list_failed", "Could not list your workspaces.")
+    return json.dumps({"workspaces": (body or {}).get("workspaces", [])}, indent=2)
+
+
+@mcp.tool()
+def workspace_create(run_environment_id: str, project_id: str, name: str, image: str) -> str:
+    """
+    Create a workspace on a run environment that has container execution turned
+    on: a folder on the cluster that jobs from workspace_run run in. `image` is
+    the container image jobs use when the environment names none. Folders the
+    jobs can see are chosen by the run environment's owner and the workspace
+    owner in Foundry Connect, not here.
+
+    WARNING: This creates a folder on the cluster. Confirm with the user first.
+    """
+    data = {
+        "profileClusterId": _positive_int(run_environment_id, "run_environment_id"),
+        "projectId": _positive_int(project_id, "project_id"),
+        "name": str(name or "").strip(),
+        "image": str(image or "").strip(),
+    }
+    if not data["name"] or not data["image"]:
+        _refuse("invalid_argument", "name and image are required.")
+    # Not retried: a create has no key, so a retry could make a second workspace.
+    status, body = _workspace_request(
+        "POST", "/api/v1/agent-workspace", data=data,
+        if_it_may_have_arrived=(
+            "The workspace may have been created before the answer was lost. Call workspace_list "
+            "to check before trying again, so a second workspace is not made."
+        ),
+    )
+    if status not in (200, 201):
+        workspace_id = body.get("workspaceId") if isinstance(body, dict) else None
+        _workspace_error(body, status, "create_refused", "The workspace could not be created.", workspace_id=workspace_id)
+    return json.dumps({"workspace": body}, indent=2)
+
+
+@mcp.tool()
+def workspace_run(
+    workspace_id: str,
+    command: str,
+    cpus: int = 1,
+    memory_mb: int = 1024,
+    wall_minutes: int = 30,
+    submission_key: str = "",
+) -> str:
+    """
+    Run a command in a container in one of your workspaces, as a job on the
+    workspace's run environment.
+
+    This LAUNCHES cluster compute (it consumes cluster time). Always confirm with
+    the user before calling.
+
+    To check or retry the same job, call again with the submission_key this
+    returned. A new key starts a new job.
+
+    `status` in the answer is one of:
+    - "submitted": the job is on the scheduler (`scheduler_job_id`).
+    - "awaiting_approval": the run environment needs a person's approval. A
+      person must open the `approve_at` link in Foundry Connect and approve; no
+      tool can approve. Share the link, then call workspace_job_status.
+    - "review_stale": the run environment changed after the approval, so a
+      person must review the job again at the `approve_at` link.
+    - "uncertain": the job may have started but its outcome is not known
+      (`reason` says why when the server gave one). Call workspace_job_status,
+      or call again with the SAME submission_key. Never use a new key for it.
+    A refusal is raised as an error with a `reason`; a lost connection is
+    raised with reason "uncertain" and the submission_key to check with.
+
+    `command` is at most 32 KiB. Folders the job can see are set on the
+    workspace in Foundry Connect; this tool cannot add or change them.
+    """
+    _check_workspace_id(workspace_id)
+    key = submission_key.strip() if isinstance(submission_key, str) else ""
+    if key:
+        _check_submission_key(key)
+    else:
+        key = "mcp-" + uuid.uuid4().hex
+    if not isinstance(command, str) or not command.strip():
+        _refuse("invalid_argument", "command is required.")
+    if len(command.encode("utf-8")) > _MAX_COMMAND_BYTES:
+        _refuse("command_too_large", "command is over 32 KiB. Put the script in a file in the workspace and run that.")
+    data = {
+        "command": command,
+        "cpus": _positive_int(cpus, "cpus"),
+        "memoryMb": _positive_int(memory_mb, "memory_mb"),
+        "wallMinutes": _positive_int(wall_minutes, "wall_minutes"),
+    }
+
+    # One key for the whole call: every retry inside it is the same logical submit.
+    try:
+        status, body, earlier_attempt_lost = send_request(
+            get_client(), "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs",
+            data=data, headers={"Idempotency-Key": key}, retry=True,
+        )
+    except RequestFailed as e:
+        if not e.may_have_arrived:
+            # Nothing was sent, so no job started.
+            raise ToolError(json.dumps({
+                "error": e.message, "reason": e.reason, "submission_key": key, "workspace_id": workspace_id,
+            })) from e
+        # The server may have received the submit before the connection failed,
+        # so the job may have started. The key is the only way to find it again.
+        raise ToolError(json.dumps({
+            "error": f"{e.message} {_ANSWER_LOST_MESSAGE}",
+            "reason": "uncertain",
+            "submission_key": key,
+            "workspace_id": workspace_id,
+        })) from e
+    outcome = body if isinstance(body, dict) else {}
+    kind = outcome.get("kind")
+    # Only a string kind can name an outcome. Any other kind (a list or an
+    # object) is unhashable, so a set or dict lookup on it would raise and lose
+    # the key; it is an outcome this client cannot read, so it stays uncertain.
+    kind_readable = kind is None or isinstance(kind, str)
+    result = {"submission_key": key, "workspace_id": workspace_id}
+
+    if kind == "submitted":
+        result.update(status="submitted", scheduler_job_id=outcome.get("jobId"),
+                      message="The job was submitted. Call workspace_job_status with this submission_key to follow it.")
+        return json.dumps(result, indent=2)
+    if kind == "awaiting_approval":
+        result.update(
+            status="awaiting_approval",
+            approve_at=_approve_link(workspace_id, outcome.get("requestId")),
+            message="A person must approve this job in Foundry Connect before it runs. Share the link, then call workspace_job_status.",
+        )
+        return json.dumps(result, indent=2)
+    if kind == "review_stale":
+        result.update(
+            status="review_stale",
+            approve_at=_approve_link(workspace_id, outcome.get("requestId")),
+            message="The run environment changed after the approval. A person must review the job again at the link, then call workspace_job_status.",
+        )
+        return json.dumps(result, indent=2)
+    # A job is reported as not submitted only when the server said so: a 4xx
+    # carrying a refusal this client knows, or a 4xx with no outcome at all (a
+    # validation error) when no earlier attempt of this call was lost. Anything
+    # else may hide a started job: a gateway 502 or 504 lost the answer, a 2xx
+    # or 5xx is never a refusal, a 4xx with no outcome after a lost attempt (a
+    # gateway 408 or 429) says nothing about that attempt, and an outcome kind
+    # this client does not know (a newer or older server) cannot be read.
+    refused = 400 <= status < 500 and kind_readable and (
+        kind in _SUBMIT_REFUSAL_KINDS or (kind is None and not earlier_attempt_lost)
+    )
+    if kind == "uncertain" or not refused:
+        result.update(status="uncertain", message=_ANSWER_LOST_MESSAGE)
+        if outcome.get("reason"):
+            result["reason"] = outcome["reason"]
+        if kind != "uncertain":
+            result["http_status"] = status
+            if kind is not None:
+                result["server_outcome"] = kind
+        return json.dumps(result, indent=2)
+
+    if kind == "request_terminal":
+        state = outcome.get("state") or "rejected"
+        _refuse_with_key(
+            f"request_{state}",
+            f"This job's approval request was {state}. Call again with a new submission_key to ask again.",
+            key,
+            status,
+        )
+    if kind in _SUBMIT_REFUSALS:
+        reason, message = _SUBMIT_REFUSALS[kind]
+        if kind == "dispatch_refused" and outcome.get("reason"):
+            reason = outcome["reason"]
+        _workspace_error({"reason": reason, "message": outcome.get("message") or message}, status, reason, message, submission_key=key)
+    _workspace_error(outcome, status, "submit_refused", "The job was not submitted.", submission_key=key)
+
+
+def _refuse_with_key(reason: str, message: str, key: str, http_status: int):
+    raise ToolError(json.dumps({"error": message, "reason": reason, "http_status": http_status, "submission_key": key}))
+
+
+@mcp.tool()
+def workspace_job_status(workspace_id: str, submission_key: str) -> str:
+    """
+    Read one job of your workspace by the submission_key workspace_run returned.
+    `status` is one of awaiting_approval, rejected, expired, starting, uncertain,
+    dispatch_refused, queued, running, completed, failed, unknown. A job waiting
+    for approval also carries its `approve_at` link.
+    """
+    _check_workspace_id(workspace_id)
+    _check_submission_key(submission_key)
+    status, body = _workspace_request(
+        "GET", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}", retry=True,
+    )
+    if status != 200:
+        _workspace_error(body, status, "job_read_failed", "Could not read the job.")
+    result = {"job": body}
+    if isinstance(body, dict) and body.get("status") == "awaiting_approval" and body.get("requestId"):
+        result["approve_at"] = _approve_link(workspace_id, body["requestId"])
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def workspace_cancel(workspace_id: str, submission_key: str) -> str:
+    """
+    Cancel a queued or running job of your workspace through its run
+    environment's scheduler. Returns once the scheduler took the cancel; call
+    workspace_job_status to see how the job ended. A job still waiting for
+    approval is not cancelled here: a person rejects it at its approval link.
+
+    WARNING: This stops cluster work. Confirm with the user first.
+    """
+    _check_workspace_id(workspace_id)
+    _check_submission_key(submission_key)
+    # Not retried: a lost answer is read back with workspace_job_status.
+    status, body = _workspace_request(
+        "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}/cancel",
+        if_it_may_have_arrived=(
+            "The cancel may have reached the scheduler. Call workspace_job_status to check before trying again."
+        ),
+    )
+    if status in (200, 202):
+        return json.dumps({
+            "status": "cancel_requested",
+            "submission_key": submission_key,
+            "message": "The scheduler took the cancel. Call workspace_job_status to see how the job ended.",
+        }, indent=2)
+    if isinstance(body, dict) and body.get("reason") == "job_not_cancellable":
+        job_status = body.get("status")
+        if job_status == "awaiting_approval":
+            message = "This job is waiting for approval and has not started. A person can reject it at its approval link."
+        else:
+            message = f"This job cannot be cancelled: its status is {job_status}. Only a queued or running job with a scheduler job can be."
+        _workspace_error({"reason": "job_not_cancellable", "message": message}, status, "", "", job_status=job_status)
+    _workspace_error(body, status, "cancel_failed", "The job could not be cancelled.")
 
 
 # ============================================================================

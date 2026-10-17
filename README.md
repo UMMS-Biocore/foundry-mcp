@@ -170,6 +170,22 @@ Discover and launch applications in Foundry Connect.
 
 ---
 
+### 📦 Workspaces (5 tools)
+
+Run code in a container in a workspace on a run environment that has container
+execution turned on. A job that needs approval returns a link: a person opens
+it in Foundry Connect and approves there. No tool can approve a job.
+
+| Tool                   | What It Does                                                        |
+| ---------------------- | ------------------------------------------------------------------- |
+| `workspace_list`       | List your workspaces, optionally on one run environment             |
+| `workspace_create`     | Create a workspace on a run environment                             |
+| `workspace_run`        | Run a command as a job; returns its `submission_key` (reuse it to retry the same job) and, when approval is needed, the approval link |
+| `workspace_job_status` | Read a job by its `submission_key`                                  |
+| `workspace_cancel`     | Cancel a queued or running job                                      |
+
+---
+
 ### 🗂️ Dataset & Collection Management (7 tools)
 
 Search and organize datasets and collections.

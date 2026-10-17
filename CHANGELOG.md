@@ -3,6 +3,33 @@
 ## [Unreleased]
 
 ### Added
+- **Workspaces: run code in a container on a run environment**
+  - `workspace_list` and `workspace_create` list and create your workspaces on
+    a run environment that has container execution turned on.
+  - `workspace_run` runs a command as a job. It returns a `submission_key`;
+    calling again with that key reads or retries the same job, and a new key
+    starts a new job. Every retry inside one call sends the same key, so a lost
+    answer never starts a second job. A job is reported as not submitted only
+    when the server refuses it with a 4xx. When the answer is lost on every
+    try (a gateway error, no connection, an answer that cannot be read or a
+    redirect to an unusable address), a later try is refused with no outcome
+    after an earlier one was lost, or the server answers with an outcome this
+    client does not know, the call reports the job as `uncertain` with its
+    key, so the client can read it back or retry with the same key. A key you
+    pass is checked before any request, and a command over 32 KiB is refused
+    locally.
+  - When the run environment needs a person's approval, `workspace_run` and
+    `workspace_job_status` return an `approve_at` link. A person approves in a
+    signed in Foundry Connect session; no tool can approve or reject a job.
+  - `workspace_job_status` reads a job by its key and `workspace_cancel` stops
+    a queued or running one.
+  - Refusals (a cap reached, a rejected or expired request, a key reused with a
+    different job, a job that cannot be cancelled) are raised as MCP errors
+    with the server's `reason` and a sentence saying what to do. A 401 or 403
+    says to check the client's token, a lost connection in any workspace tool
+    is a clear error (after a `workspace_create` one, check `workspace_list`
+    before trying again), and a hostname that is not a full URL is named as
+    the problem.
 - **Pipelines and processes from git**
   - `connect_pipeline_repository`, `get_pipeline_repository` and
     `export_pipeline_revision` connect a pipeline to a git repository and
