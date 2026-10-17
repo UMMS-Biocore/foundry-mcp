@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from typing import Any, Dict, NamedTuple, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from viafoundry.client import ViaFoundryClient
@@ -109,7 +110,9 @@ _TRANSPORT_ERRORS = (
     requests.Timeout,
     requests.exceptions.ChunkedEncodingError,
 )
-# The configured address cannot be used, so nothing was sent. Never retried.
+# What requests raises for an address it cannot use. Checked against the
+# configured address before anything is sent; raised while sending, it can only
+# come from a redirect Location, so the request had already been sent.
 _ADDRESS_ERRORS = (
     requests.exceptions.MissingSchema,
     requests.exceptions.InvalidSchema,
@@ -123,7 +126,9 @@ class RequestFailed(Exception):
 
     `reason` is "connection_failed" when the request may have reached the
     server (`may_have_arrived` is True), or "invalid_hostname" when the
-    configured address is unusable and nothing was sent.
+    configured address is unusable and nothing was sent. An unusable address
+    met while sending (a redirect to one) is "connection_failed", because
+    the request had already been sent.
     """
 
     def __init__(self, reason: str, message: str, may_have_arrived: bool):
@@ -200,6 +205,8 @@ def send_request(
     if headers:
         merged.update(headers)
 
+    _check_address(method, url, params)
+
     tries = attempts if retry else 1
     response = None
     for attempt in range(1, tries + 1):
@@ -209,11 +216,14 @@ def send_request(
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
         except _ADDRESS_ERRORS as e:
+            # The configured address passed `_check_address`, so this comes from
+            # a redirect Location (or an earlier attempt already used the
+            # address): a request was sent and the server may have acted on it.
+            # Not retried: the same redirect would fail the same way.
             raise RequestFailed(
-                "invalid_hostname",
-                "The Foundry Connect address this client is configured with is not a usable URL. "
-                "Set the hostname to a full address such as https://foundry.example.org.",
-                may_have_arrived=False,
+                "connection_failed",
+                f"Foundry Connect's answer could not be followed ({type(e).__name__}).",
+                may_have_arrived=True,
             ) from e
         except _TRANSPORT_ERRORS as e:
             if attempt == tries:
@@ -250,6 +260,26 @@ def send_request(
         body = None
     # Every attempt before the last one was retried because its answer was lost.
     return Answer(response.status_code, body, earlier_attempt_lost=attempt > 1)
+
+
+def _check_address(method: str, url: str, params: Optional[Dict]) -> None:
+    """
+    Raise RequestFailed("invalid_hostname") when the configured address is not
+    a URL requests can send to. Runs before anything is sent, so a failure here
+    is the only address error that proves no request left this client.
+    """
+    try:
+        prepared = requests.Request(method.upper(), url, params=params).prepare()
+        scheme = urlparse(prepared.url).scheme.lower()
+        if scheme not in ("http", "https"):
+            raise requests.exceptions.InvalidSchema(f"No connection adapters were found for {scheme!r}")
+    except _ADDRESS_ERRORS as e:
+        raise RequestFailed(
+            "invalid_hostname",
+            "The Foundry Connect address this client is configured with is not a usable URL. "
+            "Set the hostname to a full address such as https://foundry.example.org.",
+            may_have_arrived=False,
+        ) from e
 
 
 def reset_clients():

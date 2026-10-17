@@ -139,14 +139,38 @@ class TestRequestJson:
         http.return_value = _response(429)
         assert client_module.send_request(via_client, "POST", "/x", retry=True).earlier_attempt_lost is False
 
-    def test_a_hostname_with_no_scheme_is_a_clear_error_and_not_retried(self, via_client, http):
-        http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
+    @pytest.mark.parametrize("hostname", ["foundry.example.org", "https://", "ftp://foundry.example.org"])
+    def test_an_unusable_hostname_is_a_clear_error_and_nothing_is_sent(self, via_client, http, hostname):
+        via_client.auth.hostname = hostname
         with pytest.raises(client_module.RequestFailed) as exc:
             client_module.request_json(via_client, "GET", "/x", retry=True)
-        assert http.call_count == 1
+        assert http.call_count == 0
         assert exc.value.reason == "invalid_hostname"
         assert exc.value.may_have_arrived is False
         assert "https://" in exc.value.message
+
+    @pytest.mark.parametrize("exc", [
+        requests.exceptions.InvalidSchema("No connection adapters were found for 'ftp://elsewhere'"),
+        requests.exceptions.InvalidURL("Invalid URL 'https://': No host supplied"),
+        requests.exceptions.MissingSchema("Invalid URL 'elsewhere'"),
+    ])
+    def test_an_address_error_while_sending_came_from_a_redirect_and_may_have_arrived(self, via_client, http, exc):
+        # The configured address is fine, so requests met the bad address in a
+        # redirect Location: the first request was sent.
+        http.side_effect = exc
+        with pytest.raises(client_module.RequestFailed) as exc_info:
+            client_module.request_json(via_client, "POST", "/x", retry=True)
+        assert http.call_count == 1
+        assert exc_info.value.reason == "connection_failed"
+        assert exc_info.value.may_have_arrived is True
+
+    def test_an_address_error_after_a_lost_attempt_may_have_arrived(self, via_client, http):
+        http.side_effect = [requests.Timeout("slow"), requests.exceptions.InvalidURL("Invalid URL")]
+        with pytest.raises(client_module.RequestFailed) as exc:
+            client_module.request_json(via_client, "POST", "/x", retry=True)
+        assert http.call_count == 2
+        assert exc.value.reason == "connection_failed"
+        assert exc.value.may_have_arrived is True
 
 
 class TestWorkspaceRun:
@@ -381,13 +405,56 @@ class TestWorkspaceRun:
         assert "same submission_key" in err["error"] and "do not use a new key" in err["error"]
 
     def test_a_bad_hostname_is_refused_with_the_key_and_not_called_uncertain(self, via_client, http):
-        http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
+        via_client.auth.hostname = "foundry.example.org"
         with pytest.raises(ToolError) as exc:
             server.workspace_run(WS, "echo hi", submission_key="k")
         err = _error(exc)
         assert err["reason"] == "invalid_hostname"
         assert err["submission_key"] == "k"
-        assert http.call_count == 1
+        assert http.call_count == 0
+
+    @pytest.mark.parametrize("side_effect", [
+        [requests.Timeout("slow"), requests.exceptions.InvalidURL("Invalid URL")],
+        [requests.exceptions.InvalidSchema("No connection adapters were found")],
+    ])
+    def test_an_address_error_once_a_request_was_sent_is_uncertain(self, via_client, http, side_effect):
+        http.side_effect = side_effect
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "uncertain"
+        assert err["submission_key"] == "k"
+        assert "same submission_key" in err["error"]
+
+    @pytest.mark.parametrize("status,body", [
+        (201, {"kind": "queued_v2"}),
+        (202, {"kind": "queued_v2"}),
+        (500, {"kind": "internal"}),
+        (409, {"kind": "held_for_quota"}),
+    ])
+    def test_an_outcome_kind_this_client_does_not_know_is_uncertain(self, via_client, http, status, body):
+        http.return_value = _response(status, body)
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["submission_key"] == "k"
+        assert out["http_status"] == status
+        assert out["server_outcome"] == body["kind"]
+        assert "not submitted" not in out["message"]
+
+    @pytest.mark.parametrize("status", [200, 201, 500, 503])
+    def test_a_known_refusal_kind_outside_a_4xx_is_uncertain(self, via_client, http, status):
+        http.return_value = _response(status, {"kind": "conflict"})
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["http_status"] == status
+
+    def test_a_typed_refused_after_a_lost_attempt_stays_a_refusal(self, via_client, http):
+        http.side_effect = [requests.Timeout("slow"), _response(404, {"kind": "refused", "reason": "workspace_not_found"})]
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "workspace_not_found"
+        assert err["submission_key"] == "k"
 
     @pytest.mark.parametrize("status", [401, 403])
     def test_an_auth_refusal_says_to_check_the_token(self, via_client, http, status):
@@ -516,7 +583,7 @@ class TestTransportErrorsInTheOtherTools:
         assert "workspace_job_status" in err["error"]
 
     def test_a_bad_hostname_is_a_clear_error_in_every_tool(self, via_client, http):
-        http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
+        via_client.auth.hostname = "foundry.example.org"
         for call in (
             lambda: server.workspace_list(),
             lambda: server.workspace_create("12", "34", "s", "img"),

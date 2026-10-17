@@ -5917,6 +5917,9 @@ _SUBMIT_REFUSALS = {
     ),
 }
 
+# Every outcome kind that says the job was not submitted.
+_SUBMIT_REFUSAL_KINDS = frozenset(_SUBMIT_REFUSALS) | {"refused", "request_terminal"}
+
 _ANSWER_LOST_MESSAGE = (
     "The job may have started but its answer was lost. Call workspace_job_status, or call "
     "again with the same submission_key; do not use a new key."
@@ -6155,20 +6158,24 @@ def workspace_run(
             message="The run environment changed after the approval. A person must review the job again at the link, then call workspace_job_status.",
         )
         return json.dumps(result, indent=2)
-    # A gateway 502 or 504 means the answer was lost on the way back, and a 2xx
-    # or 5xx with no outcome cannot be read as one. A 4xx with no outcome (a
-    # gateway 408, 429 or HTML 400) after an earlier attempt was lost does not
-    # say what that earlier attempt did. In each case the job may have started,
-    # so it is never reported as not submitted.
-    answer_lost = kind is None and (
-        status in (502, 504) or not 400 <= status < 500 or earlier_attempt_lost
+    # A job is reported as not submitted only when the server said so: a 4xx
+    # carrying a refusal this client knows, or a 4xx with no outcome at all (a
+    # validation error) when no earlier attempt of this call was lost. Anything
+    # else may hide a started job: a gateway 502 or 504 lost the answer, a 2xx
+    # or 5xx is never a refusal, a 4xx with no outcome after a lost attempt (a
+    # gateway 408 or 429) says nothing about that attempt, and an outcome kind
+    # this client does not know (a newer or older server) cannot be read.
+    refused = 400 <= status < 500 and (
+        kind in _SUBMIT_REFUSAL_KINDS or (kind is None and not earlier_attempt_lost)
     )
-    if kind == "uncertain" or answer_lost:
+    if kind == "uncertain" or not refused:
         result.update(status="uncertain", message=_ANSWER_LOST_MESSAGE)
         if outcome.get("reason"):
             result["reason"] = outcome["reason"]
-        if answer_lost:
+        if kind != "uncertain":
             result["http_status"] = status
+            if kind is not None:
+                result["server_outcome"] = kind
         return json.dumps(result, indent=2)
 
     if kind == "request_terminal":
