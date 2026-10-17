@@ -117,6 +117,28 @@ class TestRequestJson:
         assert "ChunkedEncodingError" in exc.value.message
         assert isinstance(exc.value.__cause__, requests.exceptions.ChunkedEncodingError)
 
+    @pytest.mark.parametrize("exc", [
+        requests.exceptions.ContentDecodingError("bad gzip"),
+        requests.exceptions.TooManyRedirects("loop"),
+    ])
+    def test_any_other_requests_error_is_a_request_failed_that_may_have_arrived(self, via_client, http, exc):
+        http.side_effect = exc
+        with pytest.raises(client_module.RequestFailed) as exc_info:
+            client_module.request_json(via_client, "POST", "/x", retry=True)
+        assert http.call_count == 1
+        assert exc_info.value.reason == "connection_failed"
+        assert exc_info.value.may_have_arrived is True
+        assert type(exc).__name__ in exc_info.value.message
+
+    def test_send_request_says_when_an_earlier_attempt_was_lost(self, via_client, http):
+        http.side_effect = [requests.Timeout("slow"), _response(429)]
+        answer = client_module.send_request(via_client, "POST", "/x", retry=True)
+        assert (answer.status, answer.body, answer.earlier_attempt_lost) == (429, None, True)
+
+    def test_send_request_on_the_first_attempt_lost_nothing(self, via_client, http):
+        http.return_value = _response(429)
+        assert client_module.send_request(via_client, "POST", "/x", retry=True).earlier_attempt_lost is False
+
     def test_a_hostname_with_no_scheme_is_a_clear_error_and_not_retried(self, via_client, http):
         http.side_effect = requests.exceptions.MissingSchema("Invalid URL")
         with pytest.raises(client_module.RequestFailed) as exc:
@@ -301,6 +323,48 @@ class TestWorkspaceRun:
         err = _error(exc)
         assert err["reason"] == "invalid_body"
         assert err["submission_key"] == "k"
+
+    def test_a_429_after_a_lost_attempt_is_uncertain_not_refused(self, via_client, http):
+        http.side_effect = [requests.Timeout("slow"), _response(429)]
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["submission_key"] == "k"
+        assert out["http_status"] == 429
+        assert "not submitted" not in out["message"]
+
+    @pytest.mark.parametrize("last", [
+        lambda: _response(408),
+        lambda: _response(429),
+        lambda: _html_response(400, "<html><body>Bad Request</body></html>"),
+    ])
+    def test_a_client_error_with_no_outcome_after_lost_attempts_is_uncertain(self, via_client, http, last):
+        http.side_effect = [requests.Timeout("slow"), requests.Timeout("slow"), last()]
+        out = json.loads(server.workspace_run(WS, "echo hi"))
+        assert out["status"] == "uncertain"
+        assert out["submission_key"].startswith("mcp-")
+        assert "not submitted" not in out["message"]
+        assert "<" not in out["message"]
+
+    def test_a_typed_refusal_after_a_lost_attempt_stays_a_refusal(self, via_client, http):
+        # The server deduplicates by key, so a typed outcome speaks for the whole call.
+        http.side_effect = [requests.Timeout("slow"), _response(409, {"kind": "conflict"})]
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        assert _error(exc)["reason"] == "submission_key_conflict"
+
+    @pytest.mark.parametrize("exc", [
+        requests.exceptions.ContentDecodingError("bad gzip"),
+        requests.exceptions.TooManyRedirects("loop"),
+    ])
+    def test_an_unreadable_answer_is_uncertain_and_keeps_the_minted_key(self, via_client, http, exc):
+        http.side_effect = exc
+        with pytest.raises(ToolError) as exc_info:
+            server.workspace_run(WS, "echo hi")
+        err = _error(exc_info)
+        assert err["reason"] == "uncertain"
+        assert err["submission_key"].startswith("mcp-")
+        assert "same submission_key" in err["error"]
+        assert http.call_count == 1
 
     @pytest.mark.parametrize("exc_type", [requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError])
     def test_every_attempt_failing_in_transport_keeps_the_minted_key(self, via_client, http, exc_type):

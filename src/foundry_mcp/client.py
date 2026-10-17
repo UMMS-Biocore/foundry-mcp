@@ -8,7 +8,7 @@ Credentials are passed via HTTP headers from mcp.json.
 import os
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import requests
 from viafoundry.client import ViaFoundryClient
@@ -119,7 +119,7 @@ _ADDRESS_ERRORS = (
 
 class RequestFailed(Exception):
     """
-    A request that got no HTTP answer.
+    A request that got no usable HTTP answer.
 
     `reason` is "connection_failed" when the request may have reached the
     server (`may_have_arrived` is True), or "invalid_hostname" when the
@@ -157,9 +157,43 @@ def request_json(
     ask for it on a read, or on a write the server deduplicates by a key the
     caller sends in `headers`.
 
-    Raises RequestFailed when no HTTP answer came back: after the last
-    transport error, or at once when the configured address is not a usable
-    URL.
+    Raises RequestFailed when no usable HTTP answer came back: after the last
+    transport error, at once when the configured address is not a usable URL,
+    and at once for any other error of the requests library (an answer that
+    could not be decoded, too many redirects), which is never retried.
+    """
+    answer = send_request(via_client, method, endpoint, params=params, data=data,
+                          headers=headers, retry=retry, attempts=attempts)
+    return answer.status, answer.body
+
+
+class Answer(NamedTuple):
+    """
+    What `send_request` got back. `earlier_attempt_lost` is True when an
+    earlier attempt of the same call was sent and its answer was lost (a
+    transport error or a gateway 502/504), so that attempt may have reached
+    the server even when the last answer is a refusal.
+    """
+
+    status: int
+    body: Any
+    earlier_attempt_lost: bool
+
+
+def send_request(
+    via_client: ViaFoundryClient,
+    method: str,
+    endpoint: str,
+    params: Optional[Dict] = None,
+    data: Optional[Dict] = None,
+    headers: Optional[Dict[str, str]] = None,
+    retry: bool = False,
+    attempts: int = 3,
+) -> Answer:
+    """
+    `request_json`, also saying whether an earlier attempt was lost. A caller
+    whose write must never be reported as refused when it may have landed
+    (a job submit) reads `earlier_attempt_lost`.
     """
     url = f"{via_client.auth.hostname}{endpoint}"
     merged = dict(via_client.auth.get_headers() or {})
@@ -191,6 +225,15 @@ def request_json(
             logger.warning(f"{method} {endpoint} attempt {attempt} failed ({type(e).__name__}), retrying")
             time.sleep(0.5 * attempt)
             continue
+        except requests.RequestException as e:
+            # Raised after the request was sent (an answer whose body could not
+            # be decoded, a redirect loop), so the server may have acted on it.
+            # Not retried: the same request would very likely fail the same way.
+            raise RequestFailed(
+                "connection_failed",
+                f"Foundry Connect's answer could not be read ({type(e).__name__}).",
+                may_have_arrived=True,
+            ) from e
         if response.status_code in _RETRYABLE_STATUSES and attempt < tries:
             logger.warning(f"{method} {endpoint} attempt {attempt} answered {response.status_code}, retrying")
             time.sleep(0.5 * attempt)
@@ -205,7 +248,8 @@ def request_json(
     except ValueError:
         logger.warning(f"{method} {endpoint} answered {response.status_code} with a body that is not JSON")
         body = None
-    return response.status_code, body
+    # Every attempt before the last one was retried because its answer was lost.
+    return Answer(response.status_code, body, earlier_attempt_lost=attempt > 1)
 
 
 def reset_clients():

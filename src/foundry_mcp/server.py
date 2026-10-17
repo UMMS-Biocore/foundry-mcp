@@ -34,7 +34,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Import from our modules
-from .client import RequestFailed, get_client, request_json
+from .client import RequestFailed, get_client, request_json, send_request
 from .config import (
     set_credentials, validate_credentials, get_fixed_hostname, get_credentials,
     HEADER_HOSTNAME, HEADER_TOKEN, HEADER_HOSTNAME_NEW, HEADER_TOKEN_NEW
@@ -6115,7 +6115,7 @@ def workspace_run(
 
     # One key for the whole call: every retry inside it is the same logical submit.
     try:
-        status, body = request_json(
+        status, body, earlier_attempt_lost = send_request(
             get_client(), "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs",
             data=data, headers={"Idempotency-Key": key}, retry=True,
         )
@@ -6156,9 +6156,13 @@ def workspace_run(
         )
         return json.dumps(result, indent=2)
     # A gateway 502 or 504 means the answer was lost on the way back, and a 2xx
-    # or 5xx with no outcome cannot be read as one. Either way the job may have
-    # started, so it is never reported as not submitted.
-    answer_lost = kind is None and (status in (502, 504) or not 400 <= status < 500)
+    # or 5xx with no outcome cannot be read as one. A 4xx with no outcome (a
+    # gateway 408, 429 or HTML 400) after an earlier attempt was lost does not
+    # say what that earlier attempt did. In each case the job may have started,
+    # so it is never reported as not submitted.
+    answer_lost = kind is None and (
+        status in (502, 504) or not 400 <= status < 500 or earlier_attempt_lost
+    )
     if kind == "uncertain" or answer_lost:
         result.update(status="uncertain", message=_ANSWER_LOST_MESSAGE)
         if outcome.get("reason"):

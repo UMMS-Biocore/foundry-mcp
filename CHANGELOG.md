@@ -10,9 +10,10 @@
     calling again with that key reads or retries the same job, and a new key
     starts a new job. Every retry inside one call sends the same key, so a lost
     answer never starts a second job. When the answer is lost on every try
-    (a gateway error or no connection), the call reports the job as
-    `uncertain` with its key, never as not submitted, so the client can read
-    it back or retry with the same key. A key you pass is checked before any
+    (a gateway error, no connection, or an answer that cannot be read), or a
+    later try is refused with no outcome after an earlier one was lost, the
+    call reports the job as `uncertain` with its key, never as not submitted,
+    so the client can read it back or retry with the same key. A key you pass is checked before any
     request, and a command over 32 KiB is refused locally.
   - When the run environment needs a person's approval, `workspace_run` and
     `workspace_job_status` return an `approve_at` link. A person approves in a
