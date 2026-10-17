@@ -42,6 +42,7 @@ from .config import (
 from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
 from .log import get_logger, get_uvicorn_log_config, mask_token
 from .process_ports import PortMergeError, build_update_body
+from . import accessions as _accessions
 
 
 # Get logger for this module
@@ -1671,6 +1672,7 @@ def update_run(
     name: str = None,
     exec_settings: dict = None,
     singularity_options: str = None,
+    cleanup_delay_hours: int = None,
 ) -> str:
     """
     Save a run before launch (PATCH /save). Send only what changes. On a
@@ -1708,10 +1710,22 @@ def update_run(
     The run must already use a Singularity image; save run_environment_id in
     an earlier call, then the options.
 
+    cleanup_delay_hours turns on the cleanup of the run's intermediate files
+    (its work, inputs and initial run folders, which hold downloaded raw
+    reads) and sets how many hours after the run ends it happens. The default
+    is 120 hours; a short delay such as 6 frees the space soon after the run.
+    Results in the publish directory are kept. Must be a whole number of at
+    least 1.
+
     This mutates the run; confirm with the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id, launch_directory)
+        if cleanup_delay_hours is not None:
+            # 0 would switch cleanup off: the cleanup task skips a run whose delay is 0.
+            if isinstance(cleanup_delay_hours, bool) or not isinstance(cleanup_delay_hours, int) \
+                    or cleanup_delay_hours < 1:
+                raise ValueError("cleanup_delay_hours must be a whole number of hours, at least 1")
         exec_body = _exec_settings_body(exec_settings) if exec_settings is not None else {}
         if singularity_options is not None:
             if not singularity_options.strip():
@@ -1739,6 +1753,9 @@ def update_run(
         }
         data.update({key: value for key, value in optional.items() if value is not None})
         data.update(exec_body)
+        if cleanup_delay_hours is not None:
+            data["deleteIntermediateCheck"] = True
+            data["deleteIntermediateDelay"] = cleanup_delay_hours
         if singularity_options is not None:
             data.update(_singularity_body(via_client, run_id, singularity_options.strip()))
         saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
@@ -3081,6 +3098,138 @@ def prepare_samples(name: str, files: list, canvas_id: str = "") -> str:
     except Exception as e:
         logger.error(f"Error preparing samples for '{name}': {e}")
         return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def create_dataset_from_accessions(
+    name: str,
+    accessions: list,
+    canvas_id: str = "",
+    dry_run: bool = False,
+) -> str:
+    """
+    Build a sample dataset from public sequencing accessions, ready to set as
+    a run's sample input (`vmetaCollectionId`). The run downloads the reads
+    itself from SRA, so nothing is uploaded.
+
+    Accepts GEO series and samples (GSE, GSM), SRA/ENA/DDBJ studies (SRP, ERP,
+    DRP, PRJNA, PRJEB), experiments (SRX, ERX), runs (SRR, ERR, DRR),
+    BioSamples (SAMN, SAMEA) and ArrayExpress studies (E-MTAB-n). Each is
+    resolved to its sequencing runs through ENA (GEO via NCBI, ArrayExpress
+    via BioStudies). Anything that cannot be resolved is listed in
+    `unresolved` with the reason; nothing is guessed.
+
+    Runs are grouped by sample. The sample name comes from the GEO sample or
+    BioSample title. Each run becomes one record (a sample with several runs
+    gets one record per run, and a warning). Layout (pair or single) comes
+    from ENA. Mixed layouts, paired runs with one fastq file and non RNA
+    library strategies are reported as warnings: show them to the user.
+
+    ALWAYS call with dry_run=True first and show the user the plan: samples,
+    runs, layouts, total raw size (`total_raw_bytes`), unresolved and
+    warnings. dry_run writes nothing. Then call again without dry_run once
+    the user agrees; that creates the dataset.
+
+    Storage: the raw reads take space on the run environment only while a run
+    is active. They live in the run's inputs and work folders, which are
+    deleted after the run ends once its cleanup delay passes (set it with
+    update_run(cleanup_delay_hours=...), for example 6). For a large study,
+    split the accessions into batches so the raw bytes of all runs in flight
+    at once stay within the user's storage budget; ask the user for that
+    budget if you do not know it. Never delete runs to free space: deleting a
+    run does not remove its files from the cluster, and it destroys the
+    user's results.
+
+    Args:
+        name: Dataset name (non-empty, unique in the project).
+        accessions: Accessions to include, any mix of the types above.
+        canvas_id: Optional study-tracker canvas; resolved automatically if
+            omitted.
+        dry_run: True returns the plan and writes nothing.
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        wanted = [a.strip() for a in (accessions or []) if isinstance(a, str) and a.strip()]
+        if not wanted:
+            raise ValueError("No accessions given: pass a list such as ['GSE36552']")
+
+        plan = _accessions.build_plan(wanted)
+        data = {
+            "dry_run": bool(dry_run),
+            "vmetaCollectionId": None,
+            "name": name.strip(),
+            "sample_count": plan["sample_count"],
+            "run_count": plan["run_count"],
+            "total_raw_bytes": plan["total_raw_bytes"],
+            "total_raw_size": _human_size(plan["total_raw_bytes"]),
+            "samples": plan["samples"],
+            "unresolved": plan["unresolved"],
+            "warnings": plan["warnings"],
+        }
+        if not plan["records"]:
+            raise ValueError(
+                "None of the accessions resolved to sequencing runs, so no dataset was "
+                f"created. Unresolved: {json.dumps(plan['unresolved'])}")
+
+        size = _human_size(plan["total_raw_bytes"])
+        summary = (f"{plan['sample_count']} sample(s), {plan['run_count']} run(s), "
+                   f"{size} of raw reads")
+        if dry_run:
+            return json.dumps(envelope(
+                summary=f"Plan only, nothing written: {summary}.",
+                data=data,
+                next_steps=[
+                    "Show the user the samples, total raw size, unresolved and warnings.",
+                    "If they agree, call again with dry_run=False to create the dataset.",
+                ],
+            ), indent=2)
+
+        via_client = get_client()
+        resolved_canvas = canvas_id.strip() if canvas_id else _resolve_canvas_id(via_client)
+        if not resolved_canvas:
+            raise ValueError(
+                "No study-tracker canvas is available to attach samples to. "
+                "Pass canvas_id explicitly (search_canvas lists them).")
+        created = via_client.call(
+            method="POST", endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name.strip()},
+        )
+        payload = created.get("data", created) if isinstance(created, dict) else {}
+        dataset_id = payload.get("_id") or payload.get("id")
+        if not dataset_id:
+            raise ValueError(f"Dataset creation returned no id: {created}")
+
+        failed = []
+        for record in plan["records"]:
+            try:
+                via_client.call(
+                    method="POST",
+                    endpoint=f"/api/v1/vmeta/dataset/{dataset_id}/addFile",
+                    data={"canvasId": resolved_canvas, "file": dict(record)},
+                )
+            except Exception as e:
+                logger.error(f"Could not add record '{record['name']}': {e}")
+                failed.append(f"{record['name']} ({record['geo_id']}): {e}")
+        if failed:
+            raise ValueError(
+                f"Dataset '{name.strip()}' was created ({dataset_id}) but {len(failed)} of "
+                f"{len(plan['records'])} record(s) could not be attached: {'; '.join(failed)}. "
+                f"The dataset is NOT ready to use; add the missing records or delete it and retry.")
+
+        data["vmetaCollectionId"] = dataset_id
+        return json.dumps(envelope(
+            summary=f"Dataset '{name.strip()}' created: {summary}.",
+            data=data,
+            next_steps=[
+                f"Set it on a run: update_run(...) with the sample input's vmetaCollectionId = '{dataset_id}'.",
+                "Set a short cleanup delay on that run, for example update_run(cleanup_delay_hours=6).",
+                "Then preflight_run(run_id=...) before launching.",
+            ],
+        ), indent=2)
+    except Exception as e:
+        logger.error(f"Error creating dataset from accessions for '{name}': {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
 
 
 # ---------------------------------------------------------------------------
