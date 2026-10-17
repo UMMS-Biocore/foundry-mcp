@@ -24,6 +24,7 @@ import html
 import re
 import shlex
 import tempfile
+import unicodedata
 import os
 import uuid
 import requests
@@ -341,6 +342,83 @@ def list_files(report_id: str, process_name: str = None) -> str:
         return json.dumps({"error": str(e)})
 
 
+_ROUTE_PATH_ATTEMPT = re.compile(
+    r"^/report-resources/("
+    r"[0-9a-fA-F]{32}"
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r")/pubweb/"
+)
+_DOWNLOAD_LINK_PATH = re.compile(r"^/api/v1/report-download/[A-Za-z0-9._-]+\Z")
+
+
+def _signed_download_link(via_client, report_id, file_path, route_path, limit_mb) -> str:
+    """Ask the server for a signed, expiring link to one file and format the answer.
+
+    Never falls back to the plain report resource URL.
+    """
+    match = _ROUTE_PATH_ATTEMPT.match(str(route_path))
+    if not match:
+        return json.dumps({
+            "error": "Could not determine the run attempt for this file, so a download link cannot be requested.",
+            "hint": "The report data may be incomplete"
+        }, indent=2)
+
+    try:
+        minted = via_client.call(
+            method="POST",
+            endpoint=f"/api/v1/run/{report_id}/download-link",
+            data={"attemptUuid": match.group(1), "filePath": file_path},
+        )
+    except Exception as e:
+        text = str(e)
+        # The SDK reports HTTP status only inside the message text.
+        if "Error 305" in text:
+            # A 404 is ambiguous: no such route, unknown attempt, missing file or a symlink.
+            return json.dumps({
+                "error": (
+                    f"File is larger than {limit_mb:.0f}MB, too large to return inline, "
+                    "and the server did not issue a download link for it. "
+                    "This server may not support download links, or the file cannot be linked."
+                )
+            }, indent=2)
+        if "Status code: 405" in text:
+            return json.dumps({
+                "error": (
+                    f"File is larger than {limit_mb:.0f}MB, too large to return inline, "
+                    "and this server does not issue download links."
+                )
+            }, indent=2)
+        logger.error(f"Could not create a download link: {e}")
+        return json.dumps({"error": f"A download link could not be created: {text}"}, indent=2)
+
+    link_path = minted.get("path") if isinstance(minted, dict) else None
+    if not isinstance(link_path, str) or not _DOWNLOAD_LINK_PATH.match(link_path):
+        return json.dumps({
+            "error": "The server returned an unexpected download link response, so no link was created."
+        }, indent=2)
+
+    download_url = via_client.auth.hostname + link_path
+    link_name = file_path.split("/")[-1]
+    link_name = "".join(
+        c for c in link_name
+        if c not in "/\\" and unicodedata.category(c) not in ("Cc", "Cf")
+    )
+    link_name = link_name or "download"
+    return json.dumps({
+        "success": True,
+        "delivery": "url",
+        "file_name": link_name,
+        "download_url": download_url,
+        "download_command": f"curl -fL -o {shlex.quote('./' + link_name)} {shlex.quote(download_url)}",
+        "expires_at": minted.get("expiresAt"),
+        "message": (
+            f"File is larger than {limit_mb:.0f}MB, too large to return inline. "
+            "Run download_command to save it to disk, or open download_url in a browser. "
+            "The link is for this one file and expires in about 15 minutes."
+        )
+    }, indent=2)
+
+
 @mcp.tool()
 def download_file(report_id: str, file_path: str) -> str:
     """
@@ -348,7 +426,10 @@ def download_file(report_id: str, file_path: str) -> str:
     A file up to 5MB comes back inline as base64 ("delivery": "inline").
     A larger file comes back as a link ("delivery": "url") with a ready
     curl command; run that command to save the file to disk, so the bytes
-    never pass through the conversation.
+    never pass through the conversation. The link is for that one file and
+    expires in about 15 minutes. It keeps working until then even if the
+    token used to request it is revoked, so ask for a new link rather than
+    reusing an old one.
 
     Args:
         report_id: The ID of the report containing the file.
@@ -357,7 +438,7 @@ def download_file(report_id: str, file_path: str) -> str:
     Returns:
         Inline: JSON with file_name, file_content_base64, and file_size.
         The client should decode the base64 content and save to disk.
-        Link: JSON with file_name, download_url, and download_command.
+        Link: JSON with file_name, download_url, download_command, and expires_at.
 
     Example:
         # Get the file content (returns JSON string)
@@ -408,17 +489,22 @@ def download_file(report_id: str, file_path: str) -> str:
 
         # Stream the body so a large file is never read whole into memory.
         # Timeout: (connect_timeout, read_timeout) in seconds
-        response = requests.get(file_url, headers=via_client.auth.get_headers(), timeout=(20, 300), stream=True)
+        # Probe errors never carry the plain report resource URL.
+        try:
+            response = requests.get(file_url, headers=via_client.auth.get_headers(), timeout=(20, 300), stream=True)
+        except Exception as probe_error:
+            logger.error(f"Size probe failed: {type(probe_error).__name__}")
+            return json.dumps({
+                "error": f"Could not reach the server to measure the file ({type(probe_error).__name__})"
+            }, indent=2)
         if response.status_code != 200:
-            # Include detailed error info for debugging
-            reason = getattr(response, 'reason', 'Unknown')
-            text = getattr(response, 'text', '')
-            error_detail = text[:500] if text else reason
+            reason = str(getattr(response, 'reason', 'Unknown'))
+            if "report-resources" in reason:
+                reason = "Unknown"
+            response.close()
             return json.dumps({
                 "error": f"Failed to download file: HTTP {response.status_code} {reason}",
-                "status_code": response.status_code,
-                "detail": error_detail,
-                "url": file_url
+                "status_code": response.status_code
             }, indent=2)
         
         # Read at most one byte past the inline limit, then stop.
@@ -434,22 +520,9 @@ def download_file(report_id: str, file_path: str) -> str:
             response.close()
 
         if too_large:
-            # The link is the report's own public resource path. It never
-            # carries the caller's credentials.
-            download_url = requests.utils.requote_uri(file_url)
             limit_mb = INLINE_DOWNLOAD_MAX_BYTES / (1024 * 1024)
-            logger.info(f"File '{file_name}' is over {limit_mb:.0f}MB, returning a link")
-            return json.dumps({
-                "success": True,
-                "delivery": "url",
-                "file_name": file_name,
-                "download_url": download_url,
-                "download_command": f"curl -fL -o {shlex.quote(file_name)} {shlex.quote(download_url)}",
-                "message": (
-                    f"File is larger than {limit_mb:.0f}MB, too large to return inline. "
-                    "Run download_command to save it to disk, or open download_url in a browser."
-                )
-            }, indent=2)
+            logger.info(f"File '{file_name}' is over {limit_mb:.0f}MB, requesting a download link")
+            return _signed_download_link(via_client, report_id, file_path, route_path, limit_mb)
 
         content_size = len(content)
         file_content_base64 = base64.b64encode(bytes(content)).decode('utf-8')
@@ -467,7 +540,10 @@ def download_file(report_id: str, file_path: str) -> str:
         
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
-        return json.dumps({"error": str(e)})
+        message = str(e)
+        if "report-resources" in message:
+            message = f"Error downloading file ({type(e).__name__})"
+        return json.dumps({"error": message})
 
 
 @mcp.tool()
