@@ -247,17 +247,46 @@ class TestWorkspaceRun:
         assert err["error"] == server._NOT_FOUND_MESSAGE
         assert "<" not in err["error"] and "Cannot POST" not in err["error"]
 
-    def test_a_gateway_html_page_on_the_last_attempt_gives_the_fallback(self, via_client, http):
-        page = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
-        http.return_value = _html_response(502, page)
+    @pytest.mark.parametrize("status", [502, 504])
+    def test_a_gateway_page_on_the_last_attempt_is_uncertain_not_refused(self, via_client, http, status):
+        page = f"<html><head><title>{status} Bad Gateway</title></head><body>nginx</body></html>"
+        http.return_value = _html_response(status, page)
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["submission_key"] == "k"
+        assert out["http_status"] == status
+        assert "same submission_key" in out["message"] and "do not use a new key" in out["message"]
+        assert "not submitted" not in out["message"]
+        assert "<" not in out["message"]
+        assert http.call_count == 3
+
+    def test_a_server_error_with_no_outcome_is_uncertain(self, via_client, http):
+        http.return_value = _response(500, {"error": "boom"})
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "uncertain"
+        assert out["http_status"] == 500
+
+    def test_a_client_error_with_no_outcome_stays_a_refusal(self, via_client, http):
+        http.return_value = _response(400, {"reason": "invalid_body", "message": "cpus is too large."})
         with pytest.raises(ToolError) as exc:
             server.workspace_run(WS, "echo hi", submission_key="k")
         err = _error(exc)
-        assert err["http_status"] == 502
-        assert err["reason"] == "submit_refused"
-        assert err["error"] == "The job was not submitted."
-        assert "<" not in err["error"]
+        assert err["reason"] == "invalid_body"
+        assert err["submission_key"] == "k"
+
+    @pytest.mark.parametrize("exc_type", [requests.Timeout, requests.ConnectionError])
+    def test_every_attempt_failing_in_transport_keeps_the_minted_key(self, via_client, http, exc_type):
+        http.side_effect = exc_type("read timed out")
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi")
+        err = _error(exc)
         assert http.call_count == 3
+        sent = {c.kwargs["headers"]["Idempotency-Key"] for c in http.call_args_list}
+        assert sent == {err["submission_key"]}
+        assert err["submission_key"].startswith("mcp-")
+        assert err["reason"] == "uncertain"
+        assert err["workspace_id"] == WS
+        assert "same submission_key" in err["error"] and "do not use a new key" in err["error"]
 
     def test_the_tool_offers_no_mount_or_docker_host_parameter(self):
         import inspect

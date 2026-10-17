@@ -5917,6 +5917,11 @@ _SUBMIT_REFUSALS = {
     ),
 }
 
+_ANSWER_LOST_MESSAGE = (
+    "The job may have started but its answer was lost. Call workspace_job_status, or call "
+    "again with the same submission_key; do not use a new key."
+)
+
 _NOT_FOUND_MESSAGE = (
     "Not found. Either the workspace or job does not exist for you, or workspace jobs are not "
     "turned on in this Foundry Connect installation."
@@ -6067,10 +6072,20 @@ def workspace_run(
     }
 
     # One key for the whole call: every retry inside it is the same logical submit.
-    status, body = request_json(
-        get_client(), "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs",
-        data=data, headers={"Idempotency-Key": key}, retry=True,
-    )
+    try:
+        status, body = request_json(
+            get_client(), "POST", f"/api/v1/agent-workspace/{workspace_id}/jobs",
+            data=data, headers={"Idempotency-Key": key}, retry=True,
+        )
+    except (requests.ConnectionError, requests.Timeout) as e:
+        # The server may have received the submit before the connection failed,
+        # so the job may have started. The key is the only way to find it again.
+        raise ToolError(json.dumps({
+            "error": f"Foundry Connect could not be reached ({type(e).__name__}). {_ANSWER_LOST_MESSAGE}",
+            "reason": "uncertain",
+            "submission_key": key,
+            "workspace_id": workspace_id,
+        }))
     outcome = body if isinstance(body, dict) else {}
     kind = outcome.get("kind")
     result = {"submission_key": key, "workspace_id": workspace_id}
@@ -6093,11 +6108,14 @@ def workspace_run(
             message="The run environment changed after the approval. A person must review the job again at the link, then call workspace_job_status.",
         )
         return json.dumps(result, indent=2)
-    if kind == "uncertain":
-        result.update(
-            status="uncertain",
-            message="The job may have started but its answer was lost. Call workspace_job_status, or call again with the same submission_key; do not use a new key.",
-        )
+    # A gateway 502 or 504 means the answer was lost on the way back, and a 2xx
+    # or 5xx with no outcome cannot be read as one. Either way the job may have
+    # started, so it is never reported as not submitted.
+    answer_lost = kind is None and (status in (502, 504) or not 400 <= status < 500)
+    if kind == "uncertain" or answer_lost:
+        result.update(status="uncertain", message=_ANSWER_LOST_MESSAGE)
+        if answer_lost:
+            result["http_status"] = status
         return json.dumps(result, indent=2)
 
     if kind == "request_terminal":
