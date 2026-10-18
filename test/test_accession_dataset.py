@@ -343,8 +343,42 @@ class TestTool:
         out, _ = _tool([" "], FakeHttp())
         assert "tool_error" in out
 
+    def test_single_end_plan_says_to_set_mate_single(self):
+        http = FakeHttp(ena={"SRP000001": [_run("SRR000001", "SAMN00000001", "GSM1", "a"),
+                                           _run("SRR000002", "SAMN00000002", "GSM2", "b")]})
+        out, _ = _tool(["SRP000001"], http, dry_run=True)
+        assert out["data"]["layout"] == "single"
+        assert out["data"]["mate"] == "single"
+        steps = " ".join(out["next_steps"])
+        assert "mate" in steps and "'single'" in steps
+        assert "single_or_paired_end_reads" in steps
+
+    def test_paired_plan_says_to_set_mate_pair(self):
+        out, _ = _tool(["SRP000001"], _two_samples())
+        assert out["data"]["layout"] == "paired"
+        assert out["data"]["mate"] == "pair"
+        assert "'pair'" in " ".join(out["next_steps"])
+
+    def test_mixed_plan_gives_the_breakdown_and_no_mate(self):
+        http = FakeHttp(ena={"SRP000001": [
+            _run("SRR000001", "SAMN00000001", "GSM1", "a", layout="PAIRED", fastq_bytes="1;1"),
+            _run("SRR000002", "SAMN00000002", "GSM2", "b")]})
+        out, _ = _tool(["SRP000001"], http, dry_run=True)
+        assert out["data"]["layout"] == "mixed"
+        assert out["data"]["mate"] is None
+        assert out["data"]["layout_breakdown"] == {"paired": ["a"], "single": ["b"]}
+        assert "split" in " ".join(out["next_steps"]).lower()
+
+    def test_peak_inputs_estimate_is_six_times_raw(self):
+        out, _ = _tool(["SRP000001"], _two_samples(), dry_run=True)
+        assert out["data"]["total_raw_bytes"] == 100
+        assert out["data"]["peak_inputs_bytes_estimate"] == 600
+        assert "peak_inputs_size_estimate" in out["data"]
+
     def test_docstring_carries_the_storage_guidance(self):
         doc = server.create_dataset_from_accessions.__doc__
         assert "never delete" in doc.lower()
         assert "budget" in doc.lower()
         assert "cleanup_delay_hours" in doc
+        assert "peak_inputs_bytes_estimate" in doc
+        assert "mate" in doc

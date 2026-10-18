@@ -82,7 +82,12 @@
     and grouped by sample, with the layout from ENA and the total raw size.
     Anything that cannot be resolved is listed with its reason, and mixed
     layouts or non RNA libraries come back as warnings. `dry_run=True`
-    returns the plan and writes nothing.
+    returns the plan and writes nothing. The result names the dataset's
+    `layout` and the `mate` value the run must carry, and
+    `peak_inputs_bytes_estimate` (6x the raw size, measured on a staging run)
+    for budgeting storage, since the download writes uncompressed fastq first.
+  - `preflight_run` fails (`layout`) when the attached dataset's layout
+    disagrees with the run's `mate` input, or mixes layouts.
   - `update_run(cleanup_delay_hours=...)` turns on the cleanup of a run's
     intermediate files and sets how many hours after the run ends it happens.
 

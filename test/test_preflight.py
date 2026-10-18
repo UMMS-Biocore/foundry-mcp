@@ -334,3 +334,50 @@ class TestPreflightAgainstDefinitions:
             parsed = json.loads(server.preflight_run("12194"))
         assert "error" not in parsed
         assert not any(c["id"] == "data_inputs" for c in parsed["data"]["checks"])
+
+
+class TestPreflightLayoutMatchesMate:
+    """Staging run 12450: a single end dataset on a run whose `mate` input
+    stayed `pair` failed in Quality_Filtering ("No such variable: file1")."""
+
+    @staticmethod
+    def _check(parsed):
+        return next((c for c in parsed["data"]["checks"] if c["id"] == "layout"), None)
+
+    @staticmethod
+    def _rows(layouts):
+        return [{"name": f"s{i}", "geo_id": f"SRR00000{i}", "file1": "", "file2": "",
+                 "file_layout": lay} for i, lay in enumerate(layouts)]
+
+    def test_single_dataset_on_a_pair_run_fails(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", "pair")]
+        parsed, _ = _preflight(details=_details(inputs), dataset_rows=self._rows(["single", "single"]),
+                               files=ALL_GOOD)
+        check = self._check(parsed)
+        assert check["status"] == "fail"
+        assert "single" in check["detail"] and "pair" in check["detail"]
+        assert "mate" in check["fix"]
+        assert parsed["data"]["ok"] is False
+
+    def test_matching_layout_passes(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", "pair")]
+        parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
+        assert self._check(parsed)["status"] == "pass"
+
+    def test_mixed_dataset_fails(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", "single")]
+        parsed, _ = _preflight(details=_details(inputs), dataset_rows=self._rows(["single", "pair"]),
+                               files=ALL_GOOD)
+        check = self._check(parsed)
+        assert check["status"] == "fail"
+        assert "mixes" in check["detail"]
+
+    def test_layout_is_derived_from_files_when_not_stored(self):
+        rows = [{"name": "a", "file1": "/d/a.fq.gz", "file2": ""}]
+        inputs = DEFAULT_INPUTS + [_inp("mate", "pair")]
+        parsed, _ = _preflight(details=_details(inputs), dataset_rows=rows, files=ALL_GOOD)
+        assert self._check(parsed)["status"] == "fail"
+
+    def test_no_mate_input_means_no_check(self):
+        parsed, _ = _preflight(files=ALL_GOOD)
+        assert self._check(parsed) is None
