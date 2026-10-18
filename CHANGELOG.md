@@ -30,6 +30,15 @@
     is a clear error (after a `workspace_create` one, check `workspace_list`
     before trying again), and a hostname that is not a full URL is named as
     the problem.
+  - A refused `workspace_run` or `workspace_create` now says what kind of
+    refusal it was, when the server sends it: `category` (a used up limit is
+    `quota` with HTTP 429, a request over a limit is `ceiling` with HTTP 422,
+    a folder that is not allowed is `mount_policy` with the `mount` index),
+    `retryable`, and the limit's `limit` and `current` figures. A quota or
+    ceiling refusal adds a `next_step` sentence (wait and call again, remove
+    files or workspaces you no longer need, or ask for less), and a storage
+    refusal names disk use in bytes. A refusal from an older server without
+    these fields reads as before.
 - **Pipelines and processes from git**
   - `connect_pipeline_repository`, `get_pipeline_repository` and
     `export_pipeline_revision` connect a pipeline to a git repository and

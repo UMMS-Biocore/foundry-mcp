@@ -653,6 +653,121 @@ class TestWorkspaceListAndCreate:
         http.assert_not_called()
 
 
+class TestTypedRefusals:
+    """A newer server types its refusals: a category, a retry hint, a cap's figures, a mount index."""
+
+    def test_a_quota_refusal_at_429_carries_category_and_figures(self, via_client, http):
+        http.return_value = _response(429, {
+            "kind": "refused", "reason": "live_jobs", "category": "quota", "retryable": True,
+            "limit": 4, "current": 4,
+            "message": "Your number of live jobs on this run environment is at its limit (4 of 4).",
+            "remedy": "Wait for one of your jobs to finish.",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["http_status"] == 429
+        assert err["reason"] == "live_jobs"
+        assert err["category"] == "quota"
+        assert err["retryable"] is True
+        assert (err["limit"], err["current"]) == (4, 4)
+        assert err["remedy"] == "Wait for one of your jobs to finish."
+        assert err["submission_key"] == "k"
+        assert "Wait, then call again with a new submission_key" in err["next_step"]
+        assert http.call_count == 1
+
+    def test_a_quota_refusal_that_waiting_cannot_fix_says_to_remove_something(self, via_client, http):
+        http.return_value = _response(429, {
+            "kind": "refused", "reason": "live_workspaces", "category": "quota", "retryable": False,
+            "limit": 2, "current": 2, "message": "m",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert "Remove files or workspaces you no longer need" in err["next_step"]
+        assert "run environment's owner" in err["next_step"]
+        assert "Wait, then" not in err["next_step"]
+
+    def test_a_storage_refusal_names_disk_use(self, via_client, http):
+        http.return_value = _response(429, {
+            "kind": "refused", "reason": "storage", "category": "quota", "retryable": False,
+            "limit": 1048576, "current": 2097152, "message": "m",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "storage"
+        assert "disk" in err["next_step"]
+        assert "bytes" in err["next_step"]
+        assert (err["limit"], err["current"]) == (1048576, 2097152)
+
+    def test_a_ceiling_refusal_at_422_says_to_ask_for_less(self, via_client, http):
+        http.return_value = _response(422, {
+            "kind": "refused", "reason": "job_wall_time", "category": "ceiling", "retryable": False,
+            "limit": 240, "current": 600, "message": "m",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", wall_minutes=600, submission_key="k")
+        err = _error(exc)
+        assert err["http_status"] == 422
+        assert err["category"] == "ceiling"
+        assert "Ask for less" in err["next_step"]
+
+    def test_a_mount_refusal_names_the_mount_index_and_a_different_reason(self, via_client, http):
+        http.return_value = _response(409, {
+            "kind": "refused", "reason": "outside_data_roots", "category": "mount_policy", "retryable": False,
+            "mount": 0, "message": "A mount of this workspace is outside what this run environment allows.",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["http_status"] == 409
+        assert err["category"] == "mount_policy"
+        assert err["mount"] == 0
+        assert err["reason"] == "outside_data_roots"
+        assert "limit" not in err and "next_step" not in err
+
+    def test_a_dispatch_refusal_keeps_the_servers_code_and_typed_fields(self, via_client, http):
+        http.return_value = _response(409, {
+            "kind": "dispatch_refused", "reason": "outside_mount_roots", "category": "mount_policy",
+            "retryable": False, "mount": 2, "message": "m", "remedy": "r",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err["reason"] == "outside_mount_roots"
+        assert (err["category"], err["mount"], err["remedy"]) == ("mount_policy", 2, "r")
+
+    def test_an_older_server_without_the_new_fields_still_works(self, via_client, http):
+        http.return_value = _response(409, {"kind": "refused", "reason": "live_jobs", "message": "Too many live jobs."})
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        assert err == {"error": "Too many live jobs.", "reason": "live_jobs", "http_status": 409, "submission_key": "k"}
+
+    def test_fields_of_the_wrong_type_are_dropped(self, via_client, http):
+        http.return_value = _response(409, {
+            "kind": "refused", "reason": "x", "category": ["quota"], "retryable": "yes",
+            "limit": True, "current": "4", "mount": 1.5, "message": "m",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k")
+        err = _error(exc)
+        for field in ("category", "retryable", "limit", "current", "mount", "next_step"):
+            assert field not in err
+
+    def test_a_create_quota_refusal_carries_the_typed_fields(self, via_client, http):
+        http.return_value = _response(429, {
+            "reason": "live_workspaces", "category": "quota", "retryable": False,
+            "limit": 3, "current": 3, "message": "m", "remedy": "Remove a workspace you no longer need.",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_create("12", "34", "s", "img")
+        err = _error(exc)
+        assert (err["http_status"], err["category"], err["limit"], err["current"]) == (429, "quota", 3, 3)
+        assert "Remove files or workspaces" in err["next_step"]
+
+
 def test_no_tool_can_approve_or_reject_a_job_request():
     # Approval stays a person's step in a signed in browser session; the server
     # refuses a token, and no tool here even tries.

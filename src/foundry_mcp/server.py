@@ -6318,8 +6318,49 @@ _STATUS_FALLBACKS = {
 }
 
 
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+# The typed fields a newer server adds to a refusal, each with the type it must
+# have to be passed on. A field that is absent or of another type is left out,
+# so an older server's refusal reads exactly as before.
+_TYPED_REFUSAL_FIELDS = {
+    "category": lambda v: isinstance(v, str) and bool(v),
+    "retryable": lambda v: isinstance(v, bool),
+    "limit": _is_number,
+    "current": _is_number,
+    "mount": lambda v: isinstance(v, int) and not isinstance(v, bool),
+}
+
+
+def _refusal_next_step(reason: str, category, retryable):
+    """What the client should do about a quota or ceiling refusal, or None."""
+    if category == "quota":
+        if reason == "storage":
+            return (
+                "Your workspaces on this run environment use more disk than your storage limit "
+                "allows (limit and current are in bytes). Remove files or workspaces you no longer "
+                "need, or ask the run environment's owner to raise the limit, then call again with "
+                "a new submission_key."
+            )
+        if retryable is True:
+            return "Wait, then call again with a new submission_key once one of your limits has room."
+        return (
+            "Remove files or workspaces you no longer need, or ask the run environment's owner to "
+            "raise the limit, then call again with a new submission_key."
+        )
+    if category == "ceiling":
+        return "Ask for less (fewer CPUs, less memory or fewer minutes), then call again with a new submission_key."
+    return None
+
+
 def _workspace_error(body, http_status: int, fallback_reason: str, fallback_message: str, **extra):
-    """Raise a ToolError from a refusal body, keeping the server's reason and message."""
+    """
+    Raise a ToolError from a refusal body, keeping the server's reason and
+    message, and its category, retry hint, cap figures and mount index when it
+    sends them.
+    """
     body = body if isinstance(body, dict) else {}
     fallback_reason, fallback_message = _STATUS_FALLBACKS.get(http_status, (fallback_reason, fallback_message))
     reason = body.get("reason") or fallback_reason
@@ -6329,6 +6370,12 @@ def _workspace_error(body, http_status: int, fallback_reason: str, fallback_mess
         error["remedy"] = body["remedy"]
     elif http_status in (401, 403) and message != _AUTH_MESSAGE:
         error["remedy"] = _AUTH_MESSAGE
+    for field, valid in _TYPED_REFUSAL_FIELDS.items():
+        if field in body and valid(body[field]):
+            error[field] = body[field]
+    next_step = _refusal_next_step(reason, error.get("category"), error.get("retryable"))
+    if next_step:
+        error["next_step"] = next_step
     error.update({k: v for k, v in extra.items() if v is not None})
     raise ToolError(json.dumps(error))
 
@@ -6468,7 +6515,11 @@ def workspace_run(
       (`reason` says why when the server gave one). Call workspace_job_status,
       or call again with the SAME submission_key. Never use a new key for it.
     A refusal is raised as an error with a `reason`; a lost connection is
-    raised with reason "uncertain" and the submission_key to check with.
+    raised with reason "uncertain" and the submission_key to check with. A
+    refusal may also carry `category` (quota, ceiling, mount_policy, access,
+    environment, scheduler, request), `retryable`, a cap's `limit` and
+    `current`, the `mount` index it is about, and `next_step` for a quota or
+    ceiling refusal.
 
     `command` is at most 32 KiB. Folders the job can see are set on the
     workspace in Foundry Connect; this tool cannot add or change them.
@@ -6567,8 +6618,12 @@ def workspace_run(
     if kind in _SUBMIT_REFUSALS:
         reason, message = _SUBMIT_REFUSALS[kind]
         if kind == "dispatch_refused" and outcome.get("reason"):
+            # The server sends a code here, used as it is.
             reason = outcome["reason"]
-        _workspace_error({"reason": reason, "message": outcome.get("message") or message}, status, reason, message, submission_key=key)
+        _workspace_error(
+            {**outcome, "reason": reason, "message": outcome.get("message") or message},
+            status, reason, message, submission_key=key,
+        )
     _workspace_error(outcome, status, "submit_refused", "The job was not submitted.", submission_key=key)
 
 
