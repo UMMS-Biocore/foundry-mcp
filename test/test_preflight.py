@@ -334,3 +334,103 @@ class TestPreflightAgainstDefinitions:
             parsed = json.loads(server.preflight_run("12194"))
         assert "error" not in parsed
         assert not any(c["id"] == "data_inputs" for c in parsed["data"]["checks"])
+
+
+class TestPreflightLayoutMatchesMate:
+    """Staging run 12450: a single end dataset on a run whose `mate` input
+    stayed `pair` failed in Quality_Filtering ("No such variable: file1")."""
+
+    @staticmethod
+    def _check(parsed):
+        return next((c for c in parsed["data"]["checks"] if c["id"] == "layout"), None)
+
+    @staticmethod
+    def _rows(layouts):
+        return [{"name": f"s{i}", "geo_id": f"SRR00000{i}", "file1": "", "file2": "",
+                 "file_layout": lay} for i, lay in enumerate(layouts)]
+
+    def test_single_dataset_on_a_pair_run_fails(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", "pair")]
+        parsed, _ = _preflight(details=_details(inputs), dataset_rows=self._rows(["single", "single"]),
+                               files=ALL_GOOD)
+        check = self._check(parsed)
+        assert check["status"] == "fail"
+        assert "single" in check["detail"] and "pair" in check["detail"]
+        assert "mate" in check["fix"]
+        assert parsed["data"]["ok"] is False
+
+    def test_matching_layout_passes(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", "pair")]
+        parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
+        assert self._check(parsed)["status"] == "pass"
+
+    def test_mixed_dataset_fails(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", "single")]
+        parsed, _ = _preflight(details=_details(inputs), dataset_rows=self._rows(["single", "pair"]),
+                               files=ALL_GOOD)
+        check = self._check(parsed)
+        assert check["status"] == "fail"
+        assert "mixes" in check["detail"]
+
+    def test_layout_is_derived_from_files_when_not_stored(self):
+        rows = [{"name": "a", "file1": "/d/a.fq.gz", "file2": ""}]
+        inputs = DEFAULT_INPUTS + [_inp("mate", "pair")]
+        parsed, _ = _preflight(details=_details(inputs), dataset_rows=rows, files=ALL_GOOD)
+        assert self._check(parsed)["status"] == "fail"
+
+    def test_no_mate_input_means_no_check(self):
+        parsed, _ = _preflight(files=ALL_GOOD)
+        assert self._check(parsed) is None
+
+
+class TestPreflightLayoutProcessOptions:
+    """Staging run 12451: `mate` was single but Kallisto's process option
+    single_or_paired_end_reads was still `pair`, and the check passed. Process
+    options are stored on the run as {"<process>_<gnum>": {option: value}}."""
+
+    @staticmethod
+    def _check(parsed):
+        return next((c for c in parsed["data"]["checks"] if c["id"] == "layout"), None)
+
+    @staticmethod
+    def _single_rows():
+        return [{"name": "s1", "geo_id": "SRR000001", "file1": "", "file2": "", "file_layout": "single"}]
+
+    def _run(self, mate, options, rows=None):
+        inputs = DEFAULT_INPUTS + ([_inp("mate", mate)] if mate else [])
+        details = _details(inputs)
+        details["processOptions"] = options
+        parsed, _ = _preflight(details=details, dataset_rows=rows or self._single_rows(), files=ALL_GOOD)
+        return self._check(parsed)
+
+    def test_kallisto_option_left_at_pair_fails_by_name(self):
+        check = self._run("single", {"248_36": {"single_or_paired_end_reads": "pair", "fragment_length": "200"}})
+        assert check["status"] == "fail"
+        assert "248_36" in check["detail"] and "single_or_paired_end_reads" in check["detail"]
+        assert "'pair'" in check["detail"]
+        assert "single_or_paired_end_reads" in check["fix"]
+
+    def test_matching_option_passes(self):
+        check = self._run("single", {"248_36": {"single_or_paired_end_reads": "single"}})
+        assert check["status"] == "pass"
+
+    def test_empty_option_is_not_a_mismatch(self):
+        check = self._run("single", {"257_19": {"single_or_paired_end_reads": ""}})
+        assert check["status"] == "pass"
+
+    def test_option_alone_is_checked_without_mate(self):
+        check = self._run(None, {"248_36": {"single_or_paired_end_reads": "pair"}})
+        assert check["status"] == "fail"
+
+    def test_paired_spellings_are_normalized(self):
+        rows = [{"name": "p", "file1": "/d/p.1.gz", "file2": "/d/p.2.gz", "file_layout": "pair"}]
+        check = self._run("pair", {"9_1": {"read_layout": "paired-end"}}, rows=rows)
+        assert check["status"] == "pass"
+
+    def test_unrelated_options_are_ignored(self):
+        check = self._run("single", {"177": {"multiqc_parameters": "-e general_stats"}, "pipe": {}})
+        assert check["status"] == "pass"
+
+    def test_mate_and_option_both_wrong_are_both_named(self):
+        check = self._run("pair", {"248_36": {"single_or_paired_end_reads": "pair"}})
+        assert "mate" in check["detail"] and "single_or_paired_end_reads" in check["detail"]

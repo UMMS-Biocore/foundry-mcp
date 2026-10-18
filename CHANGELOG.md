@@ -73,6 +73,23 @@
   - `preflight_run` warns (`executor_resources`) when tasks go to a batch
     scheduler such as LSF or Slurm and neither the run nor its environment
     sets memory, since the scheduler's site default can kill large tasks.
+- **Public accessions to a sample dataset**
+  - `create_dataset_from_accessions(name, accessions, canvas_id="", dry_run=False)`
+    turns GEO (GSE, GSM), SRA/ENA/DDBJ (SRP, ERP, DRP, PRJNA, PRJEB, SRX,
+    ERX, SRR, ERR, DRR, SAMN, SAMEA) and ArrayExpress (E-MTAB) accessions
+    into a sample dataset whose records the run downloads from SRA. Runs are
+    resolved through ENA (GEO via NCBI eutils, ArrayExpress via BioStudies)
+    and grouped by sample, with the layout from ENA and the total raw size.
+    Anything that cannot be resolved is listed with its reason, and mixed
+    layouts or non RNA libraries come back as warnings. `dry_run=True`
+    returns the plan and writes nothing. The result names the dataset's
+    `layout` and the `mate` value the run must carry, and
+    `peak_inputs_bytes_estimate` (6x the raw size, measured on a staging run)
+    for budgeting storage, since the download writes uncompressed fastq first.
+  - `preflight_run` fails (`layout`) when the attached dataset's layout
+    disagrees with the run's `mate` input, or mixes layouts.
+  - `update_run(cleanup_delay_hours=...)` turns on the cleanup of a run's
+    intermediate files and sets how many hours after the run ends it happens.
 
 ### Fixed
 - `download_file` failed for files larger than about 15MB, because the whole

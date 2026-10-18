@@ -42,6 +42,7 @@ from .config import (
 from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, tail_text
 from .log import get_logger, get_uvicorn_log_config, mask_token
 from .process_ports import PortMergeError, build_update_body
+from . import accessions as _accessions
 
 
 # Get logger for this module
@@ -1671,6 +1672,7 @@ def update_run(
     name: str = None,
     exec_settings: dict = None,
     singularity_options: str = None,
+    cleanup_delay_hours: int = None,
 ) -> str:
     """
     Save a run before launch (PATCH /save). Send only what changes. On a
@@ -1708,10 +1710,22 @@ def update_run(
     The run must already use a Singularity image; save run_environment_id in
     an earlier call, then the options.
 
+    cleanup_delay_hours turns on the cleanup of the run's intermediate files
+    (its work, inputs and initial run folders, which hold downloaded raw
+    reads) and sets how many hours after the run ends it happens. The default
+    is 120 hours; a short delay such as 6 frees the space soon after the run.
+    Results in the publish directory are kept. Must be a whole number of at
+    least 1.
+
     This mutates the run; confirm with the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id, launch_directory)
+        if cleanup_delay_hours is not None:
+            # 0 would switch cleanup off: the cleanup task skips a run whose delay is 0.
+            if isinstance(cleanup_delay_hours, bool) or not isinstance(cleanup_delay_hours, int) \
+                    or cleanup_delay_hours < 1:
+                raise ValueError("cleanup_delay_hours must be a whole number of hours, at least 1")
         exec_body = _exec_settings_body(exec_settings) if exec_settings is not None else {}
         if singularity_options is not None:
             if not singularity_options.strip():
@@ -1739,6 +1753,9 @@ def update_run(
         }
         data.update({key: value for key, value in optional.items() if value is not None})
         data.update(exec_body)
+        if cleanup_delay_hours is not None:
+            data["deleteIntermediateCheck"] = True
+            data["deleteIntermediateDelay"] = cleanup_delay_hours
         if singularity_options is not None:
             data.update(_singularity_body(via_client, run_id, singularity_options.strip()))
         saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
@@ -3083,6 +3100,199 @@ def prepare_samples(name: str, files: list, canvas_id: str = "") -> str:
         return json.dumps({"error": str(e)})
 
 
+# fastq-dump writes uncompressed fastq and gzips it afterwards, so a run's
+# inputs folder peaks well above the archive's fastq size. Measured on a
+# staging run: 22 GB peak for 3.7 GB of ENA fastq_bytes, about 6x.
+_PEAK_INPUTS_FACTOR = 6
+
+
+def _dataset_layout(plan):
+    """("single" | "paired" | "mixed", run `mate` value or None, breakdown)."""
+    record_layouts = {r["file_layout"] for r in plan["records"]}
+    if record_layouts == {"single"}:
+        layout, mate = "single", "single"
+    elif record_layouts == {"pair"}:
+        layout, mate = "paired", "pair"
+    else:
+        layout, mate = "mixed", None
+    breakdown = {}
+    for sample in plan["samples"]:
+        group = {"pair": "paired"}.get(sample["layout"], sample["layout"])
+        breakdown.setdefault(group, []).append(sample["name"])
+    return layout, mate, breakdown
+
+
+def _layout_steps(layout, mate):
+    if mate is None:
+        return [
+            "The samples mix paired and single end reads, and one run takes one layout: "
+            "split the accessions into a paired dataset and a single end dataset "
+            "(layout_breakdown lists which sample is which) and run each separately.",
+        ]
+    return [
+        f"The reads are {layout} end. On the run, set the `mate` input to '{mate}' with "
+        f"update_run(inputs=[{{'name': 'mate', 'value': '{mate}'}}]) and set any process "
+        f"option that names the layout to match (for example Kallisto's "
+        f"single_or_paired_end_reads). A copied run keeps its old `mate`, and a mismatch "
+        f"fails in the first read step; preflight_run checks it.",
+    ]
+
+
+@mcp.tool()
+def create_dataset_from_accessions(
+    name: str,
+    accessions: list,
+    canvas_id: str = "",
+    dry_run: bool = False,
+) -> str:
+    """
+    Build a sample dataset from public sequencing accessions, ready to set as
+    a run's sample input (`vmetaCollectionId`). The run downloads the reads
+    itself from SRA, so nothing is uploaded.
+
+    Accepts GEO series and samples (GSE, GSM), SRA/ENA/DDBJ studies (SRP, ERP,
+    DRP, PRJNA, PRJEB), experiments (SRX, ERX), runs (SRR, ERR, DRR),
+    BioSamples (SAMN, SAMEA) and ArrayExpress studies (E-MTAB-n). Each is
+    resolved to its sequencing runs through ENA (GEO via NCBI, ArrayExpress
+    via BioStudies). Anything that cannot be resolved is listed in
+    `unresolved` with the reason; nothing is guessed.
+
+    Runs are grouped by sample. The sample name comes from the GEO sample or
+    BioSample title. Each run becomes one record (a sample with several runs
+    gets one record per run, and a warning). Layout (pair or single) comes
+    from ENA. Mixed layouts, paired runs with one fastq file and non RNA
+    library strategies are reported as warnings: show them to the user.
+
+    Layout must reach the run: the result's `layout` is "single", "paired" or
+    "mixed", and `mate` is the value the run's `mate` input must carry
+    ("single" or "pair"). Set it with update_run, together with any process
+    option that names the layout (for example Kallisto's
+    single_or_paired_end_reads). A copied run keeps its old `mate`, and a
+    mismatch fails the run. A "mixed" dataset cannot go on one run: split it
+    by `layout_breakdown`.
+
+    ALWAYS call with dry_run=True first and show the user the plan: samples,
+    runs, layouts, total raw size (`total_raw_bytes`), unresolved and
+    warnings. dry_run writes nothing. Then call again without dry_run once
+    the user agrees; that creates the dataset.
+
+    Storage: the reads take space on the run environment only while a run is
+    active. They live in the run's inputs and work folders, which are deleted
+    after the run ends once its cleanup delay passes (set it with
+    update_run(cleanup_delay_hours=...), for example 6). `total_raw_bytes` is
+    the archive's compressed fastq size and understates the space used: the
+    download writes uncompressed fastq before gzipping it, so the inputs
+    folder peaks far higher. `peak_inputs_bytes_estimate` (6x the raw size,
+    an estimate taken from a measured staging run) is the number to plan
+    with. For a large study, split the accessions into batches so that, for
+    all runs in flight at once, the peak estimate plus the alignment working
+    space (roughly the size of the uncompressed reads again, more for large
+    genomes) stays within the user's storage budget; ask the user for that
+    budget if you do not know it. Never delete runs to free space: deleting a
+    run does not remove its files from the cluster, and it destroys the
+    user's results.
+
+    Args:
+        name: Dataset name (non-empty, unique in the project).
+        accessions: Accessions to include, any mix of the types above.
+        canvas_id: Optional study-tracker canvas; resolved automatically if
+            omitted.
+        dry_run: True returns the plan and writes nothing.
+    """
+    try:
+        if not name or not name.strip():
+            raise ValueError("Dataset name must be a non-empty string")
+        wanted = [a.strip() for a in (accessions or []) if isinstance(a, str) and a.strip()]
+        if not wanted:
+            raise ValueError("No accessions given: pass a list such as ['GSE36552']")
+
+        plan = _accessions.build_plan(wanted)
+        layout, mate, breakdown = _dataset_layout(plan)
+        peak = plan["total_raw_bytes"] * _PEAK_INPUTS_FACTOR
+        data = {
+            "dry_run": bool(dry_run),
+            "vmetaCollectionId": None,
+            "name": name.strip(),
+            "sample_count": plan["sample_count"],
+            "run_count": plan["run_count"],
+            "total_raw_bytes": plan["total_raw_bytes"],
+            "total_raw_size": _human_size(plan["total_raw_bytes"]),
+            "peak_inputs_bytes_estimate": peak,
+            "peak_inputs_size_estimate": _human_size(peak),
+            "layout": layout,
+            "mate": mate,
+            "layout_breakdown": breakdown,
+            "samples": plan["samples"],
+            "unresolved": plan["unresolved"],
+            "warnings": plan["warnings"],
+        }
+        if not plan["records"]:
+            raise ValueError(
+                "None of the accessions resolved to sequencing runs, so no dataset was "
+                f"created. Unresolved: {json.dumps(plan['unresolved'])}")
+
+        size = _human_size(plan["total_raw_bytes"])
+        summary = (f"{plan['sample_count']} sample(s), {plan['run_count']} run(s), "
+                   f"{size} of raw reads")
+        if dry_run:
+            return json.dumps(envelope(
+                summary=f"Plan only, nothing written: {summary}.",
+                data=data,
+                next_steps=[
+                    "Show the user the samples, layout, total raw size, peak inputs estimate, "
+                    "unresolved and warnings.",
+                    "If they agree, call again with dry_run=False to create the dataset.",
+                ] + _layout_steps(layout, mate),
+            ), indent=2)
+
+        via_client = get_client()
+        resolved_canvas = canvas_id.strip() if canvas_id else _resolve_canvas_id(via_client)
+        if not resolved_canvas:
+            raise ValueError(
+                "No study-tracker canvas is available to attach samples to. "
+                "Pass canvas_id explicitly (search_canvas lists them).")
+        created = via_client.call(
+            method="POST", endpoint="/api/v1/vmeta/dataset/create",
+            data={"name": name.strip()},
+        )
+        payload = created.get("data", created) if isinstance(created, dict) else {}
+        dataset_id = payload.get("_id") or payload.get("id")
+        if not dataset_id:
+            raise ValueError(f"Dataset creation returned no id: {created}")
+
+        failed = []
+        for record in plan["records"]:
+            try:
+                via_client.call(
+                    method="POST",
+                    endpoint=f"/api/v1/vmeta/dataset/{dataset_id}/addFile",
+                    data={"canvasId": resolved_canvas, "file": dict(record)},
+                )
+            except Exception as e:
+                logger.error(f"Could not add record '{record['name']}': {e}")
+                failed.append(f"{record['name']} ({record['geo_id']}): {e}")
+        if failed:
+            raise ValueError(
+                f"Dataset '{name.strip()}' was created ({dataset_id}) but {len(failed)} of "
+                f"{len(plan['records'])} record(s) could not be attached: {'; '.join(failed)}. "
+                f"The dataset is NOT ready to use; add the missing records or delete it and retry.")
+
+        data["vmetaCollectionId"] = dataset_id
+        return json.dumps(envelope(
+            summary=f"Dataset '{name.strip()}' created: {summary}.",
+            data=data,
+            next_steps=[
+                f"Set it on a run: update_run(...) with the sample input's vmetaCollectionId = '{dataset_id}'.",
+            ] + _layout_steps(layout, mate) + [
+                "Set a short cleanup delay on that run, for example update_run(cleanup_delay_hours=6).",
+                "Then preflight_run(run_id=...) before launching.",
+            ],
+        ), indent=2)
+    except Exception as e:
+        logger.error(f"Error creating dataset from accessions for '{name}': {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+
+
 # ---------------------------------------------------------------------------
 # Sample sheets
 # ---------------------------------------------------------------------------
@@ -3393,8 +3603,88 @@ def _parse_groups_sheet(text):
     return mapping
 
 
-def _preflight_dataset(via_client, sample_inputs):
-    """Resolve each sample input's dataset and return (check, sample_names)."""
+def _row_layout(row):
+    """A dataset row's read layout, stored or derived from its files."""
+    stored = row.get("file_layout") or row.get("File Layout")
+    if stored:
+        return str(stored).strip().lower()
+    if row.get("file2"):
+        return "pair"
+    if row.get("file1"):
+        return "single"
+    return None
+
+
+# A process option that declares the read layout, such as Kallisto's
+# single_or_paired_end_reads. Process options are stored on the run as
+# {"<process>_<gnum>": {option: value}}; the option name is matched, and only
+# a value that reads as a layout counts (an empty one defers to `mate`).
+_LAYOUT_OPTION_NAME = re.compile(r"single.*pair|pair.*single|layout|read_?type|^mate$", re.IGNORECASE)
+_LAYOUT_VALUES = {
+    "single": "single", "single-end": "single", "single_end": "single", "se": "single",
+    "pair": "pair", "paired": "pair", "paired-end": "pair", "paired_end": "pair", "pe": "pair",
+}
+
+
+def _layout_options(process_options):
+    """[(where, value, layout)] for process options that declare a layout."""
+    found = []
+    for group, options in (process_options or {}).items():
+        if not isinstance(options, dict):
+            continue
+        for name, value in options.items():
+            if not isinstance(value, str) or not _LAYOUT_OPTION_NAME.search(str(name)):
+                continue
+            layout = _LAYOUT_VALUES.get(value.strip().lower())
+            if layout:
+                found.append((f"{group}.{name}", value.strip(), layout))
+    return found
+
+
+def _preflight_layout(inputs, layouts, process_options=None):
+    """Fail when the attached datasets' layout disagrees with the run's `mate`
+    input (staging run 12450 failed with "No such variable: file1" for a single
+    end dataset on a run whose `mate` stayed `pair`) or with a process option
+    that declares a layout (staging run 12451: Kallisto's
+    single_or_paired_end_reads stayed `pair`). None when not applicable."""
+    mate = next((str(i.get("value") or "").strip().lower() for i in inputs
+                 if i.get("name") == "mate"), None)
+    options = _layout_options(process_options)
+    if (not mate and not options) or not layouts:
+        return None
+    found = sorted(layouts)
+    if len(found) > 1:
+        detail = "The sample dataset mixes layouts: " + "; ".join(
+            f"{lay}: {', '.join(sorted(layouts[lay])[:5])}" for lay in found) + "."
+        return _preflight_check(
+            "layout", "fail", detail,
+            "One run takes one layout. Split the dataset into one per layout and run each "
+            "with the matching `mate` input.")
+    dataset = found[0]
+    wrong = []
+    if mate and _LAYOUT_VALUES.get(mate, mate) != dataset:
+        wrong.append(f"the `mate` input is '{mate}'")
+    wrong += [f"process option {where} is '{value}'" for where, value, layout in options if layout != dataset]
+    if wrong:
+        fixes = []
+        if mate and _LAYOUT_VALUES.get(mate, mate) != dataset:
+            fixes.append(f"set the `mate` input to '{dataset}' with update_run(inputs=...)")
+        bad_options = [where for where, _, layout in options if layout != dataset]
+        if bad_options:
+            fixes.append(f"set {', '.join(bad_options)} to '{dataset}' in update_run(process_options=...), "
+                         f"sending the complete process options")
+        return _preflight_check(
+            "layout", "fail",
+            f"The sample dataset is {dataset} end but {'; '.join(wrong)}.",
+            "Make them agree: " + "; ".join(fixes) + ".")
+    checked = (["`mate`"] if mate else []) + [where for where, _, _ in options]
+    return _preflight_check("layout", "pass", f"Dataset layout ({dataset}) agrees with {', '.join(checked)}.")
+
+
+def _preflight_dataset(via_client, sample_inputs, layouts=None):
+    """Resolve each sample input's dataset and return (check, sample_names).
+    When `layouts` is a dict, it is filled with {layout: [sample names]}."""
+    layouts = {} if layouts is None else layouts
     if not sample_inputs:
         return _preflight_check(
             "samples", "fail", "No sample dataset is attached to this run.",
@@ -3420,6 +3710,10 @@ def _preflight_dataset(via_client, sample_inputs):
         if not rows:
             empty.append(inp["name"])
         names.update(r.get("name") for r in rows if r.get("name"))
+        for r in rows:
+            row_layout = _row_layout(r)
+            if row_layout:
+                layouts.setdefault(row_layout, []).append(r.get("name") or "?")
 
     if empty:
         return _preflight_check(
@@ -3514,8 +3808,12 @@ def preflight_run(run_id: str) -> str:
         sample_inputs = [i for i in inputs if i["type"] == "vmetaCollection"]
 
         checks = []
-        dataset_check, dataset_names = _preflight_dataset(via_client, sample_inputs)
+        dataset_layouts = {}
+        dataset_check, dataset_names = _preflight_dataset(via_client, sample_inputs, dataset_layouts)
         checks.append(dataset_check)
+        layout_check = _preflight_layout(inputs, dataset_layouts, details.get("processOptions"))
+        if layout_check:
+            checks.append(layout_check)
 
         # Empty / placeholder values, and required inputs never saved at all.
         blanks = [i["name"] for i in inputs

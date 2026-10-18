@@ -223,3 +223,31 @@ class TestPreflightExecutorResources:
 
     def test_the_scheduler_name_is_matched_without_case(self):
         assert _preflight(_env(executorJob="SLURM"))["status"] == "warn"
+
+
+class TestCleanupDelay:
+    """cleanup_delay_hours sets the run's intermediate file cleanup, which the
+    web run page saves as deleteIntermediateCheck + deleteIntermediateDelay."""
+
+    def test_hours_turn_cleanup_on_with_that_delay(self):
+        _, client = _update(cleanup_delay_hours=6)
+        body = _saved_body(client)
+        assert body["deleteIntermediateCheck"] is True
+        assert body["deleteIntermediateDelay"] == 6
+
+    def test_left_out_sends_nothing(self):
+        _, client = _update(name="x")
+        body = _saved_body(client)
+        assert "deleteIntermediateCheck" not in body
+        assert "deleteIntermediateDelay" not in body
+
+    @pytest.mark.parametrize("hours", [0, -1, 2.5, True, "6"])
+    def test_zero_negative_and_non_integers_are_refused_without_calling(self, hours):
+        # 0 would switch cleanup off: the cleanup task skips a run whose delay is 0.
+        out, client = _update(cleanup_delay_hours=hours)
+        assert "cleanup_delay_hours" in out["error"]
+        client.call.assert_not_called()
+
+    def test_the_saved_reply_names_it(self):
+        out, _ = _update(cleanup_delay_hours=12)
+        assert out["data"]["saved"]["deleteIntermediateDelay"] == 12
