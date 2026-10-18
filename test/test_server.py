@@ -542,8 +542,40 @@ class TestDownloadFile:
         assert base64.b64decode(result["file_content_base64"]) == b"hello world"
         assert result["file_size"] == 11
 
-    def test_large_file_returns_a_link_and_stops_reading(self):
-        client = self._client()
+    UUID = "0123456789abcdef0123456789abcdef"
+    DASHED = "01234567-89ab-cdef-0123-456789abcdef"
+    MINT_PATH = "/api/v1/report-download/v1.abc.def"
+
+    def _large(self, client, mint=None, file_path="out/file.txt", limit=10):
+        """Run download_file against a body larger than the inline limit."""
+        if isinstance(mint, Exception):
+            client.call.side_effect = mint
+        elif mint is not None:
+            client.call.return_value = mint
+        response = self._response([b"x" * 20])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response), \
+                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", limit):
+            return server.download_file(report_id="77", file_path=file_path)
+
+    def _route(self, uuid_text=None):
+        return f"/report-resources/{uuid_text or self.UUID}/pubweb/out/file.txt"
+
+    def _mint_ok(self, **extra):
+        body = {"path": self.MINT_PATH, "expiresAt": "2026-10-17T12:15:00Z",
+                "fileName": "file.txt", "size": 20}
+        body.update(extra)
+        return body
+
+    def _with_file(self, client, file_path):
+        import pandas as pd
+        client.reports.get_all_files.return_value = pd.DataFrame(
+            [{"file_path": file_path, "routePath": self._route()}]
+        )
+
+    def test_large_file_returns_a_signed_link_and_stops_reading(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
         chunk = b"x" * (1024 * 1024)
         consumed = []
 
@@ -556,42 +588,186 @@ class TestDownloadFile:
         with patch.object(server, "get_client", return_value=client), \
                 patch.object(server.requests, "get", return_value=response), \
                 patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 5 * 1024 * 1024):
-            result = json.loads(server.download_file(report_id="1", file_path="out/file.txt"))
+            result = json.loads(server.download_file(report_id="77", file_path="out/file.txt"))
 
+        client.call.assert_called_once_with(
+            method="POST",
+            endpoint="/api/v1/run/77/download-link",
+            data={"attemptUuid": self.UUID, "filePath": "out/file.txt"},
+        )
         assert result["success"] is True
         assert result["delivery"] == "url"
         assert "file_content_base64" not in result
-        assert result["download_url"] == "https://foundry.example.com/report-resources/run1/pubweb/out/file.txt"
+        assert result["file_name"] == "file.txt"
+        assert result["download_url"] == "https://foundry.example.com" + self.MINT_PATH
         assert result["download_command"] == (
-            "curl -fL -o file.txt "
-            "https://foundry.example.com/report-resources/run1/pubweb/out/file.txt"
+            "curl -fL -o ./file.txt https://foundry.example.com" + self.MINT_PATH
         )
+        assert result["expires_at"] == "2026-10-17T12:15:00Z"
+        assert "report-resources" not in json.dumps(result)
         assert len(consumed) <= 6
         response.close.assert_called()
 
-    def test_link_answer_never_carries_the_credential(self):
-        client = self._client()
-        response = self._response([b"x" * 20])
+    def test_dashed_uuid_is_passed_as_found(self):
+        client = self._client(route_path=self._route(self.DASHED.upper()))
+        client.call.return_value = self._mint_ok()
+        result = json.loads(self._large(client))
+
+        assert result["delivery"] == "url"
+        assert client.call.call_args.kwargs["data"]["attemptUuid"] == self.DASHED.upper()
+
+    def test_nonempty_base_path_is_kept_in_the_link(self):
+        client = self._client(route_path=self._route())
+        client.auth.hostname = "https://h/base"
+        client.call.return_value = self._mint_ok(path="/api/v1/report-download/v1.x.y")
+        result = json.loads(self._large(client))
+
+        assert result["download_url"] == "https://h/base/api/v1/report-download/v1.x.y"
+
+    def test_hostile_file_name_is_quoted_with_a_dot_slash_prefix(self):
+        client = self._client(route_path=self._route())
+        self._with_file(client, "out/-rf x'.tsv")
+        client.call.return_value = self._mint_ok()
+        result = json.loads(self._large(client, file_path="out/-rf x'.tsv"))
+
+        assert result["file_name"] == "-rf x'.tsv"
+        assert result["download_command"].startswith("curl -fL -o './-rf x'\"'\"'.tsv' ")
+
+    def test_file_name_loses_separators_and_control_characters(self):
+        client = self._client(route_path=self._route())
+        name = "a\\b\x00c\nd.txt"
+        self._with_file(client, "out/" + name)
+        client.call.return_value = self._mint_ok()
+        result = json.loads(self._large(client, file_path="out/" + name))
+
+        assert result["file_name"] == "abcd.txt"
+
+    def test_mint_404_says_no_link_was_issued_for_the_file(self):
+        client = self._client(route_path=self._route())
+        raw = self._large(client, mint=RuntimeError("Error 305: Not Found: no route"))
+        result = json.loads(raw)
+
+        assert "larger than" in result["error"]
+        assert "too large to return inline" in result["error"]
+        assert "did not issue a download link for it" in result["error"]
+        assert "may not support download links" in result["error"]
+        assert "cannot be linked" in result["error"]
+        assert "report-resources" not in raw
+        assert "download_url" not in result
+
+    def test_mint_405_says_the_server_issues_no_links(self):
+        client = self._client(route_path=self._route())
+        raw = self._large(
+            client,
+            mint=RuntimeError("Error 307: Unexpected HTTP error occurred. Status code: 405."),
+        )
+        result = json.loads(raw)
+
+        assert "does not issue download links" in result["error"]
+        assert "report-resources" not in raw
+
+    def test_other_mint_failure_is_a_link_error_without_fallback(self):
+        client = self._client(route_path=self._route())
+        raw = self._large(client, mint=RuntimeError("Error 500: boom"))
+        result = json.loads(raw)
+
+        assert "download link could not be created" in result["error"]
+        assert "boom" in result["error"]
+        assert "report-resources" not in raw
+
+    def test_malformed_mint_response_is_an_error(self):
+        for bad in ({"path": "/report-resources/x"}, {"path": 5}, {}, "nope", None):
+            client = self._client(route_path=self._route())
+            client.call.return_value = bad
+            raw = self._large(client)
+            result = json.loads(raw)
+            assert "error" in result
+            assert "download_url" not in result
+            assert "report-resources" not in raw
+
+    def test_mint_path_with_traversal_or_space_is_rejected(self):
+        for bad in ("/api/v1/report-download/../x", "/api/v1/report-download/a b",
+                    "/api/v1/report-download/", "/api/v1/report-download/a/b"):
+            client = self._client(route_path=self._route())
+            raw = self._large(client, mint={"path": bad})
+            result = json.loads(raw)
+            assert "error" in result
+            assert "download_url" not in result
+            assert "report-download" not in raw
+
+    def test_file_name_loses_bidi_and_c1_control_characters(self):
+        client = self._client(route_path=self._route())
+        name = "a‮b\u0085c.txt"
+        self._with_file(client, "out/" + name)
+        client.call.return_value = self._mint_ok()
+        result = json.loads(self._large(client, file_path="out/" + name))
+
+        assert result["file_name"] == "abc.txt"
+
+    def test_unparseable_route_path_is_an_error_and_mint_is_not_called(self):
+        for bad in ("/report-resources/not-a-uuid/pubweb/out/file.txt",
+                    "/report-resources/" + self.UUID + "/other/file.txt",
+                    "/elsewhere/" + self.UUID + "/pubweb/file.txt"):
+            client = self._client(route_path=bad)
+            raw = self._large(client)
+            assert "error" in json.loads(raw)
+            client.call.assert_not_called()
+            assert "download_url" not in json.loads(raw)
+
+    def test_non_200_probe_error_has_no_plain_url(self):
+        client = self._client(route_path=self._route())
+        response = MagicMock()
+        response.status_code = 403
+        response.reason = "Forbidden"
+        response.text = "denied " + "https://foundry.example.com" + self._route()
         with patch.object(server, "get_client", return_value=client), \
-                patch.object(server.requests, "get", return_value=response), \
-                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 10):
+                patch.object(server.requests, "get", return_value=response):
             raw = server.download_file(report_id="1", file_path="out/file.txt")
+
+        result = json.loads(raw)
+        assert result["status_code"] == 403
+        assert "url" not in result
+        assert "report-resources" not in raw
+        client.call.assert_not_called()
+
+    def test_probe_exception_has_no_plain_url(self):
+        client = self._client(route_path=self._route())
+        boom = server.requests.exceptions.ConnectionError(
+            "Max retries exceeded with url: https://foundry.example.com" + self._route()
+        )
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", side_effect=boom):
+            raw = server.download_file(report_id="1", file_path="out/file.txt")
+
+        result = json.loads(raw)
+        assert "Could not reach the server to measure the file" in result["error"]
+        assert "ConnectionError" in result["error"]
+        assert "url" not in result
+        assert "report-resources" not in raw
+
+    def test_outer_error_never_echoes_the_plain_url(self):
+        client = self._client(route_path=self._route())
+        client.reports.fetch_report_data.side_effect = RuntimeError("bad " + self._route())
+        with patch.object(server, "get_client", return_value=client):
+            raw = server.download_file(report_id="1", file_path="out/file.txt")
+
+        assert "error" in json.loads(raw)
+        assert "report-resources" not in raw
+
+    def test_small_file_does_not_mint_a_link(self):
+        client = self._client(route_path=self._route())
+        response = self._response([b"hi"])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response):
+            result = json.loads(server.download_file(report_id="1", file_path="out/file.txt"))
+
+        assert result["delivery"] == "inline"
+        client.call.assert_not_called()
+
+    def test_link_answer_never_carries_the_credential(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        raw = self._large(client)
 
         assert "via_mcp_test" not in raw
         assert "Authorization" not in raw
-
-    def test_link_url_with_spaces_is_encoded_and_quoted(self):
-        client = self._client(route_path="/report-resources/run1/pubweb/my out/a b.txt")
-        response = self._response([b"x" * 20])
-        with patch.object(server, "get_client", return_value=client), \
-                patch.object(server.requests, "get", return_value=response), \
-                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 10):
-            result = json.loads(server.download_file(report_id="1", file_path="out/file.txt"))
-
-        assert result["download_url"] == (
-            "https://foundry.example.com/report-resources/run1/pubweb/my%20out/a%20b.txt"
-        )
-        assert result["download_command"] == (
-            "curl -fL -o file.txt "
-            "https://foundry.example.com/report-resources/run1/pubweb/my%20out/a%20b.txt"
-        )
