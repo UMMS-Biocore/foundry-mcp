@@ -3615,13 +3615,42 @@ def _row_layout(row):
     return None
 
 
-def _preflight_layout(inputs, layouts):
+# A process option that declares the read layout, such as Kallisto's
+# single_or_paired_end_reads. Process options are stored on the run as
+# {"<process>_<gnum>": {option: value}}; the option name is matched, and only
+# a value that reads as a layout counts (an empty one defers to `mate`).
+_LAYOUT_OPTION_NAME = re.compile(r"single.*pair|pair.*single|layout|read_?type|^mate$", re.IGNORECASE)
+_LAYOUT_VALUES = {
+    "single": "single", "single-end": "single", "single_end": "single", "se": "single",
+    "pair": "pair", "paired": "pair", "paired-end": "pair", "paired_end": "pair", "pe": "pair",
+}
+
+
+def _layout_options(process_options):
+    """[(where, value, layout)] for process options that declare a layout."""
+    found = []
+    for group, options in (process_options or {}).items():
+        if not isinstance(options, dict):
+            continue
+        for name, value in options.items():
+            if not isinstance(value, str) or not _LAYOUT_OPTION_NAME.search(str(name)):
+                continue
+            layout = _LAYOUT_VALUES.get(value.strip().lower())
+            if layout:
+                found.append((f"{group}.{name}", value.strip(), layout))
+    return found
+
+
+def _preflight_layout(inputs, layouts, process_options=None):
     """Fail when the attached datasets' layout disagrees with the run's `mate`
     input (staging run 12450 failed with "No such variable: file1" for a single
-    end dataset on a run whose `mate` stayed `pair`). None when not applicable."""
+    end dataset on a run whose `mate` stayed `pair`) or with a process option
+    that declares a layout (staging run 12451: Kallisto's
+    single_or_paired_end_reads stayed `pair`). None when not applicable."""
     mate = next((str(i.get("value") or "").strip().lower() for i in inputs
                  if i.get("name") == "mate"), None)
-    if not mate or not layouts:
+    options = _layout_options(process_options)
+    if (not mate and not options) or not layouts:
         return None
     found = sorted(layouts)
     if len(found) > 1:
@@ -3631,13 +3660,25 @@ def _preflight_layout(inputs, layouts):
             "layout", "fail", detail,
             "One run takes one layout. Split the dataset into one per layout and run each "
             "with the matching `mate` input.")
-    if found[0] != mate:
+    dataset = found[0]
+    wrong = []
+    if mate and _LAYOUT_VALUES.get(mate, mate) != dataset:
+        wrong.append(f"the `mate` input is '{mate}'")
+    wrong += [f"process option {where} is '{value}'" for where, value, layout in options if layout != dataset]
+    if wrong:
+        fixes = []
+        if mate and _LAYOUT_VALUES.get(mate, mate) != dataset:
+            fixes.append(f"set the `mate` input to '{dataset}' with update_run(inputs=...)")
+        bad_options = [where for where, _, layout in options if layout != dataset]
+        if bad_options:
+            fixes.append(f"set {', '.join(bad_options)} to '{dataset}' in update_run(process_options=...), "
+                         f"sending the complete process options")
         return _preflight_check(
             "layout", "fail",
-            f"The sample dataset is {found[0]} but the run's `mate` input is '{mate}'.",
-            f"Set the `mate` input to '{found[0]}' with update_run, and any process option "
-            f"that names the layout (for example single_or_paired_end_reads) to match.")
-    return _preflight_check("layout", "pass", f"Dataset layout and `mate` agree ({mate}).")
+            f"The sample dataset is {dataset} end but {'; '.join(wrong)}.",
+            "Make them agree: " + "; ".join(fixes) + ".")
+    checked = (["`mate`"] if mate else []) + [where for where, _, _ in options]
+    return _preflight_check("layout", "pass", f"Dataset layout ({dataset}) agrees with {', '.join(checked)}.")
 
 
 def _preflight_dataset(via_client, sample_inputs, layouts=None):
@@ -3770,7 +3811,7 @@ def preflight_run(run_id: str) -> str:
         dataset_layouts = {}
         dataset_check, dataset_names = _preflight_dataset(via_client, sample_inputs, dataset_layouts)
         checks.append(dataset_check)
-        layout_check = _preflight_layout(inputs, dataset_layouts)
+        layout_check = _preflight_layout(inputs, dataset_layouts, details.get("processOptions"))
         if layout_check:
             checks.append(layout_check)
 
