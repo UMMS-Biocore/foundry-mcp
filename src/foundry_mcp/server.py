@@ -6340,7 +6340,7 @@ def _refusal_next_step(reason: str, category, retryable):
         if reason == "storage":
             return (
                 "Your workspaces on this run environment use more disk than your storage limit "
-                "allows (limit and current are in bytes). Remove files or workspaces you no longer "
+                "allows (limit and current are in MB). Remove files or workspaces you no longer "
                 "need, or ask the run environment's owner to raise the limit, then call again with "
                 "a new submission_key."
             )
