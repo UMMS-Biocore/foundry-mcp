@@ -1,4 +1,5 @@
-"""Tests for get_pipeline, create_pipeline_config and create_pipeline.
+"""Tests for get_pipeline, list_pipeline_revisions, create_pipeline_config,
+create_pipeline and update_pipeline.
 
 The SDK's real Pipelines and PipelineBuilder run against a mocked `call`, so
 these hold the tools to the exact edge strings the editor saves. The process
@@ -79,8 +80,8 @@ GRAPH_1545 = dict(
 )
 
 
-def _client(processes=PROCESSES, details=None, created=None):
-    """A client whose `call` answers the process, details and save endpoints."""
+def _client(processes=PROCESSES, details=None, created=None, revisions=None):
+    """A client whose `call` answers the process, details, revisions and save endpoints."""
     client = MagicMock()
 
     def call(*args, **kwargs):
@@ -93,6 +94,10 @@ def _client(processes=PROCESSES, details=None, created=None):
             return processes[pid]
         if method == "GET" and endpoint.endswith("/details"):
             return details
+        if method == "GET" and endpoint.endswith("/revisions"):
+            if isinstance(revisions, Exception):
+                raise revisions
+            return revisions
         if method == "POST" and endpoint == "/api/pipeline/v1":
             return created
         raise AssertionError(f"unexpected request {method} {endpoint}")
@@ -129,16 +134,19 @@ def _tools():
     ("get_pipeline", ["pipeline_id"]),
     ("create_pipeline_config", ["name", "pipeline_group_id", "processes", "connections"]),
     ("create_pipeline", ["name", "pipeline_group_id", "processes", "connections", "confirm_create"]),
+    ("list_pipeline_revisions", ["pipeline_id"]),
+    ("update_pipeline", ["pipeline_id", "processes", "connections", "confirm_update"]),
 ])
 def test_tool_is_registered_with_its_arguments(name, required):
     tool = _tools()[name]
-    assert "connections" in tool.description or name == "get_pipeline"
+    assert "connections" in tool.description or name in ("get_pipeline", "list_pipeline_revisions")
     assert tool.description.strip()
     assert set(required) <= set(tool.inputSchema.get("required", []))
 
 
-def test_create_pipeline_warns():
-    assert "WARNING" in _tools()["create_pipeline"].description
+@pytest.mark.parametrize("name", ["create_pipeline", "update_pipeline"])
+def test_writing_tools_warn(name):
+    assert "WARNING" in _tools()[name].description
 
 
 class TestConfig:
@@ -287,3 +295,111 @@ class TestGet:
     def test_an_unreadable_process_still_returns_the_graph(self):
         out = _run(server.get_pipeline, _client(processes={}, details=DETAILS_1777), pipeline_id=1777)
         assert out["edges"] and "connections_error" in out and "connections" not in out
+
+
+# Pipeline 1545's revision list as the server returned it on 2026-10-19.
+REVISIONS_1545 = {"total": 2, "data": [
+    {"id": 1776, "version": "1.0.4", "revId": 1, "revComment": "Takes the sheet once", "revUUID": "u2",
+     "createdAt": "2026-10-10T00:00:00.000Z"},
+    {"id": 1545, "version": "1.0.3", "revId": 0, "revComment": "Initial Version", "revUUID": "u1",
+     "createdAt": "2026-09-01T00:00:00.000Z"},
+]}
+
+
+class TestRevisions:
+    def test_lists_each_revision_with_its_own_pipeline_id(self):
+        client = _client(revisions=REVISIONS_1545)
+        out = _run(server.list_pipeline_revisions, client, pipeline_id=1545)
+        assert out["pipeline_id"] == 1545 and out["total"] == 2
+        assert out["revisions"] == [
+            {"pipeline_id": 1776, "version": "1.0.4", "rev_id": 1, "rev_comment": "Takes the sheet once",
+             "created_at": "2026-10-10T00:00:00.000Z", "is_this_id": False},
+            {"pipeline_id": 1545, "version": "1.0.3", "rev_id": 0, "rev_comment": "Initial Version",
+             "created_at": "2026-09-01T00:00:00.000Z", "is_this_id": True},
+        ]
+        assert _posts(client) == []
+
+    @pytest.mark.parametrize("revisions", [{"total": 0, "data": []}, {}, None, RuntimeError("404 Not Found")])
+    def test_an_id_with_no_revisions_is_refused(self, revisions):
+        with pytest.raises(ToolError, match="separate id spaces"):
+            _run(server.list_pipeline_revisions, _client(revisions=revisions), pipeline_id=3017)
+
+
+def _details(**fields):
+    """DETAILS_1777 with some saved fields changed."""
+    details = json.loads(json.dumps(DETAILS_1777))
+    details["pipeline"]["main_pipeline_1777"].update(fields)
+    return details
+
+
+# 1777's graph with a second pipeline output, so a save visibly changes the edges.
+GRAPH_1777_TWO_OUTPUTS = dict(
+    GRAPH_1777,
+    outputs=[{"key": "report", "name": "outputParam"}, {"key": "copy", "name": "copyParam"}],
+    connections=GRAPH_1777["connections"] + [{"from": "check", "to": "copy"}],
+)
+
+
+class TestUpdate:
+    @pytest.mark.parametrize("confirm", [False, None, "true", 1])
+    def test_without_consent_is_refused_before_any_request(self, confirm):
+        client = _client(details=DETAILS_1777)
+        with pytest.raises(ToolError, match="confirm_update must be true"):
+            _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=confirm, **GRAPH_1777)
+        client.call.assert_not_called()
+
+    @pytest.mark.parametrize("confirm", ["true", "yes", "1", 1])
+    def test_a_client_cannot_consent_with_a_string_or_number(self, confirm):
+        client = _client(details=DETAILS_1777, created={"id": 1777})
+        with patch.object(server, "get_client", return_value=client), pytest.raises(Exception):
+            asyncio.run(server.mcp.call_tool("update_pipeline", dict(
+                pipeline_id=1777, confirm_update=confirm, **GRAPH_1777)))
+        assert _posts(client) == []
+
+    def test_saves_the_rebuilt_graph_over_the_same_id_keeping_other_fields(self):
+        client = _client(details=DETAILS_1777, created={"id": 1777})
+        out = _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True, **GRAPH_1777_TWO_OUTPUTS)
+        (post,) = _posts(client)
+        body = post.kwargs["data"]
+        assert body["id"] == 1777
+        assert body["name"] == "GPU smoke check (bootcamp)" and body["summary"] == "s"
+        assert body["permission"] == 3 and body["pipelineGroupId"] == 667
+        assert len(body["edges"]) == 3 and body["edges"] == out["edges"]
+        assert out["pipeline_id"] == 1777
+        assert [c["to"] for c in out["connections"]] == ["check", "report", "copy"]
+        assert out["previous_edges"] == ["o-inPro-1-252-2_i-3017-0-252-1", "i-outPro-1-201-3_o-3017-0-201-1"]
+
+    def test_name_summary_and_description_change_only_when_given(self):
+        client = _client(details=DETAILS_1777, created={"id": 1777})
+        _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True,
+             name="Renamed", description="d", **GRAPH_1777)
+        body = _posts(client)[0].kwargs["data"]
+        assert (body["name"], body["summary"], body["description"]) == ("Renamed", "s", "d")
+
+    @pytest.mark.parametrize("fields,details_extra,match", [
+        ({"perms": 63}, {}, "not private"),
+        ({"perms": 15}, {}, "not private"),
+        ({"pin": "true"}, {}, "pinned"),
+        ({}, {"updateAllowed": False}, "cannot edit"),
+    ])
+    def test_a_shared_or_locked_pipeline_is_refused(self, fields, details_extra, match):
+        details = _details(**fields)
+        details.update(details_extra)
+        client = _client(details=details, created={"id": 1777})
+        with pytest.raises(ToolError, match=match):
+            _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True, **GRAPH_1777)
+        assert _posts(client) == []
+
+    @pytest.mark.parametrize("details", [{}, None, {"pipeline": {}}])
+    def test_an_id_with_no_pipeline_is_refused(self, details):
+        client = _client(details=details)
+        with pytest.raises(ToolError, match="separate id spaces"):
+            _run(server.update_pipeline, client, pipeline_id=3017, confirm_update=True, **GRAPH_1777)
+        assert _posts(client) == []
+
+    def test_a_refused_graph_writes_nothing(self):
+        client = _client(details=DETAILS_1777)
+        graph = dict(GRAPH_1545, connections=[{"from": "analysis", "to": "download"}])
+        with pytest.raises(ToolError, match="refused"):
+            _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True, **graph)
+        assert _posts(client) == []

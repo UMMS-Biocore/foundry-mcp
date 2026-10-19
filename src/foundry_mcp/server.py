@@ -6555,6 +6555,138 @@ def create_pipeline(
     }, indent=2)
 
 
+@mcp.tool()
+def list_pipeline_revisions(pipeline_id: int) -> str:
+    """
+    List every revision of a pipeline, given the id of any one of them. Writes
+    nothing.
+
+    Each revision is its own pipeline with its own id (Xenium pipeline 1545 is
+    version 1.0.3 and 1776 is version 1.0.4), so pass the id of the revision
+    you mean to get_pipeline, create_run or update_pipeline. `is_this_id` marks
+    the revision whose id you gave.
+    """
+    def refuse(detail):
+        raise ToolError(json.dumps({
+            "error": f"No revisions of pipeline {pipeline_id} could be read.",
+            "detail": detail,
+            "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
+        }))
+
+    try:
+        response = get_client().call(method="GET", endpoint=f"/api/pipeline/v1/{pipeline_id}/revisions")
+    except Exception as e:
+        logger.error(f"Error listing revisions of pipeline {pipeline_id}: {e}")
+        refuse(str(e))
+    rows = response.get("data") if isinstance(response, dict) else None
+    if not rows:
+        refuse("The server returned no revisions.")
+    revisions = [{
+        "pipeline_id": row.get("id"),
+        "version": row.get("version"),
+        "rev_id": row.get("revId"),
+        "rev_comment": row.get("revComment"),
+        "created_at": row.get("createdAt"),
+        "is_this_id": row.get("id") == pipeline_id,
+    } for row in rows]
+    return json.dumps({
+        "pipeline_id": pipeline_id,
+        "total": response.get("total", len(rows)),
+        "revisions": revisions,
+    }, indent=2)
+
+
+_UPDATE_PIPELINE_DOC = """
+    Save a new graph over an existing private pipeline.
+
+    WARNING: This overwrites the pipeline on the Foundry Connect server in
+    place: same id, same revision, and runs already made from it see the new
+    graph. Call get_pipeline(pipeline_id) and create_pipeline_config with the
+    new graph first, show the user the old and new connections, and set
+    `confirm_update` to true only after they agree.
+
+    Refuses a pipeline that is public or shared with a group, pinned, or that
+    the signed in account cannot edit. To change one of those, create_pipeline
+    makes a new private pipeline instead.
+
+    The graph replaces the old one entirely: pass every process, input, output
+    and connection the pipeline should have. `name`, `summary` and
+    `description` change only when given; every other field is kept.
+""" + _PIPELINE_GRAPH_HELP + """
+    Returns the saved edges, the connections spelled out, and
+    `previous_edges`, the graph before the save.
+"""
+
+
+def _refuse_shared_pipeline(pipeline, pipeline_id):
+    """Refuse a save over a pipeline other people may run or that this account cannot edit."""
+    reasons = []
+    if pipeline.get("updateAllowed") is False:
+        reasons.append("the signed in account cannot edit it")
+    if str(pipeline.get("perms")) != "3":
+        reasons.append(f"it is not private (permission {pipeline.get('perms')})")
+    if str(pipeline.get("pin")).lower() == "true":
+        reasons.append("it is pinned")
+    if reasons:
+        raise ToolError(json.dumps({
+            "error": f"Pipeline {pipeline_id} was not saved: {', and '.join(reasons)}.",
+            "hint": "A save edits in place under every run that uses it. Use create_pipeline "
+                    "for a new private pipeline, or make this one private in the pipeline editor first.",
+        }))
+
+
+@mcp.tool()
+@_with_doc(_UPDATE_PIPELINE_DOC)
+def update_pipeline(
+    pipeline_id: int,
+    processes: list,
+    connections: list,
+    confirm_update: Annotated[bool, Strict()],
+    inputs: list = None,
+    outputs: list = None,
+    name: str = None,
+    summary: str = None,
+    description: str = None,
+) -> str:
+    if confirm_update is not True:
+        raise ToolError(json.dumps({
+            "error": "confirm_update must be true. Show the user the current and new "
+                     "connections, and save only after they agree."
+        }))
+    via_client = get_client()
+    pipelines = _pipelines(via_client)
+    try:
+        current = pipelines.get_pipeline(pipeline_id)
+    except Exception as e:
+        logger.error(f"Error reading pipeline {pipeline_id} before a save: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+    if not current.get("id"):
+        raise ToolError(json.dumps({
+            "error": f"No pipeline {pipeline_id} could be read.",
+            "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
+        }))
+    _refuse_shared_pipeline(current, pipeline_id)
+
+    builder, labels = _build_pipeline(via_client, processes, connections, inputs, outputs)
+    changes = {"nodes": builder.nodes, "edges": builder.edges}
+    changes.update(remove_none({"name": name, "summary": summary, "description": description}))
+    try:
+        logger.info(f"Saving a graph of {len(builder.nodes)} nodes over pipeline {pipeline_id}")
+        pipelines.update_pipeline(pipeline_id, **changes)
+    except Exception as e:
+        logger.error(f"Error saving pipeline {pipeline_id}: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+    described, unconnected = _describe_connections(builder, labels)
+    return json.dumps({
+        "pipeline_id": pipeline_id,
+        "edges": builder.edges,
+        "connections": described,
+        "unconnected_inputs": unconnected,
+        "previous_edges": current["edges"],
+        "next_steps": [f"get_pipeline({pipeline_id}) to check the saved graph."],
+    }, indent=2)
+
+
 # ============================================================================
 # Workspace Tools
 #
