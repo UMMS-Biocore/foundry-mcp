@@ -127,7 +127,7 @@ Search and retrieve pipeline run information.
 
 ---
 
-### 🔬 Process & Pipeline Management (10 tools)
+### 🔬 Process & Pipeline Management (13 tools)
 
 Create, explore, and manage bioinformatics pipelines.
 
@@ -143,6 +143,9 @@ Create, explore, and manage bioinformatics pipelines.
 | `list_process_parameters`   | List all available parameter definitions            |
 | `get_process_parameters`    | Get parameters filtered by name, type, or qualifier |
 | `create_process_parameter`  | Create new parameter definition                     |
+| `get_pipeline`              | Read a pipeline's fields and graph, each connection named by process and port |
+| `create_pipeline_config`    | Preview a pipeline built from processes, type checking every connection (writes nothing) |
+| `create_pipeline`           | Create that pipeline, private, after the user confirms (`confirm_create`) |
 
 ---
 
