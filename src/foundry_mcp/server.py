@@ -28,6 +28,9 @@ import unicodedata
 import os
 import uuid
 import requests
+from typing import Annotated
+
+from pydantic import Strict
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp.server.fastmcp import FastMCP
@@ -6339,7 +6342,6 @@ def _build_pipeline(via_client, processes, connections, inputs, outputs):
     keys, labels = {}, {}
 
     def refuse(detail):
-        detail = _NODE_KEY.sub(lambda m: repr(labels.get(m.group(0), m.group(0))), detail)
         raise ToolError(json.dumps({
             "error": "The pipeline graph was refused.",
             "detail": detail,
@@ -6359,23 +6361,26 @@ def _build_pipeline(via_client, processes, connections, inputs, outputs):
             refuse(f"A connection names {key!r}, which is not the key of any process, input or output.")
         return keys[key]
 
+    if not processes:
+        refuse("A pipeline needs at least one process.")
     try:
-        for spec in processes or []:
-            if not isinstance(spec, dict) or spec.get("process_id") is None:
-                refuse("Every process needs a \"process_id\".")
-            add("process", spec, lambda s: builder.add_process(s["process_id"], s.get("x"), s.get("y"), s.get("name")))
+        for spec in processes:
+            process_id = spec.get("process_id") if isinstance(spec, dict) else None
+            if isinstance(process_id, str) and process_id.isdigit():
+                process_id = int(process_id)
+            if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
+                refuse(f"Every process needs a \"process_id\", a positive whole number; got {process_id!r}.")
+            add("process", spec, lambda s: builder.add_process(process_id, s.get("x"), s.get("y"), s.get("name")))
         for spec in inputs or []:
             add("input", spec, lambda s: builder.add_input(s.get("name") or s["key"], s.get("x"), s.get("y")))
         for spec in outputs or []:
             add("output", spec, lambda s: builder.add_output(s.get("name") or s["key"], s.get("publish"), s.get("x"), s.get("y")))
-        if not keys:
-            refuse("A pipeline needs at least one process.")
         for spec in connections or []:
             if not isinstance(spec, dict):
                 refuse("Every connection is a dict with \"from\" and \"to\".")
             builder.connect(node(spec.get("from")), node(spec.get("to")), output=spec.get("output"), input=spec.get("input"))
     except PipelineGraphError as e:
-        refuse(str(e))
+        refuse(_NODE_KEY.sub(lambda m: repr(labels.get(m.group(0), m.group(0))), str(e)))
     return builder, labels
 
 
@@ -6427,8 +6432,13 @@ def get_pipeline(pipeline_id: int) -> str:
         logger.error(f"Error reading pipeline {pipeline_id}: {e}")
         raise ToolError(json.dumps({"error": str(e)})) from e
 
+    if not pipeline.get("id"):
+        raise ToolError(json.dumps({
+            "error": f"No pipeline {pipeline_id} could be read.",
+            "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
+        }))
     builder = PipelineBuilder(_process_reader(via_client), pipeline["nodes"], pipeline["edges"])
-    labels = {key: f"{key} {node['nodeName']}" for key, node in pipeline["nodes"].items()}
+    labels = {key: f"{key} {node.get('nodeName')}" for key, node in pipeline["nodes"].items()}
     try:
         pipeline["connections"], pipeline["unconnected_inputs"] = _describe_connections(builder, labels)
     except Exception as e:
@@ -6507,7 +6517,7 @@ def create_pipeline(
     pipeline_group_id: int,
     processes: list,
     connections: list,
-    confirm_create: bool,
+    confirm_create: Annotated[bool, Strict()],
     inputs: list = None,
     outputs: list = None,
     summary: str = "",

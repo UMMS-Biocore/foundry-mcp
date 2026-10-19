@@ -182,10 +182,27 @@ class TestConfig:
         (dict(GRAPH_1777, inputs=[{"key": "check"}]), "used twice"),
         (dict(GRAPH_1777, processes=[{"process_id": 3017}]), "needs a"),
         (dict(GRAPH_1777, processes=[], inputs=[], outputs=[], connections=[]), "at least one process"),
+        (dict(GRAPH_1777, processes=[], connections=[]), "at least one process"),
+        (dict(GRAPH_1777, processes=[{"key": "check", "process_id": 3017.0}]), "positive whole number"),
+        (dict(GRAPH_1777, processes=[{"key": "check", "process_id": "abc"}]), "positive whole number"),
+        (dict(GRAPH_1777, processes=[{"key": "check", "process_id": -5}]), "positive whole number"),
+        (dict(GRAPH_1777, processes=[{"key": "check", "process_id": True}]), "positive whole number"),
     ])
     def test_malformed_graph_is_refused(self, graph, match):
         with pytest.raises(ToolError, match=match):
             _run(server.create_pipeline_config, _client(), name="x", pipeline_group_id=1, **graph)
+
+    def test_a_process_id_as_digits_is_accepted(self):
+        graph = dict(GRAPH_1777, processes=[{"key": "check", "process_id": "3017"}])
+        out = _run(server.create_pipeline_config, _client(), name="x", pipeline_group_id=1, **graph)
+        assert out["edges"] == ["o-inPro-1-252-2_i-3017-0-252-1", "i-outPro-1-201-3_o-3017-0-201-1"]
+
+    def test_a_callers_key_that_looks_like_a_node_key_is_quoted_as_given(self):
+        graph = dict(GRAPH_1777, processes=[{"key": "g-2", "process_id": 3017}],
+                     connections=[{"from": "g-1", "to": "g-2"}])
+        with pytest.raises(ToolError) as refused:
+            _run(server.create_pipeline_config, _client(), name="x", pipeline_group_id=1, **graph)
+        assert json.loads(str(refused.value))["detail"].startswith("A connection names 'g-1',")
 
     def test_a_pipeline_id_given_as_a_process_id_is_refused(self):
         graph = dict(GRAPH_1777, processes=[{"key": "check", "process_id": 1545}])
@@ -206,6 +223,22 @@ class TestCreate:
         with pytest.raises(ToolError, match="confirm_create must be true"):
             _run(server.create_pipeline, client, name="x", pipeline_group_id=1, confirm_create=confirm, **GRAPH_1777)
         client.call.assert_not_called()
+
+    @pytest.mark.parametrize("confirm", ["true", "yes", "1", 1])
+    def test_a_client_cannot_consent_with_a_string_or_number(self, confirm):
+        """Through the MCP layer, where lax validation would turn these into True."""
+        client = _client(created={"id": 9})
+        with patch.object(server, "get_client", return_value=client), pytest.raises(Exception):
+            asyncio.run(server.mcp.call_tool("create_pipeline", dict(
+                name="x", pipeline_group_id=1, confirm_create=confirm, **GRAPH_1777)))
+        assert _posts(client) == []
+
+    def test_a_client_consents_with_true(self):
+        client = _client(created={"id": 9})
+        with patch.object(server, "get_client", return_value=client):
+            asyncio.run(server.mcp.call_tool("create_pipeline", dict(
+                name="x", pipeline_group_id=1, confirm_create=True, **GRAPH_1777)))
+        assert len(_posts(client)) == 1
 
     def test_creates_a_new_private_pipeline_from_the_rebuilt_graph(self):
         client = _client(created={"id": 1779, "name": "GPU smoke check"})
@@ -237,6 +270,19 @@ class TestGet:
             {"from": "g-1 gpu_smoke_check", "output": "outputFileTxt", "output_slot": 0,
              "to": "g-3 outputParam", "input": None, "input_slot": 1},
         ]
+
+    @pytest.mark.parametrize("details", [{}, None, {"pipeline": {}}])
+    def test_an_id_with_no_pipeline_is_refused(self, details):
+        with pytest.raises(ToolError, match="separate id spaces"):
+            _run(server.get_pipeline, _client(details=details), pipeline_id=3017)
+
+    def test_a_node_without_a_name_is_still_described(self):
+        details = json.loads(json.dumps(DETAILS_1777))
+        saved = details["pipeline"]["main_pipeline_1777"]
+        saved["nodes"] = json.dumps({"g-1": {"xCoordinate": 0, "yCoordinate": 0, "param": "3017", "nodeSettings": {}},
+                                     "g-2": [0, 0, "inPro", "inputParam", {}], "g-3": [0, 0, "outPro", "outputParam", {}]})
+        out = _run(server.get_pipeline, _client(details=details), pipeline_id=1777)
+        assert out["connections"][0]["to"] == "g-1 None"
 
     def test_an_unreadable_process_still_returns_the_graph(self):
         out = _run(server.get_pipeline, _client(processes={}, details=DETAILS_1777), pipeline_id=1777)
