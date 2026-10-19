@@ -691,15 +691,16 @@ class TestTypedRefusals:
     def test_a_storage_refusal_names_disk_use(self, via_client, http):
         http.return_value = _response(429, {
             "kind": "refused", "reason": "storage", "category": "quota", "retryable": False,
-            "limit": 1048576, "current": 2097152, "message": "m",
+            "limit": 1024, "current": 2048, "message": "m",
         })
         with pytest.raises(ToolError) as exc:
             server.workspace_run(WS, "echo hi", submission_key="k")
         err = _error(exc)
         assert err["reason"] == "storage"
         assert "disk" in err["next_step"]
-        assert "bytes" in err["next_step"]
-        assert (err["limit"], err["current"]) == (1048576, 2097152)
+        assert "are in MB" in err["next_step"]
+        assert "bytes" not in err["next_step"]
+        assert (err["limit"], err["current"]) == (1024, 2048)
 
     def test_a_ceiling_refusal_at_422_says_to_ask_for_less(self, via_client, http):
         http.return_value = _response(422, {
