@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- **Build pipelines from processes**
+  - `get_pipeline` reads a pipeline's fields and its graph as the editor saves
+    it, and spells out every connection by process, port name and slot.
+  - `create_pipeline_config` previews a new pipeline from processes, pipeline
+    inputs and outputs, and connections between them. Each connection is type
+    checked (file type must match; a value connects only to a value), a refusal
+    names the node by the caller's key, and process inputs nothing feeds are
+    listed. It writes nothing.
+  - `create_pipeline` takes the same arguments plus `confirm_create`, rebuilds
+    and rechecks the graph, and creates a new private pipeline. It never saves
+    over an existing one.
+  - Needs viafoundry_sdk 1.3.0 (`client.pipelines`).
 - **Workspaces: run code in a container on a run environment**
   - `workspace_list` and `workspace_create` list and create your workspaces on
     a run environment that has container execution turned on.

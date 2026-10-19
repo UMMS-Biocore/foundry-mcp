@@ -34,8 +34,9 @@ RUN python -m build --wheel
 
 # Build the foundry-sdk dependency into a wheel. The repo is public, so no
 # token or auth is required. Pinned for reproducibility.
-# update_process needs viafoundry_sdk 1.1.0 or later, which sends port ids.
-ARG SDK_GIT_REF=fe0e3a032449
+# update_process needs viafoundry_sdk 1.1.0 or later, which sends port ids;
+# the pipeline building tools need 1.3.0 (client.pipelines).
+ARG SDK_GIT_REF=f1e95c9effb5
 RUN pip wheel --no-deps --wheel-dir /build/dist \
          "git+https://github.com/UMMS-Biocore/foundry-sdk.git@${SDK_GIT_REF}"
 

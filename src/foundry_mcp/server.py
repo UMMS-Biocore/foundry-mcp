@@ -6253,6 +6253,299 @@ def list_pipeline_menu_groups() -> str:
 
 
 # ============================================================================
+# Pipeline Building Tools
+#
+# Build a pipeline graph from existing processes with the SDK's PipelineBuilder,
+# which type checks every connection, and save it through the editor's own
+# endpoint (POST /api/pipeline/v1). create_pipeline_config and create_pipeline
+# take the same arguments: the config call is the preview, and the create call
+# rebuilds the graph from its arguments, so what is saved is what was checked.
+#
+# Process ids and pipeline ids are separate id spaces, and pipeline menu groups
+# are separate from process menu groups. Refusals are raised as ToolError.
+# ============================================================================
+
+_NODE_KEY = re.compile(r"\bg-\d+\b")
+
+
+def _pipelines(via_client):
+    """The SDK's pipelines API, refusing when the installed SDK predates it."""
+    pipelines = getattr(via_client, "pipelines", None)
+    if pipelines is None:
+        raise ToolError(json.dumps({
+            "error": "This Foundry MCP server is running an SDK without pipeline building.",
+            "hint": "Upgrade viafoundry_sdk to 1.3.0 or later.",
+        }))
+    return pipelines
+
+
+def _process_reader(via_client):
+    """get_process for PipelineBuilder: GET /api/v1/process/{id}, refusing a non-process."""
+    def get_process(process_id):
+        try:
+            process = via_client.call(method="GET", endpoint=f"/api/v1/process/{process_id}")
+        except Exception as e:
+            raise ToolError(json.dumps({
+                "error": f"Process {process_id} could not be read: {e}",
+                "hint": "Process ids and pipeline ids are separate id spaces.",
+            })) from e
+        if not isinstance(process, dict) or not isinstance(process.get("inputs"), list) \
+                or not isinstance(process.get("outputs"), list):
+            raise ToolError(json.dumps({
+                "error": f"Process {process_id} could not be read as a process.",
+                "hint": "Process ids and pipeline ids are separate id spaces; "
+                        "use list_processes or get_process_details for process ids.",
+            }))
+        return process
+    return get_process
+
+
+def _describe_connections(builder, labels):
+    """Each edge as {from, output, to, input}, plus process inputs nothing feeds."""
+    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE, parse_edge
+
+    def port(handle, side):
+        if handle["param"] in (INPUT_NODE, OUTPUT_NODE):
+            return None
+        return builder.process(handle["param"])[side][handle["slot"]].get("name")
+
+    connections, fed = [], set()
+    for edge in builder.edges:
+        source, target = parse_edge(edge)
+        fed.add((target["node"], target["slot"]))
+        connections.append({
+            "from": labels.get(source["node"], source["node"]),
+            "output": port(source, "outputs"),
+            "output_slot": source["slot"],
+            "to": labels.get(target["node"], target["node"]),
+            "input": port(target, "inputs"),
+            "input_slot": target["slot"],
+        })
+    unconnected = [
+        {"process": labels.get(key, key), "input": inp.get("name"), "slot": slot}
+        for key, node in builder.nodes.items() if node["param"] not in (INPUT_NODE, OUTPUT_NODE)
+        for slot, inp in enumerate(builder.process(node["param"])["inputs"])
+        if (key, slot) not in fed
+    ]
+    return connections, unconnected
+
+
+def _build_pipeline(via_client, processes, connections, inputs, outputs):
+    """Assemble and type check a graph. Returns (builder, {g-N: caller's key})."""
+    from viafoundry.pipelines import PipelineBuilder, PipelineGraphError
+
+    _pipelines(via_client)
+    builder = PipelineBuilder(_process_reader(via_client))
+    keys, labels = {}, {}
+
+    def refuse(detail):
+        detail = _NODE_KEY.sub(lambda m: repr(labels.get(m.group(0), m.group(0))), detail)
+        raise ToolError(json.dumps({
+            "error": "The pipeline graph was refused.",
+            "detail": detail,
+            "hint": "Nothing was saved. Use get_process_details for a process's inputs and outputs.",
+        }))
+
+    def add(kind, spec, make):
+        if not isinstance(spec, dict) or not isinstance(spec.get("key"), str) or not spec["key"]:
+            refuse(f"Every {kind} needs a \"key\" string, the name connections refer to it by.")
+        if spec["key"] in keys:
+            refuse(f"The key {spec['key']!r} is used twice.")
+        node = make(spec)
+        keys[spec["key"]], labels[node] = node, spec["key"]
+
+    def node(key):
+        if key not in keys:
+            refuse(f"A connection names {key!r}, which is not the key of any process, input or output.")
+        return keys[key]
+
+    try:
+        for spec in processes or []:
+            if not isinstance(spec, dict) or spec.get("process_id") is None:
+                refuse("Every process needs a \"process_id\".")
+            add("process", spec, lambda s: builder.add_process(s["process_id"], s.get("x"), s.get("y"), s.get("name")))
+        for spec in inputs or []:
+            add("input", spec, lambda s: builder.add_input(s.get("name") or s["key"], s.get("x"), s.get("y")))
+        for spec in outputs or []:
+            add("output", spec, lambda s: builder.add_output(s.get("name") or s["key"], s.get("publish"), s.get("x"), s.get("y")))
+        if not keys:
+            refuse("A pipeline needs at least one process.")
+        for spec in connections or []:
+            if not isinstance(spec, dict):
+                refuse("Every connection is a dict with \"from\" and \"to\".")
+            builder.connect(node(spec.get("from")), node(spec.get("to")), output=spec.get("output"), input=spec.get("input"))
+    except PipelineGraphError as e:
+        refuse(str(e))
+    return builder, labels
+
+
+def _with_doc(text):
+    """Set a tool's docstring from text built at import time (FastMCP reads __doc__)."""
+    def apply(fn):
+        fn.__doc__ = text
+        return fn
+    return apply
+
+
+_PIPELINE_GRAPH_HELP = """
+    processes: list of {"key", "process_id", "name"?, "x"?, "y"?}. `key` is any
+      label you choose; connections refer to nodes by it.
+    inputs: list of {"key", "name"?}, the pipeline inputs. `name` is the field
+      label on the run page (defaults to the key).
+    outputs: list of {"key", "name"?, "publish"?}, the pipeline outputs.
+      `publish` (html, rdata, ...) shows the output as a report of that type.
+    connections: list of {"from", "to", "output"?, "input"?}. Edges run from a
+      process or pipeline input to a process or pipeline output. `output` and
+      `input` pick the process's port by 0-based slot, sname, name or parameter
+      id; leave one out when the process has only one. Ends must match on file
+      type, and a value (qualifier val) connects only to a value. One pipeline
+      input may feed several process inputs of the same type.
+    pipeline_group_id: a pipeline menu group from list_pipeline_menu_groups,
+      not a process menu group.
+"""
+
+
+@mcp.tool()
+def get_pipeline(pipeline_id: int) -> str:
+    """
+    Read one pipeline: its fields, its graph (nodes and edges as the editor saves
+    them) and `connections`, each edge spelled out as process and port names
+    with 0-based port slots (slot 1 on a pipeline input or output).
+    `unconnected_inputs` lists process inputs nothing feeds. Writes nothing.
+
+    A node's `param` is a process id, "inPro" (pipeline input) or "outPro"
+    (pipeline output). Process ids and pipeline ids are separate id spaces.
+    """
+    from viafoundry.pipelines import PipelineBuilder
+
+    try:
+        via_client = get_client()
+        pipeline = _pipelines(via_client).get_pipeline(pipeline_id)
+    except ToolError:
+        raise
+    except Exception as e:
+        logger.error(f"Error reading pipeline {pipeline_id}: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+
+    builder = PipelineBuilder(_process_reader(via_client), pipeline["nodes"], pipeline["edges"])
+    labels = {key: f"{key} {node['nodeName']}" for key, node in pipeline["nodes"].items()}
+    try:
+        pipeline["connections"], pipeline["unconnected_inputs"] = _describe_connections(builder, labels)
+    except Exception as e:
+        logger.warning(f"Could not name the connections of pipeline {pipeline_id}: {e}")
+        pipeline["connections_error"] = "Could not read every process in this pipeline to name its ports."
+    return json.dumps(serialize_response(pipeline), indent=2)
+
+
+_CREATE_PIPELINE_CONFIG_DOC = """
+    Preview a new pipeline built from existing processes. Writes nothing.
+
+    Reads each process, places the nodes, type checks every connection and
+    returns the nodes and edges the editor would save, every connection spelled
+    out, and `unconnected_inputs` (process inputs nothing feeds, which a run
+    cannot fill unless they are optional). A refused connection raises an error
+    naming the node by your key.
+""" + _PIPELINE_GRAPH_HELP + """
+    Example (pipeline 1777): processes=[{"key": "check", "process_id": 3017}],
+      inputs=[{"key": "label", "name": "inputParam"}],
+      outputs=[{"key": "report", "name": "outputParam"}],
+      connections=[{"from": "label", "to": "check"}, {"from": "check", "to": "report"}]
+
+    Show the user `connections` and `unconnected_inputs`, then call
+    create_pipeline with the same arguments and confirm_create=true.
+"""
+
+
+@mcp.tool()
+@_with_doc(_CREATE_PIPELINE_CONFIG_DOC)
+def create_pipeline_config(
+    name: str,
+    pipeline_group_id: int,
+    processes: list,
+    connections: list,
+    inputs: list = None,
+    outputs: list = None,
+    summary: str = "",
+    description: str = "",
+) -> str:
+    builder, labels = _build_pipeline(get_client(), processes, connections, inputs, outputs)
+    described, unconnected = _describe_connections(builder, labels)
+    return json.dumps({
+        "name": name,
+        "pipeline_group_id": pipeline_group_id,
+        "summary": summary,
+        "description": description,
+        "nodes": builder.nodes,
+        "edges": builder.edges,
+        "connections": described,
+        "unconnected_inputs": unconnected,
+        "next_steps": [
+            "Show the user the connections and unconnected inputs.",
+            "create_pipeline(...) with the same arguments and confirm_create=true after the user agrees.",
+        ],
+    }, indent=2)
+
+
+_CREATE_PIPELINE_DOC = """
+    Create a new private pipeline from existing processes.
+
+    WARNING: This creates a pipeline on the Foundry Connect server. Call
+    create_pipeline_config with the same arguments first, show the user its
+    connections, and set `confirm_create` to true only after they agree. The
+    graph is rebuilt and type checked from these arguments, never taken from a
+    preview. It always creates a new pipeline and never saves over one.
+""" + _PIPELINE_GRAPH_HELP + """
+    Returns the new pipeline's id. Open it in the pipeline editor to publish it,
+    or start a run with create_run(pipeline_id, project_id, name).
+"""
+
+
+@mcp.tool()
+@_with_doc(_CREATE_PIPELINE_DOC)
+def create_pipeline(
+    name: str,
+    pipeline_group_id: int,
+    processes: list,
+    connections: list,
+    confirm_create: bool,
+    inputs: list = None,
+    outputs: list = None,
+    summary: str = "",
+    description: str = "",
+) -> str:
+    if confirm_create is not True:
+        raise ToolError(json.dumps({
+            "error": "confirm_create must be true. Show the user the create_pipeline_config "
+                     "result, and create only after they agree."
+        }))
+    via_client = get_client()
+    builder, _ = _build_pipeline(via_client, processes, connections, inputs, outputs)
+    try:
+        logger.info(f"Creating pipeline {name!r} with {len(builder.nodes)} nodes")
+        created = _pipelines(via_client).create_pipeline(
+            name=name,
+            pipeline_group_id=pipeline_group_id,
+            nodes=builder.nodes,
+            edges=builder.edges,
+            summary=summary,
+            description=description,
+        )
+    except Exception as e:
+        logger.error(f"Error creating pipeline: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+    result = serialize_response(created)
+    pipeline_id = result.get("id") if isinstance(result, dict) else None
+    return json.dumps({
+        "pipeline_id": pipeline_id,
+        "response": result,
+        "next_steps": [
+            f"get_pipeline({pipeline_id}) to check the saved graph.",
+            "create_run(pipeline_id, project_id, name) to start a run from it.",
+        ],
+    }, indent=2)
+
+
+# ============================================================================
 # Workspace Tools
 #
 # Run code in a container on a run environment's workspace. These call the REST
