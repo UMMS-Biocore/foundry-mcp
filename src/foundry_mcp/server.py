@@ -7070,9 +7070,15 @@ def _refuse_with_key(reason: str, message: str, key: str, http_status: int):
 def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     """
     Read one job of your workspace by the submission_key workspace_run returned.
-    `status` is one of awaiting_approval, rejected, expired, starting, uncertain,
-    dispatch_refused, queued, running, completed, failed, unknown. A job waiting
-    for approval also carries its `approve_at` link.
+    `status` is one of awaiting_approval, rejected, expired, starting, refused,
+    uncertain, dispatch_refused, queued, running, completed, failed, unknown.
+    A job waiting for approval also carries its `approve_at` link.
+
+    `refused` means the job was approved but the server refused to start it
+    (for example over the storage quota, or a mount outside the allowed data
+    roots). Its `refusal` field holds the refusal code; it is null for every
+    other status. A refused job is not final: fix the cause, then call
+    workspace_run again with the same submission_key to retry it.
     """
     _check_workspace_id(workspace_id)
     _check_submission_key(submission_key)
