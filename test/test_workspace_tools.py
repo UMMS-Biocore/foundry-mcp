@@ -522,6 +522,17 @@ class TestWorkspaceJobStatus:
         out = json.loads(server.workspace_job_status(WS, "k"))
         assert out["approve_at"] == f"{HOST}/workspaces/{WS}/requests/12"
 
+    def test_a_refused_job_passes_its_refusal_code_through(self, via_client, http):
+        http.return_value = _response(200, {
+            "requestId": 12, "attemptId": None, "submissionKey": "k", "command": "echo hi",
+            "cpus": 1, "memoryMb": 1024, "wallMinutes": 30, "status": "refused",
+            "refusal": "storage", "schedulerJobId": None, "createdAt": "2026-10-17T00:00:00.000Z",
+        })
+        out = json.loads(server.workspace_job_status(WS, "k"))
+        assert out["job"]["status"] == "refused"
+        assert out["job"]["refusal"] == "storage"
+        assert "approve_at" not in out
+
     def test_an_unknown_key_is_a_not_found_error(self, via_client, http):
         http.return_value = _response(404, {"reason": "job_not_found", "message": "No job in a workspace of yours has this submission key."})
         with pytest.raises(ToolError) as exc:

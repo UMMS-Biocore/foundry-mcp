@@ -143,6 +143,11 @@
 - A refused or failed `update_run` now comes back as an MCP error
   (`isError`), so a client can no longer read a save that did not happen as
   a success. The text is the same `{"error": ...}` JSON as before.
+- `workspace_job_status` now documents the `refused` status and the job's
+  `refusal` field: an approved job the server refused to start (storage
+  quota, a mount outside the allowed data roots) reads `refused` with the
+  refusal code, instead of `starting`. A resubmit with the same
+  `submission_key` retries it.
 
 ## [1.3.0] - 2026-09-30
 
