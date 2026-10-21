@@ -14,6 +14,13 @@
   - `create_pipeline` takes the same arguments plus `confirm_create`, rebuilds
     and rechecks the graph, and creates a new private pipeline. It never saves
     over an existing one.
+  - `list_pipeline_revisions` lists every revision of a pipeline. Each
+    revision has its own pipeline id (1545 is v1.0.3, 1776 is v1.0.4).
+  - `update_pipeline` takes the same graph arguments plus `confirm_update`
+    and saves the rebuilt graph over an existing pipeline in place, keeping
+    its other fields. It refuses a pipeline that is public or group shared,
+    pinned, or not editable by the signed in account, because a save changes
+    it under every run that uses it. It returns the previous edges too.
   - Needs viafoundry_sdk 1.3.0 (`client.pipelines`).
 - **Workspaces: run code in a container on a run environment**
   - `workspace_list` and `workspace_create` list and create your workspaces on

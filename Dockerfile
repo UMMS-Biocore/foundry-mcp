@@ -36,7 +36,7 @@ RUN python -m build --wheel
 # token or auth is required. Pinned for reproducibility.
 # update_process needs viafoundry_sdk 1.1.0 or later, which sends port ids;
 # the pipeline building tools need 1.3.0 (client.pipelines).
-ARG SDK_GIT_REF=f1e95c9effb5
+ARG SDK_GIT_REF=e0bb0f232d3f
 RUN pip wheel --no-deps --wheel-dir /build/dist \
          "git+https://github.com/UMMS-Biocore/foundry-sdk.git@${SDK_GIT_REF}"
 

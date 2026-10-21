@@ -146,6 +146,8 @@ Create, explore, and manage bioinformatics pipelines.
 | `get_pipeline`              | Read a pipeline's fields and graph, each connection named by process and port |
 | `create_pipeline_config`    | Preview a pipeline built from processes, type checking every connection (writes nothing) |
 | `create_pipeline`           | Create that pipeline, private, after the user confirms (`confirm_create`) |
+| `list_pipeline_revisions`   | List a pipeline's revisions; each has its own pipeline id |
+| `update_pipeline`           | Save a new graph over a private, unpinned pipeline in place, after the user confirms (`confirm_update`) |
 
 ---
 
