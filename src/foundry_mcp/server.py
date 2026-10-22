@@ -28,7 +28,7 @@ import unicodedata
 import os
 import uuid
 import requests
-from typing import Annotated
+from typing import Annotated, Optional
 
 from pydantic import Strict
 
@@ -1851,6 +1851,281 @@ def update_run(
         # Raised, not returned, so the MCP reply carries isError: a refused save
         # must never read as a successful one.
         raise ToolError(json.dumps({"error": str(e)})) from e
+
+
+# ============================================================================
+# Run advanced settings: container and executor settings
+#
+# GET /api/v1/run/{id}/details reports them under advancedSettings (docker,
+# singularity, globalExec, processExec). PATCH /api/v1/run/{id}/save takes
+# useDocker / useSingularity with dockerConfig {image, runOptions} and
+# singularityConfig {imagePath, runOptions}, execAllCheck / execAll and
+# execEachCheck / execEach. The server refuses useDocker and useSingularity
+# both true, so a container change always sends both.
+# ============================================================================
+
+_CONTAINER_CHOICES = ("docker", "singularity", "off")
+# Statuses a run has before it is launched (the database keeps null).
+_ADVANCED_SETTINGS_EDITABLE = ("NotSubmitted", "", None)
+_EXEC_NUMERIC_FIELDS = ("memory", "cpu", "time")
+
+
+def _exec_row_view(options, keys):
+    """One saved executor row as {queue, memory, cpu, time, options}."""
+    row = {field: "" for field in _EXEC_FIELDS}
+    for key, value in (options or {}).items():
+        if key in keys and value is not None:
+            row[keys[key]] = str(value)
+    return row
+
+
+def _advanced_settings_view(run_id, details, status):
+    advanced = (details or {}).get("advancedSettings") or {}
+    docker = advanced.get("docker") or {}
+    singularity = advanced.get("singularity") or {}
+    if docker.get("enabled"):
+        container = "docker"
+    elif singularity.get("enabled"):
+        container = "singularity"
+    else:
+        container = "off"
+    global_exec = advanced.get("globalExec") or {}
+    process_exec = advanced.get("processExec") or {}
+    processes = {key: _exec_row_view(row, _PROCESS_EXEC_KEYS)
+                 for key, row in (process_exec.get("options") or {}).items() if isinstance(row, dict)}
+    return {
+        "run_id": run_id,
+        "name": (details or {}).get("name"),
+        "status": _human_run_status(status) if status not in _ADVANCED_SETTINGS_EDITABLE else "Not submitted",
+        "editable": status in _ADVANCED_SETTINGS_EDITABLE,
+        "container": {
+            "type": container,
+            "docker": {"enabled": bool(docker.get("enabled")), "image": docker.get("image") or "",
+                       "options": docker.get("options") or ""},
+            "singularity": {"enabled": bool(singularity.get("enabled")), "image": singularity.get("image") or "",
+                            "options": singularity.get("options") or ""},
+        },
+        "exec_all": {"enabled": bool(global_exec.get("enabled")),
+                     **_exec_row_view(global_exec.get("options"), _GLOBAL_EXEC_KEYS)},
+        "process_exec": {"enabled": bool(process_exec.get("enabled")), "processes": processes},
+    }
+
+
+def _read_advanced_settings(via_client, run_id):
+    details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details") or {}
+    if not details.get("advancedSettings"):
+        raise ValueError(f"Run {run_id} has no advanced settings to read; check the run id with get_run.")
+    status = _fetch_run_status(via_client, run_id, strict=True)
+    return details, status
+
+
+@mcp.tool()
+def get_run_advanced_settings(run_id: str) -> str:
+    """
+    Read a run's advanced settings: the container (docker, singularity or
+    off, with its image and run options), the executor settings for all
+    processes (exec_all: queue, memory in GB, cpu, time in minutes, extra
+    cluster options) and the per process overrides (process_exec, keyed
+    procGnum-<n> or procGnum-<n>p<module>; get_run_details(run_id,
+    verbose=True) shows which process each key is).
+
+    `editable` is true only while the run has not been launched; that is the
+    only time update_run_advanced_settings saves. Writes nothing. Call this
+    before update_run_advanced_settings and show the user what will change.
+    """
+    try:
+        via_client = get_client()
+        details, status = _read_advanced_settings(via_client, run_id)
+        view = _advanced_settings_view(run_id, details, status)
+    except Exception as e:
+        logger.error(f"Error reading advanced settings for run {run_id}: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+    exec_all = view["exec_all"]
+    summary = (
+        f"Run {run_id}: container {view['container']['type']}; executor settings for all processes "
+        + (f"on (queue {exec_all['queue'] or 'default'}, {exec_all['memory'] or '?'} GB, "
+           f"{exec_all['cpu'] or '?'} CPU, {exec_all['time'] or '?'} min)" if exec_all["enabled"] else "off")
+        + f"; {len(view['process_exec']['processes'])} per process override(s)"
+        + ("" if view["process_exec"]["enabled"] or not view["process_exec"]["processes"] else " (switched off)")
+        + "."
+    )
+    next_steps = ([f"update_run_advanced_settings(run_id='{run_id}', ..., confirm_update=true) after the user agrees."]
+                  if view["editable"] else
+                  [f"Run {run_id} is {view['status']}, so its settings cannot be changed. "
+                   "duplicate_run makes a new run to edit."])
+    return json.dumps(envelope(summary=summary, data=view, next_steps=next_steps), indent=2)
+
+
+def _check_exec_values(row, where):
+    for field in _EXEC_NUMERIC_FIELDS:
+        value = row.get(field, "")
+        if value != "" and not re.fullmatch(r"\d+(\.\d+)?", value):
+            raise ValueError(f"{where}.{field} must be a number, not '{value}'")
+
+
+def _exec_update(current, changes, keys, where):
+    """Merge a partial executor row onto the saved one."""
+    if not isinstance(changes, dict):
+        raise ValueError(f"{where} must be an object with queue, memory, cpu, time and/or options")
+    if not changes:
+        raise ValueError(f"{where} is empty; leave it out to keep the saved values")
+    given = _exec_values(changes, keys, where)
+    merged = dict(current)
+    merged.update({keys[k]: given[keys[k]] for k in changes if k != "check"})
+    _check_exec_values(merged, where)
+    return merged
+
+
+def _validate_advanced_settings_args(container, container_image, container_options, exec_all, process_exec,
+                                     exec_all_enabled, process_exec_enabled):
+    if all(v is None for v in (container, container_image, container_options, exec_all, process_exec,
+                               exec_all_enabled, process_exec_enabled)):
+        raise ValueError("Nothing to change: pass container, exec_all, process_exec or one of the *_enabled switches.")
+    if container is not None and container not in _CONTAINER_CHOICES:
+        raise ValueError(f"container must be one of {', '.join(_CONTAINER_CHOICES)}, not '{container}'")
+    if container == "off" and (container_image is not None or container_options is not None):
+        raise ValueError("container 'off' takes no container_image or container_options")
+    if container_image is not None and not container_image.strip():
+        raise ValueError("container_image must not be empty")
+    if exec_all is not None:
+        _exec_update({f: "" for f in _EXEC_FIELDS}, exec_all, _GLOBAL_EXEC_KEYS, "exec_all")
+    if process_exec is not None:
+        if not isinstance(process_exec, dict) or not process_exec:
+            raise ValueError("process_exec must be an object keyed by procGnum-<n> or procGnum-<n>p<module>")
+        for key, row in process_exec.items():
+            if not _PROCESS_EXEC_KEY.fullmatch(str(key)):
+                raise ValueError(
+                    f"process_exec key '{key}' must be procGnum-<n> or procGnum-<n>p<module>, "
+                    "as get_run_advanced_settings reports it"
+                )
+            if row is not None:
+                _exec_update({f: "" for f in _EXEC_FIELDS}, row, _PROCESS_EXEC_KEYS, f"process_exec['{key}']")
+
+
+def _container_body(view, container, container_image, container_options):
+    if container is None:
+        container = view["container"]["type"]
+        if container == "off":
+            raise ValueError("The run uses no container, so container_image and container_options have "
+                             "nothing to apply to; pass container 'docker' or 'singularity' too.")
+    if container == "off":
+        return {"useDocker": False, "useSingularity": False}
+    saved = view["container"][container]
+    image = (container_image if container_image is not None else saved["image"]).strip()
+    if not image:
+        raise ValueError(f"The run has no saved {container} image; pass container_image.")
+    options = container_options if container_options is not None else saved["options"]
+    if container == "docker":
+        return {"useDocker": True, "useSingularity": False,
+                "dockerConfig": {"image": image, "runOptions": options}}
+    if container_options == "" and saved["options"]:
+        # The server keeps the saved Singularity options when sent an empty string.
+        raise ValueError("The server cannot clear Singularity run options; pass the options to keep instead.")
+    return {"useDocker": False, "useSingularity": True,
+            "singularityConfig": {"imagePath": image, "runOptions": options}}
+
+
+@mcp.tool()
+def update_run_advanced_settings(
+    run_id: str,
+    confirm_update: Annotated[bool, Strict()],
+    container: str = None,
+    container_image: str = None,
+    container_options: str = None,
+    exec_all: dict = None,
+    exec_all_enabled: Optional[Annotated[bool, Strict()]] = None,
+    process_exec: dict = None,
+    process_exec_enabled: Optional[Annotated[bool, Strict()]] = None,
+) -> str:
+    """
+    Change a run's container and executor settings before it is launched.
+
+    WARNING: This edits the run in place on the Foundry Connect server. Call
+    get_run_advanced_settings(run_id) first, show the user the current and
+    new values, and set `confirm_update` to true only after they agree. It
+    refuses a run that has been launched (any status other than not
+    submitted). Foundry status lags behind the cluster, so do not call this
+    right after initiate_run; use duplicate_run to change a launched run.
+
+    Pass only what changes; everything else keeps its saved value.
+    - container: "docker", "singularity" or "off". container_image and
+      container_options set the image and run options (for example
+      "-B /share:/share" for Singularity); left out, the saved ones are kept.
+      Without `container` they apply to the container the run already uses.
+    - exec_all: executor settings for all processes, any of queue, memory
+      (GB), cpu, time (minutes) and options (extra cluster options), for
+      example {"queue": "gpu", "memory": "8", "cpu": "1", "time": "30"}.
+      Fields left out keep their saved values. Giving exec_all switches it on
+      unless exec_all_enabled is false.
+    - process_exec: per process overrides keyed procGnum-<n> or
+      procGnum-<n>p<module>, each a row like exec_all; a row merges onto the
+      saved one, and null removes that override. Giving process_exec switches
+      overrides on while any remain, unless process_exec_enabled says otherwise.
+    - exec_all_enabled and process_exec_enabled switch either block on or off
+      without changing its values.
+
+    Returns the settings before the save (`previous`) and as read back after
+    it (`current`).
+    """
+    if confirm_update is not True:
+        raise ToolError(json.dumps({
+            "error": "confirm_update must be true. Show the user get_run_advanced_settings and the new "
+                     "values, and save only after they agree."
+        }))
+    try:
+        _validate_advanced_settings_args(container, container_image, container_options, exec_all, process_exec,
+                                         exec_all_enabled, process_exec_enabled)
+        via_client = get_client()
+        details, status = _read_advanced_settings(via_client, run_id)
+        previous = _advanced_settings_view(run_id, details, status)
+        if not previous["editable"]:
+            raise ValueError(
+                f"Run {run_id} is {previous['status']}, so its settings were not changed. "
+                "A save would rewrite a launched run's record; use duplicate_run and edit the new run."
+            )
+        permission = details.get("permission")
+        if permission is None:
+            raise ValueError(f"Run {run_id} has no saved permission, which the save endpoint requires.")
+        data = {"permission": permission, "groupId": details.get("groupId")}
+        if container is not None or container_image is not None or container_options is not None:
+            data.update(_container_body(previous, container, container_image, container_options))
+        if exec_all is not None:
+            saved_all = {f: previous["exec_all"][f] for f in _EXEC_FIELDS}
+            data["execAll"] = _exec_update(saved_all, exec_all, _GLOBAL_EXEC_KEYS, "exec_all")
+            data["execAllCheck"] = True if exec_all_enabled is None else exec_all_enabled
+        elif exec_all_enabled is not None:
+            data["execAllCheck"] = exec_all_enabled
+        if process_exec is not None:
+            rows = {key: dict(row) for key, row in previous["process_exec"]["processes"].items()}
+            removed = {}
+            for key, row in process_exec.items():
+                if row is None:
+                    removed[key] = rows.pop(key, {f: "" for f in _EXEC_FIELDS})
+                else:
+                    rows[key] = _exec_update(rows.get(key, {f: "" for f in _EXEC_FIELDS}), row,
+                                             _PROCESS_EXEC_KEYS, f"process_exec['{key}']")
+            # The server drops a row sent with check false, and ignores an empty execEach,
+            # so a removed override is sent switched off rather than left out.
+            data["execEach"] = {**{key: {"check": False, **row} for key, row in removed.items()},
+                                **{key: {"check": True, **row} for key, row in rows.items()}}
+            data["execEachCheck"] = bool(rows) if process_exec_enabled is None else process_exec_enabled
+        elif process_exec_enabled is not None:
+            data["execEachCheck"] = process_exec_enabled
+        logger.info(f"Saving advanced settings for run {run_id}: {sorted(data)}")
+        via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
+        after = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details") or {}
+        current = _advanced_settings_view(run_id, after, status)
+    except ToolError:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving advanced settings for run {run_id}: {e}")
+        raise ToolError(json.dumps({"error": str(e)})) from e
+    return json.dumps(envelope(
+        summary=f"Saved advanced settings for run {run_id}.",
+        data={"run_id": run_id, "saved_fields": sorted(k for k in data if k not in ("permission", "groupId")),
+              "previous": previous, "current": current},
+        next_steps=["preflight_run(run_id) to check the run before launching it."],
+    ), indent=2)
 
 
 _VALID_RUN_TYPES = ("newrun", "resumerun", "rerun")

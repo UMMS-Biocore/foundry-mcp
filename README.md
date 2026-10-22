@@ -105,7 +105,7 @@ Access and manage Foundry Connect reports and files.
 
 ---
 
-### 🏃 Run Management (13 tools)
+### 🏃 Run Management (15 tools)
 
 Search and retrieve pipeline run information.
 
@@ -123,6 +123,8 @@ Search and retrieve pipeline run information.
 | `create_run`          | Create a new run of a pipeline; returns its form, your run environments and a proposed execution directory |
 | `list_run_environments`| Run environments you can launch a run on, with a proposed directory each |
 | `update_run`          | Save a run's inputs, processOptions, run environment, directories and name (requires permission; groupId required only if permission=15) |
+| `get_run_advanced_settings` | A run's container (Docker, Singularity or off), executor settings for all processes and per process overrides; writes nothing |
+| `update_run_advanced_settings` | Change those settings in place on a run not yet launched, after the user confirms (`confirm_update`) |
 | `initiate_run`        | Launch a prepared run (newrun/resumerun/rerun)                 |
 
 ---
