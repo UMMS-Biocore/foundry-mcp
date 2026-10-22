@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- **Run advanced settings**
+  - `get_run_advanced_settings` reads a run's container (docker, singularity
+    or off, with image and run options), its executor settings for all
+    processes (queue, memory, cpu, time, cluster options) and its per process
+    overrides, and says whether the run can still be edited. It writes nothing.
+  - `update_run_advanced_settings` takes `confirm_update` and changes them in
+    place on the run. Only the values given change: exec_all and each
+    process_exec row merge onto the saved ones, null removes an override, and
+    a container change always sends both the Docker and Singularity switches.
+    It refuses a run that has been launched, and returns the settings before
+    the save and as read back after it. Checked live on run 12388, a duplicate
+    of run 12366.
 - **Build pipelines from processes**
   - `get_pipeline` reads a pipeline's fields and its graph as the editor saves
     it, and spells out every connection by process, port name and slot.
