@@ -6292,6 +6292,32 @@ def delete_process_script_asset(process_id: str, path: str) -> str:
 # ============================================================================
 
 
+def _server_refusal(error: Exception) -> Optional[dict]:
+    """
+    The status and message of the HTTP refusal behind an SDK error, if any.
+
+    The SDK raises its own error from inside the HTTPError handler and names
+    only the status for most codes, so the server's reason (such as which
+    process already holds a revision) survives only on the chained HTTPError.
+    """
+    seen = error
+    while seen is not None:
+        response = getattr(seen, "response", None) if isinstance(seen, requests.HTTPError) else None
+        if response is not None:
+            try:
+                body = response.json()
+            except ValueError:
+                return None
+            if isinstance(body, dict):
+                for key in ("message", "error"):
+                    value = body.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return {"error": value.strip(), "status": response.status_code}
+            return None
+        seen = seen.__cause__ or seen.__context__
+    return None
+
+
 def _git_call(method: str, endpoint: str, action: str, data: dict = None) -> str:
     """Call a git endpoint and return its JSON, raising ToolError on failure."""
     try:
@@ -6303,7 +6329,7 @@ def _git_call(method: str, endpoint: str, action: str, data: dict = None) -> str
         return json.dumps(via_client.call(**kwargs), indent=2)
     except Exception as e:
         logger.error(f"Error {action}: {e}")
-        raise ToolError(json.dumps({"error": str(e)})) from e
+        raise ToolError(json.dumps(_server_refusal(e) or {"error": str(e)})) from e
 
 
 @mcp.tool()

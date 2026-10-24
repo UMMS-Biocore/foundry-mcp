@@ -9,6 +9,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from mcp.server.fastmcp.exceptions import ToolError
 
 from src.foundry_mcp import server
@@ -171,3 +172,40 @@ def test_a_refusal_is_raised_not_returned(tool, kwargs):
     client = _client(error=RuntimeError("Error 302: Bad Request: no such folder"))
     with pytest.raises(ToolError, match="no such folder"):
         _run(tool, client, **kwargs)
+
+
+def _sdk_client_answering(status, body):
+    # The real SDK client, so the test exercises the error it actually raises,
+    # with only the HTTP request replaced.
+    from viafoundry.client import ViaFoundryClient
+
+    client = ViaFoundryClient.__new__(ViaFoundryClient)
+    client.auth = MagicMock(hostname="https://foundry.example.org")
+    client.auth.get_headers.return_value = {}
+    response = requests.Response()
+    response.status_code = status
+    response.headers["Content-Type"] = "application/json"
+    response._content = json.dumps(body).encode()
+    return client, response
+
+
+@pytest.mark.parametrize("status", [404, 409, 422])
+def test_a_refusal_carries_the_server_message(status):
+    # The SDK names only the status for most refusals, so the reason the server
+    # gave (for example, which process already holds that revision) has to be
+    # read from the response body.
+    message = "This content is already in Foundry as process 12."
+    client, response = _sdk_client_answering(status, {"message": message})
+    with patch("viafoundry.client.requests.request", return_value=response):
+        with pytest.raises(ToolError) as raised:
+            _run(server.check_process_import, client, repo_url=REPO, repo_path="procs/align")
+    detail = json.loads(str(raised.value))
+    assert detail["error"] == message
+    assert detail["status"] == status
+
+
+def test_a_refusal_without_a_message_keeps_the_sdk_error():
+    client, response = _sdk_client_answering(409, {"unexpected": True})
+    with patch("viafoundry.client.requests.request", return_value=response):
+        with pytest.raises(ToolError, match="Status code: 409"):
+            _run(server.check_process_import, client, repo_url=REPO, repo_path="procs/align")
