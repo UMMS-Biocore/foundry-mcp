@@ -3509,7 +3509,9 @@ def create_dataset_from_accessions(
     BioSamples (SAMN, SAMEA) and ArrayExpress studies (E-MTAB-n). Each is
     resolved to its sequencing runs through ENA (GEO via NCBI, ArrayExpress
     via BioStudies). Anything that cannot be resolved is listed in
-    `unresolved` with the reason; nothing is guessed.
+    `unresolved` with the reason; nothing is guessed. Runs, experiments and
+    GEO samples are looked up in batches, so pass a long list in one call
+    rather than one accession per call.
 
     Runs are grouped by sample. The sample name comes from the GEO sample or
     BioSample title. Each run becomes one record (a sample with several runs

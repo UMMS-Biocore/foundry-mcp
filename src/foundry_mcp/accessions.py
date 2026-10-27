@@ -14,6 +14,12 @@ How each reaches its runs, checked against live read-only calls:
   * ArrayExpress goes through the BioStudies API, whose study links of type
     ENA name the ENA study.
 
+A long list is looked up in batches: runs and experiments (including the
+experiments GEO samples point to) through the ENA portal search with
+includeAccessions, one accession type per call, and GEO accessions through
+one OR-joined esearch and one esummary per batch. A batch answers only what
+it found, so each accession it does not return is reported as unresolved.
+
 Nothing is guessed: an accession that cannot be resolved is reported with the
 reason, and a run whose layout ENA does not state is left out and reported.
 
@@ -30,6 +36,7 @@ import time
 import requests
 
 ENA_FILEREPORT = "https://www.ebi.ac.uk/ena/portal/api/filereport"
+ENA_SEARCH = "https://www.ebi.ac.uk/ena/portal/api/search"
 EUTILS_ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EUTILS_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 BIOSTUDIES_STUDIES = "https://www.ebi.ac.uk/biostudies/api/v1/studies"
@@ -44,6 +51,18 @@ _TIMEOUT = 30
 _RETRIES = 3
 # NCBI allows three requests a second without an API key.
 _NCBI_GAP_SECONDS = 0.34
+# Accessions per call: an ENA search answers 200 runs in under a second, and
+# 100 OR-joined GEO accessions keep the eutils URL short.
+_ENA_BATCH = 200
+_GEO_BATCH = 100
+
+# ENA's search takes a list of one accession type per call (a mixed list is
+# refused), and each row names its run and experiment, so a row is traced back
+# to the accession asked for by this field.
+_ENA_BATCH_FIELDS = [
+    (re.compile(r"^[ESDR]RR\d{6,}$"), "run_accession"),
+    (re.compile(r"^[ESDR]RX\d{6,}$"), "experiment_accession"),
+]
 
 _PATTERNS = [
     ("geo_series", re.compile(r"^GSE\d+$")),
@@ -69,10 +88,19 @@ def classify(accession):
 
 def _http_get(url, params=None):
     """GET with retries on rate limits and server errors. Returns (status, text)."""
+    return _http_send(requests.get, url, params=params)
+
+
+def _http_post(url, data=None):
+    """POST a form with the same retries; ENA takes a long accession list this way."""
+    return _http_send(requests.post, url, data=data)
+
+
+def _http_send(send, url, **kwargs):
     last = None
     for attempt in range(_RETRIES):
         try:
-            resp = requests.get(url, params=params, timeout=_TIMEOUT)
+            resp = send(url, timeout=_TIMEOUT, **kwargs)
         except requests.RequestException as e:
             last = e
         else:
@@ -114,29 +142,49 @@ def ena_runs(accession):
     return rows
 
 
-def _geo_record(accession, entry_type):
+def _chunks(items, size):
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _geo_chunk(chunk, entry_type):
+    """One esearch and one esummary for up to _GEO_BATCH GEO accessions of one type."""
+    terms = " OR ".join(f"{acc}[ACCN]" for acc in chunk)
+    if len(chunk) > 1:
+        terms = f"({terms})"
     _pause()
     status, text = _http_get(EUTILS_ESEARCH, {
         "db": "gds", "retmode": "json", "tool": "foundry-connect",
-        "term": f"{accession}[ACCN] AND {entry_type}[ETYP]",
+        "retmax": str(len(chunk) * 10), "term": f"{terms} AND {entry_type}[ETYP]",
     })
     ids = ((_json(status, text, "NCBI esearch") or {}).get("esearchresult") or {}).get("idlist") or []
-    if status != 200 or not ids:
-        raise Unresolved(f"GEO has no record for {accession}.")
-    _pause()
-    status, text = _http_get(EUTILS_ESUMMARY, {
-        "db": "gds", "retmode": "json", "tool": "foundry-connect", "id": ids[0],
-    })
-    result = (_json(status, text, "NCBI esummary") or {}).get("result") or {}
-    record = result.get(ids[0]) or {}
-    if (record.get("accession") or "").upper() != accession:
-        raise Unresolved(f"GEO has no record for {accession}.")
-    return record
+    records = {}
+    if status == 200 and ids:
+        _pause()
+        status, text = _http_get(EUTILS_ESUMMARY, {
+            "db": "gds", "retmode": "json", "tool": "foundry-connect", "id": ",".join(ids),
+        })
+        result = (_json(status, text, "NCBI esummary") or {}).get("result") or {}
+        for uid in ids:
+            record = result.get(uid) or {}
+            acc = (record.get("accession") or "").upper()
+            if acc in chunk:
+                records[acc] = record
+    return {acc: records.get(acc) or Unresolved(f"GEO has no record for {acc}.") for acc in chunk}
 
 
-def geo_targets(accession, kind):
-    """The SRA accessions a GEO series or sample points to."""
-    record = _geo_record(accession, "gse" if kind == "geo_series" else "gsm")
+def _geo_records(accs, entry_type):
+    """The esummary record, or the error, for each GEO series or sample."""
+    found = {}
+    for chunk in _chunks(accs, _GEO_BATCH):
+        try:
+            found.update(_geo_chunk(chunk, entry_type))
+        except Exception as e:  # network trouble stays with the accessions that hit it
+            found.update({acc: e for acc in chunk})
+    return found
+
+
+def _sra_targets(accession, kind, record):
+    """The SRA accessions a GEO series or sample record points to."""
     targets = [rel.get("targetobject") for rel in record.get("extrelations") or []
                if (rel.get("relationtype") or "").upper() == "SRA" and rel.get("targetobject")]
     if not targets and kind == "geo_series" and record.get("bioproject"):
@@ -179,21 +227,109 @@ def arrayexpress_targets(accession):
     return found
 
 
-def resolve(accession):
-    """ENA run rows for one accession. Raises Unresolved with the reason."""
-    acc = (accession or "").strip().upper()
-    kind = classify(acc)
-    if kind is None:
-        raise Unresolved(
-            f"'{accession}' is not an accession this tool takes (GSE, GSM, SRP/ERP/DRP, PRJxx, "
-            f"SRX/ERX, SRR/ERR/DRR, SAMN/SAMEA, E-MTAB).")
-    if kind == "ena":
-        return ena_runs(acc)
-    targets = geo_targets(acc, kind) if kind.startswith("geo") else arrayexpress_targets(acc)
-    rows = []
-    for target in targets:
-        rows.extend(ena_runs(target))
-    return rows
+def _ena_runs_or_error(accession):
+    try:
+        return ena_runs(accession)
+    except Exception as e:
+        return e
+
+
+def _ena_batch(accs, field, found):
+    """Fill found[acc] with each accession's ENA rows, or the error, one search per chunk."""
+    for chunk in _chunks(accs, _ENA_BATCH):
+        try:
+            status, text = _http_post(ENA_SEARCH, {
+                "result": "read_run", "includeAccessions": ",".join(chunk),
+                "fields": ENA_FIELDS, "format": "json", "limit": "0",
+            })
+            body = _json(status, text, "ENA")
+        except Exception as e:
+            found.update({acc: e for acc in chunk})
+            continue
+        if status != 200:
+            # One accession ENA refuses fails the whole list, so ask for each
+            # alone and only that one is reported, with ENA's message.
+            found.update({acc: _ena_runs_or_error(acc) for acc in chunk})
+            continue
+        rows = {acc: [] for acc in chunk}
+        for row in body if isinstance(body, list) else []:
+            asked = (row.get(field) or "").strip().upper()
+            if asked in rows:
+                rows[asked].append(row)
+        found.update({acc: got or Unresolved(f"ENA lists no public read runs for {acc}.")
+                      for acc, got in rows.items()})
+
+
+def _batch_field(accession):
+    for pattern, field in _ENA_BATCH_FIELDS:
+        if pattern.match(accession):
+            return field
+    return None
+
+
+def resolve_all(accessions):
+    """ENA run rows for each accession, in the order given: (accession, rows or error).
+
+    Runs and experiments (including the experiments GEO samples point to) are
+    looked up in ENA in batches, and GEO series and samples in eutils in
+    batches, so a long list costs a few calls rather than several per
+    accession. Studies and samples go one by one: each answers many runs.
+    """
+    targets, geo = {}, {"geo_series": [], "geo_sample": []}
+    for accession in accessions:
+        acc = (accession or "").strip().upper()
+        if acc in targets:
+            continue
+        kind = classify(acc)
+        if kind is None:
+            targets[acc] = Unresolved(
+                f"'{accession}' is not an accession this tool takes (GSE, GSM, SRP/ERP/DRP, PRJxx, "
+                f"SRX/ERX, SRR/ERR/DRR, SAMN/SAMEA, E-MTAB).")
+        elif kind == "ena":
+            targets[acc] = [acc]
+        elif kind == "arrayexpress":
+            try:
+                targets[acc] = arrayexpress_targets(acc)
+            except Exception as e:
+                targets[acc] = e
+        else:
+            geo[kind].append(acc)
+            targets[acc] = None
+    for kind, accs in geo.items():
+        records = _geo_records(accs, "gse" if kind == "geo_series" else "gsm")
+        for acc in accs:
+            record = records[acc]
+            try:
+                targets[acc] = record if isinstance(record, Exception) else _sra_targets(acc, kind, record)
+            except Unresolved as e:
+                targets[acc] = e
+
+    wanted = []
+    for t in targets.values():
+        if isinstance(t, list):
+            wanted.extend(x.upper() for x in t if x.upper() not in wanted)
+    found = {}
+    for _, field in _ENA_BATCH_FIELDS:
+        _ena_batch([t for t in wanted if _batch_field(t) == field], field, found)
+    for target in wanted:
+        if target not in found:
+            found[target] = _ena_runs_or_error(target)
+
+    out = []
+    for accession in accessions:
+        t = targets[(accession or "").strip().upper()]
+        if isinstance(t, Exception):
+            out.append((accession, t))
+            continue
+        rows = []
+        for target in t:
+            got = found[target.upper()]
+            if isinstance(got, Exception):
+                rows = got
+                break
+            rows.extend(got)
+        out.append((accession, rows))
+    return out
 
 
 def _safe_name(text):
@@ -218,15 +354,13 @@ def _fastq_sizes(value):
 def build_plan(accessions):
     """Resolve accessions and group their runs by sample into dataset records."""
     unresolved, warnings, runs, seen = [], [], [], set()
-    for accession in accessions:
-        try:
-            rows = resolve(accession)
-        except Unresolved as e:
-            unresolved.append({"accession": accession.strip(), "reason": str(e)})
+    for accession, rows in resolve_all(accessions):
+        if isinstance(rows, Unresolved):
+            unresolved.append({"accession": accession.strip(), "reason": str(rows)})
             continue
-        except Exception as e:  # network trouble stays with the accession that hit it
+        if isinstance(rows, Exception):  # network trouble stays with the accession that hit it
             unresolved.append({"accession": accession.strip(),
-                               "reason": f"could not reach the archive: {e}"})
+                               "reason": f"could not reach the archive: {rows}"})
             continue
         for row in rows:
             run = (row.get("run_accession") or "").strip()

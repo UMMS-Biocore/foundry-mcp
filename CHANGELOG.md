@@ -132,6 +132,15 @@
     intermediate files and sets how many hours after the run ends it happens.
 
 ### Fixed
+- `create_dataset_from_accessions` timed out over a connector on a list of
+  about 20 runs or GEO samples, because it asked ENA (and NCBI, for a GSM)
+  once per accession. Runs and experiments now go to the ENA portal search
+  in batches of 200, one accession type per call, and GEO series and samples
+  to one esearch and one esummary per 100. A run or sample a batch does not
+  return is still listed in `unresolved` with its reason, and a batch ENA
+  refuses is retried one accession at a time so only the bad one is
+  reported. Measured live: 200 runs plan in under a second, 20 GEO samples
+  in about two.
 - `download_file` failed for files larger than about 15MB, because the whole
   file came back base64 encoded in one tool result. A file up to 5MB still
   comes back inline. A larger one now comes back as `download_url` with a
