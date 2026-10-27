@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Chains of workspace steps**
+  - `get_started` has a fourth recipe, `chain_workspace_steps` (topic
+    "chain"): when no step needs a person's decision, a chain of steps runs as
+    one workspace job, a script under `set -e` whose gate steps end with
+    `exit 1`. Agents offer it before asking a user to keep a session open, and
+    say the trade-off: every step gets the largest step's resources, and nobody
+    reviews a result between steps.
 - **Run advanced settings**
   - `get_run_advanced_settings` reads a run's container (docker, singularity
     or off, with image and run options), its executor settings for all

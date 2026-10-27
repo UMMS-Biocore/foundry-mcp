@@ -4451,9 +4451,39 @@ _RECIPES = [
             "then launch_app to open it (confirm with the user first).",
         ],
     },
+    {
+        "id": "chain_workspace_steps",
+        "name": "Run a chain of steps without keeping a session open",
+        "when": "The user wants several commands run one after another in a "
+                "workspace (for example a job, then a check on its output, "
+                "then the next step only if the check passed). Offer this "
+                "BEFORE asking the user to keep this session open between "
+                "steps.",
+        "steps": [
+            "When no step needs a person's decision, the whole chain runs as "
+            "ONE workspace job: submit it once and the user can close the "
+            "laptop.",
+            "Write one script that runs the steps in order under `set -e`, so "
+            "the first failing step stops the job. A gate step ends with "
+            "`exit 1` when its check fails, so later steps never run on bad "
+            "output.",
+            "workspace_run(workspace_id=..., command='<the script>', cpus=..., "
+            "memory_mb=..., wall_minutes=...): CPUs and memory are those of "
+            "the largest step, wall time covers all steps together. It uses "
+            "cluster compute, so confirm with the user first.",
+            "Tell the user the trade-off: every step gets the largest step's "
+            "resources, and nobody can review a result between steps. If a "
+            "person must look before the next step, submit those steps as "
+            "separate jobs.",
+            "workspace_job_status(workspace_id=..., submission_key=...) "
+            "later shows how the job ended.",
+        ],
+    },
 ]
 
 _RECIPE_TOPICS = {
+    "chain_workspace_steps": ("chain", "workspace", "several steps", "unattended",
+                              "overnight", "close the laptop", "session open"),
     "start_an_analysis": ("start", "new", "begin", "analys", "launch", "run a",
                           "pipeline", "goal"),
     "diagnose_a_failure": ("fail", "error", "broke", "wrong", "debug",
@@ -4468,13 +4498,14 @@ def get_started(topic: str = "") -> str:
     """
     How to use Foundry Connect end to end. Call this FIRST when a user wants to
     do something scientific with Foundry but has not named a specific run or
-    pipeline — it returns the tool chain for the three journeys people arrive
-    with: starting an analysis from a goal, working out why a run failed, and
-    finding results.
+    pipeline. It returns the tool chain for the journeys people arrive with:
+    starting an analysis from a goal, working out why a run failed, finding
+    results, and running a chain of workspace steps without keeping a session
+    open.
 
     Args:
         topic: Optional. Narrow to one journey, e.g. "start", "failed",
-            "results". An unrecognised topic returns all of them.
+            "results", "chain". An unrecognised topic returns all of them.
     """
     try:
         matched = None
