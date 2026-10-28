@@ -347,8 +347,11 @@ def sample_units(accessions):
     Returns (units, unresolved). A GEO series becomes its GSMs sorted by
     accession number, so the order is the same on every call; every other
     accession stays one unit, in the order given. A repeated unit is kept once.
-    A series GEO cannot list goes to unresolved. Raises ValueError for study,
-    project and ArrayExpress accessions, which cannot be split before lookup.
+    Raises ValueError for study, project and ArrayExpress accessions, which
+    cannot be split before lookup, and when a series cannot be expanded while
+    other units remain: dropping its GSMs would shift total_samples and every
+    later offset between calls. When nothing expands at all, units is empty
+    and unresolved says why.
     """
     cleaned = [(a or "").strip().upper() for a in accessions]
     refused = [a for a in cleaned if classify(a) == "arrayexpress" or _STUDY_LEVEL.match(a)]
@@ -365,24 +368,34 @@ def sample_units(accessions):
         if classify(acc) != "geo_series":
             members = [acc]
         else:
-            record = records[acc]
-            if isinstance(record, Exception):
-                reason = str(record) if isinstance(record, Unresolved) else (
-                    f"could not reach the archive: {record}")
+            record, members = records[acc], []
+            try:
+                if isinstance(record, Exception):
+                    raise record
+                # The series level check the unpaged call makes, so an array
+                # series or a SuperSeries is refused with the same reason.
+                _sra_targets(acc, "geo_series", record)
+                members = sorted({(s.get("accession") or "").strip().upper()
+                                  for s in record.get("samples") or []
+                                  if classify(s.get("accession")) == "geo_sample"}, key=_gsm_number)
+                if not members:
+                    raise Unresolved(f"GEO lists no samples for {acc}.")
+            except Exception as e:
                 if acc not in seen:
+                    reason = str(e) if isinstance(e, Unresolved) else f"could not reach the archive: {e}"
                     unresolved.append({"accession": acc, "reason": reason})
                     seen.add(acc)
                 continue
-            members = sorted({(s.get("accession") or "").strip().upper()
-                              for s in record.get("samples") or []
-                              if classify(s.get("accession")) == "geo_sample"}, key=_gsm_number)
-            if not members and acc not in seen:
-                unresolved.append({"accession": acc, "reason": f"GEO lists no samples for {acc}."})
-                seen.add(acc)
         for unit in members:
             if unit not in seen:
                 seen.add(unit)
                 units.append(unit)
+    if unresolved and units:
+        failed = "; ".join(f"{u['accession']} ({u['reason']})" for u in unresolved)
+        raise ValueError(
+            f"Cannot page these accessions: a series could not be expanded into its samples, "
+            f"so the page boundaries would shift between calls. {failed}. Retry, or leave "
+            f"that series out.")
     return units, unresolved
 
 

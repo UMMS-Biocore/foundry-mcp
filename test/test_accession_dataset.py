@@ -659,3 +659,82 @@ class TestPaging:
     def test_docstring_explains_paging(self):
         doc = server.create_dataset_from_accessions.__doc__
         assert "max_samples" in doc and "offset" in doc and "next_offset" in doc
+
+
+class TestPagingRefusals:
+    """Paging refuses rather than shift total_samples or the offsets between calls."""
+
+    def test_a_series_that_fails_to_expand_refuses_the_page(self):
+        both, ena, _ = _big_gse(10)
+        both["GSE2"] = dict(both["GSE1"], samples=[{"accession": f"GSM{i}"} for i in range(100, 105)])
+        both["GSE1"] = dict(both["GSE1"], samples=[{"accession": f"GSM{i}"} for i in range(95, 100)])
+        out, _ = _tool(["GSE1", "GSE2"], FakeHttp(gds=both, ena=ena), dry_run=True, max_samples=3)
+        assert out["data"]["total_samples"] == 10
+        flaky = {k: v for k, v in both.items() if k != "GSE1"}
+        # Without the refusal this page would be GSE2's first three samples, resolved fine.
+        out, client = _tool(["GSE1", "GSE2"], FakeHttp(gds=flaky, ena=ena), max_samples=3)
+        error = out["tool_error"]["error"]
+        assert "GSE1" in error and "GEO has no record for GSE1" in error
+        assert client.call.call_count == 0
+
+    def test_a_network_failure_on_a_series_refuses_the_page(self):
+        gds, ena, _ = _big_gse(5)
+        ena.update(_runs(1))
+        fake = FakeHttp(gds=gds, ena=ena)
+
+        def http(url, params=None):
+            if url == accessions.EUTILS_ESEARCH and "gse[ETYP]" in params["term"]:
+                raise accessions.requests.ConnectionError("down")
+            return fake(url, params)
+        out, client = _tool(["GSE1", "SRR000001"], http, max_samples=3)
+        error = out["tool_error"]["error"]
+        assert "GSE1" in error and "could not reach" in error
+        assert client.call.call_count == 0
+
+    def test_nothing_to_page_reports_the_unresolved_reasons(self):
+        out, client = _tool(["GSE404"], FakeHttp(), dry_run=True, max_samples=10)
+        error = out["tool_error"]["error"]
+        assert "None of the accessions resolved" in error
+        assert "GEO has no record for GSE404" in error
+        assert "past the end" not in error
+
+    @pytest.mark.parametrize("record", [
+        {"entrytype": "GSE", "bioproject": "", "extrelations": [],
+         "samples": [{"accession": "GSM1"}, {"accession": "GSM2"}]},
+        {"entrytype": "GSE", "bioproject": "", "extrelations": [], "gdstype": "SuperSeries",
+         "samples": [{"accession": "GSM3"}]},
+    ], ids=["array_only", "superseries"])
+    def test_a_series_without_sequencing_is_refused_like_the_unpaged_call(self, record):
+        unpaged, _ = _tool(["GSE7"], FakeHttp(gds={"GSE7": record}), dry_run=True)
+        reason = "GSE7 has no SRA sequencing runs linked"
+        assert reason in unpaged["tool_error"]["error"]
+        http = FakeHttp(gds={"GSE7": record})
+        paged, _ = _tool(["GSE7"], http, dry_run=True, max_samples=10)
+        assert reason in paged["tool_error"]["error"]
+        assert not [p for p in _urls(http, accessions.EUTILS_ESEARCH) if "gsm[ETYP]" in p["term"]]
+        mixed, _ = _tool(["GSE7", "SRR000001"], FakeHttp(gds={"GSE7": record}, ena=_runs(1)),
+                         dry_run=True, max_samples=10)
+        assert reason in mixed["tool_error"]["error"]
+
+    def test_a_dry_run_page_with_no_runs_does_not_offer_to_create(self):
+        gds = {f"GSM{i}": {"entrytype": "GSM", "extrelations": []} for i in (1, 2)}
+        out, _ = _tool(["GSM1", "GSM2"], FakeHttp(gds=gds), dry_run=True, max_samples=1)
+        assert out["data"]["run_count"] == 0
+        assert "dry_run=False" not in " ".join(out["next_steps"])
+        assert out["data"]["next_offset"] == 1
+
+    @pytest.mark.parametrize("kwargs", [{"max_samples": 1.9}, {"max_samples": "10"},
+                                        {"offset": 2.5}, {"offset": "1"}, {"max_samples": True},
+                                        {"offset": True}])
+    def test_non_integer_window_is_refused(self, kwargs):
+        http = FakeHttp()
+        out, _ = _tool(["SRR000001"], http, dry_run=True, **kwargs)
+        assert "tool_error" in out
+        assert http.calls == []
+
+    def test_docstring_covers_the_paging_rules(self):
+        doc = server.create_dataset_from_accessions.__doc__
+        assert "do not mix" in doc.lower()
+        assert "input entries" in doc
+        for kind in ("SRS", "ERS", "DRS", "SAMD", "ERX", "DRX"):
+            assert kind in doc
