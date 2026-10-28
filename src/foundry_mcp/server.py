@@ -3459,6 +3459,22 @@ def prepare_samples(name: str, files: list, canvas_id: str = "") -> str:
 # staging run: 22 GB peak for 3.7 GB of ENA fastq_bytes, about 6x.
 _PEAK_INPUTS_FACTOR = 6
 
+# A study with hundreds of samples otherwise returns a reply too large for
+# the client to read, so samples are one line each and only the first rows
+# are listed. Totals, layout, unresolved and warnings always cover them all.
+_SAMPLE_ROWS_SHOWN = 100
+_SAMPLE_COLUMNS = "name | sample_accession | sample_alias | layout | runs | raw size"
+
+
+def _sample_rows(samples):
+    """(one line per sample for the first _SAMPLE_ROWS_SHOWN, count left out)."""
+    rows = [
+        " | ".join([s["name"], s["sample_accession"] or "", s["sample_alias"] or "",
+                    s["layout"], ",".join(s["runs"]), _human_size(s["raw_bytes"])])
+        for s in samples[:_SAMPLE_ROWS_SHOWN]
+    ]
+    return rows, max(0, len(samples) - _SAMPLE_ROWS_SHOWN)
+
 
 def _dataset_layout(plan):
     """("single" | "paired" | "mixed", run `mate` value or None, breakdown)."""
@@ -3529,7 +3545,10 @@ def create_dataset_from_accessions(
 
     ALWAYS call with dry_run=True first and show the user the plan: samples,
     runs, layouts, total raw size (`total_raw_bytes`), unresolved and
-    warnings. dry_run writes nothing. Then call again without dry_run once
+    warnings. dry_run writes nothing. Each sample is one line in `samples`
+    (columns in `sample_columns`); only the first 100 are listed and
+    `samples_omitted` counts the rest, which are still in every total and
+    are all created. Then call again without dry_run once
     the user agrees; that creates the dataset.
 
     Storage: the reads take space on the run environment only while a run is
@@ -3565,6 +3584,7 @@ def create_dataset_from_accessions(
         plan = _accessions.build_plan(wanted)
         layout, mate, breakdown = _dataset_layout(plan)
         peak = plan["total_raw_bytes"] * _PEAK_INPUTS_FACTOR
+        sample_rows, samples_omitted = _sample_rows(plan["samples"])
         data = {
             "dry_run": bool(dry_run),
             "vmetaCollectionId": None,
@@ -3577,8 +3597,11 @@ def create_dataset_from_accessions(
             "peak_inputs_size_estimate": _human_size(peak),
             "layout": layout,
             "mate": mate,
-            "layout_breakdown": breakdown,
-            "samples": plan["samples"],
+            # Only a mixed dataset needs it; otherwise it repeats every name.
+            "layout_breakdown": breakdown if mate is None else None,
+            "sample_columns": _SAMPLE_COLUMNS,
+            "samples": sample_rows,
+            "samples_omitted": samples_omitted,
             "unresolved": plan["unresolved"],
             "warnings": plan["warnings"],
         }
@@ -3590,6 +3613,9 @@ def create_dataset_from_accessions(
         size = _human_size(plan["total_raw_bytes"])
         summary = (f"{plan['sample_count']} sample(s), {plan['run_count']} run(s), "
                    f"{size} of raw reads")
+        if samples_omitted:
+            summary += (f" (the first {len(sample_rows)} samples are listed, "
+                        f"{samples_omitted} more are counted but not shown)")
         if dry_run:
             return json.dumps(envelope(
                 summary=f"Plan only, nothing written: {summary}.",

@@ -424,7 +424,27 @@ class TestTool:
         assert data["vmetaCollectionId"] is None
         assert data["sample_count"] == 2 and data["run_count"] == 2
         assert data["total_raw_bytes"] == 100
-        assert [s["layout"] for s in data["samples"]] == ["pair", "pair"]
+        assert [s.split(" | ")[3] for s in data["samples"]] == ["pair", "pair"]
+
+    def test_samples_are_one_line_rows(self):
+        out, _ = _tool(["SRP000001"], _two_samples(), dry_run=True)
+        data = out["data"]
+        assert data["sample_columns"] == "name | sample_accession | sample_alias | layout | runs | raw size"
+        assert data["samples"] == [
+            f"a | SAMN00000001 | GSM1 | pair | SRR000001 | {server._human_size(30)}",
+            f"b | SAMN00000002 | GSM2 | pair | SRR000002 | {server._human_size(70)}",
+        ]
+        assert data["samples_omitted"] == 0
+
+    def test_a_long_plan_lists_the_first_hundred_samples_and_counts_the_rest(self):
+        runs = _runs(150)
+        out, _ = _tool(list(runs), FakeHttp(ena=runs), dry_run=True)
+        data = out["data"]
+        assert data["sample_count"] == 150
+        assert len(data["samples"]) == 100
+        assert data["samples_omitted"] == 50
+        assert data["samples"][0].startswith("cell_1 | SAMN00000001 |")
+        assert "50" in out["summary"]
 
     def test_creates_dataset_and_posts_the_geo_record_shape(self):
         out, client = _tool(["SRP000001"], _two_samples())
@@ -470,6 +490,7 @@ class TestTool:
         out, _ = _tool(["SRP000001"], _two_samples())
         assert out["data"]["layout"] == "paired"
         assert out["data"]["mate"] == "pair"
+        assert out["data"]["layout_breakdown"] is None
         assert "'pair'" in " ".join(out["next_steps"])
 
     def test_mixed_plan_gives_the_breakdown_and_no_mate(self):
