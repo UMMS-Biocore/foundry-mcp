@@ -784,7 +784,7 @@ class TestJobChains:
     """A step with `after` is declared now and submitted by the server when its predecessor ends."""
 
     def test_after_sends_after_when_and_hold(self, via_client, http):
-        http.return_value = _response(201, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "completed", "hold": False, "depth": 1})
+        http.return_value = _response(202, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "completed", "hold": False, "depth": 1})
         server.workspace_run(WS, "echo two", submission_key="b", after="a")
         assert http.call_args.kwargs["json"] == {
             "command": "echo two", "cpus": 1, "memoryMb": 1024, "wallMinutes": 30,
@@ -792,7 +792,7 @@ class TestJobChains:
         }
 
     def test_after_with_finished_and_hold(self, via_client, http):
-        http.return_value = _response(201, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "finished", "hold": True, "depth": 1})
+        http.return_value = _response(202, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "finished", "hold": True, "depth": 1})
         server.workspace_run(WS, "echo two", submission_key="b", after="a", when="finished", hold=True)
         body = http.call_args.kwargs["json"]
         assert (body["after"], body["when"], body["hold"]) == ("a", "finished", True)
@@ -803,11 +803,11 @@ class TestJobChains:
         body = http.call_args.kwargs["json"]
         assert not ({"after", "when", "hold"} & set(body))
 
-    @pytest.mark.parametrize("kwargs", [{"hold": True}, {"when": "finished"}])
-    def test_hold_or_finished_without_after_is_refused_before_any_request(self, via_client, http, kwargs):
+    @pytest.mark.parametrize("kwargs, expected", [({"hold": True}, "hold_needs_after"), ({"when": "finished"}, "when_needs_after")])
+    def test_hold_or_finished_without_after_is_refused_before_any_request(self, via_client, http, kwargs, expected):
         with pytest.raises(ToolError) as exc:
             server.workspace_run(WS, "echo hi", submission_key="k", **kwargs)
-        assert _error(exc)["reason"] == "invalid_argument"
+        assert _error(exc)["reason"] == expected
         http.assert_not_called()
 
     @pytest.mark.parametrize("when", ["done", "", "Completed"])
@@ -821,17 +821,43 @@ class TestJobChains:
     def test_a_bad_after_is_refused_before_any_request(self, via_client, http, bad):
         with pytest.raises(ToolError) as exc:
             server.workspace_run(WS, "echo hi", submission_key="k", after=bad)
-        assert _error(exc)["reason"] == "invalid_submission_key"
+        err = _error(exc)
+        assert err["reason"] == "invalid_submission_key"
+        assert "after" in err["error"] and "submission_key" not in err["error"]
+        http.assert_not_called()
+
+    def test_a_blank_after_is_refused_not_launched(self, via_client, http):
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo hi", submission_key="k", after="   ")
+        assert "after" in _error(exc)["error"]
         http.assert_not_called()
 
     def test_a_waiting_answer_is_surfaced(self, via_client, http):
-        http.return_value = _response(201, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "completed", "hold": True, "depth": 2})
+        http.return_value = _response(202, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "completed", "hold": True, "depth": 2})
         out = json.loads(server.workspace_run(WS, "echo two", submission_key="b", after="a", hold=True))
         assert out["status"] == "waiting"
         assert out["submission_key"] == "b"
         assert (out["after"], out["when"], out["hold"], out["depth"]) == ("a", "completed", True, 2)
         assert "workspace_job_status" in out["message"]
         assert "approve_at" in out["message"]
+        assert "completes" in out["message"] and "skipped" in out["message"]
+
+    def test_a_finished_step_without_hold_has_no_approval_or_skip_sentence(self, via_client, http):
+        http.return_value = _response(202, {"kind": "waiting", "submissionKey": "b", "after": "a", "when": "finished", "hold": False, "depth": 1})
+        out = json.loads(server.workspace_run(WS, "echo two", submission_key="b", after="a", when="finished"))
+        assert "ends" in out["message"]
+        assert "approve_at" not in out["message"] and "skipped" not in out["message"]
+
+    def test_chain_depth_refusal_keeps_the_server_remedy_and_gives_no_file_advice(self, via_client, http):
+        http.return_value = _response(429, {
+            "kind": "refused", "reason": "chain_depth", "category": "quota", "retryable": False,
+            "limit": 10, "message": "Too deep.", "remedy": "Name an earlier job as after.",
+        })
+        with pytest.raises(ToolError) as exc:
+            server.workspace_run(WS, "echo two", submission_key="b", after="a")
+        err = _error(exc)
+        assert err["remedy"] == "Name an earlier job as after."
+        assert "next_step" not in err
 
     def test_a_skipped_step_keeps_its_skip_reason_and_refusal_code(self, via_client, http):
         http.return_value = _response(409, {
@@ -848,6 +874,7 @@ class TestJobChains:
     def test_the_docstring_explains_chains(self):
         doc = server.workspace_run.__doc__
         assert "hold" in doc and "after" in doc and "finished" in doc
+        assert "confirm the compute of every step" in " ".join(doc.split())
 
     def test_job_status_passes_chain_through(self, via_client, http):
         chain = {"after": "a", "when": "completed", "hold": False, "depth": 1, "previewHash": "abc123"}
@@ -863,6 +890,12 @@ class TestJobChains:
         })
         out = json.loads(server.workspace_job_status(WS, "b"))
         assert out["approve_at"] == f"{HOST}/workspaces/{WS}/requests/15"
+
+    def test_status_and_cancel_docstrings_cover_chain_steps(self):
+        status_doc = " ".join(server.workspace_job_status.__doc__.split())
+        assert "waiting" in status_doc and "skipped" in status_doc and "chain" in status_doc
+        assert "waiting" in server.workspace_cancel.__doc__
+        assert "waitingSteps" in server.workspace_list.__doc__
 
     def test_list_passes_waiting_steps_through(self, via_client, http):
         http.return_value = _response(200, {"workspaces": [{"workspaceId": WS, "waitingSteps": 3}]})

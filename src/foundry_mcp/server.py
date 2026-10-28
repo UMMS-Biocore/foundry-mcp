@@ -7206,6 +7206,9 @@ _TYPED_REFUSAL_FIELDS = {
 
 def _refusal_next_step(reason: str, category, retryable):
     """What the client should do about a quota or ceiling refusal, or None."""
+    if reason == "chain_depth":
+        # The server's own remedy (name an earlier job as after) is the advice.
+        return None
     if category == "quota":
         if reason == "storage":
             return (
@@ -7280,11 +7283,11 @@ def _check_workspace_id(workspace_id: str) -> None:
         _refuse("invalid_workspace_id", "workspace_id must be a workspace id as workspace_list or workspace_create returned it.")
 
 
-def _check_submission_key(key: str) -> None:
+def _check_submission_key(key: str, field: str = "submission_key") -> None:
     if not isinstance(key, str) or not _SUBMISSION_KEY_PATTERN.match(key):
         _refuse(
             "invalid_submission_key",
-            "submission_key must be 1 to 128 characters of letters, digits and . _ : -",
+            f"{field} must be 1 to 128 characters of letters, digits and . _ : -",
         )
 
 
@@ -7316,7 +7319,8 @@ def workspace_list(run_environment_id: str = "") -> str:
     """
     List your workspaces, newest first, optionally only those on one run
     environment. Each gives its workspace_id, name, run environment, image and
-    state (provisioning, ready, archived, destroyed).
+    state (provisioning, ready, archived, destroyed), and `waitingSteps`, the
+    number of chain steps waiting in it.
     """
     params = None
     if str(run_environment_id or "").strip():
@@ -7420,14 +7424,18 @@ def workspace_run(
     else:
         key = "mcp-" + uuid.uuid4().hex
     chain_after = after.strip() if isinstance(after, str) else ""
+    if isinstance(after, str) and after and not chain_after:
+        _refuse("invalid_submission_key", "after must be the submission_key of an earlier step, not blank.")
     if chain_after:
-        _check_submission_key(chain_after)
+        _check_submission_key(chain_after, "after")
         if when not in ("completed", "finished"):
             _refuse("invalid_argument", 'when must be "completed" or "finished".')
         if not isinstance(hold, bool):
             _refuse("invalid_argument", "hold must be true or false.")
-    elif hold is not False or when != "completed":
-        _refuse("invalid_argument", "hold and when need after: name the step this one follows.")
+    elif hold is not False:
+        _refuse("hold_needs_after", "hold applies only to a step that names after.")
+    elif when != "completed":
+        _refuse("when_needs_after", "when applies only to a step that names after.")
     if not isinstance(command, str) or not command.strip():
         _refuse("invalid_argument", "command is required.")
     if len(command.encode("utf-8")) > _MAX_COMMAND_BYTES:
@@ -7478,10 +7486,7 @@ def workspace_run(
             status="waiting",
             after=outcome.get("after"), when=outcome.get("when"),
             hold=outcome.get("hold"), depth=outcome.get("depth"),
-            message=(
-                "The step is stored. The server submits it once the step it follows ends. Check it with "
-                "workspace_job_status. A hold step needs a person's approval at its approve_at link once released."
-            ),
+            message=_waiting_message(outcome.get("when"), outcome.get("hold")),
         )
         return json.dumps(result, indent=2)
     if kind == "awaiting_approval":
@@ -7538,6 +7543,20 @@ def workspace_run(
     _workspace_error(outcome, status, "submit_refused", "The job was not submitted.", submission_key=key)
 
 
+def _waiting_message(when, hold) -> str:
+    if when == "finished":
+        text = "The step is stored. The server submits it once the step it follows ends."
+    else:
+        text = (
+            "The step is stored. The server submits it once the step it follows completes, "
+            "and it is skipped if that step does not."
+        )
+    text += " Check it with workspace_job_status."
+    if hold is True:
+        text += " Once released it needs a person's approval at its approve_at link."
+    return text
+
+
 def _refuse_with_key(reason: str, message: str, key: str, http_status: int):
     raise ToolError(json.dumps({"error": message, "reason": reason, "http_status": http_status, "submission_key": key}))
 
@@ -7547,8 +7566,11 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     """
     Read one job of your workspace by the submission_key workspace_run returned.
     `status` is one of awaiting_approval, rejected, expired, starting, refused,
-    uncertain, dispatch_refused, queued, running, completed, failed, unknown.
-    A job waiting for approval also carries its `approve_at` link.
+    uncertain, dispatch_refused, queued, running, completed, failed, unknown,
+    waiting, skipped. A job waiting for approval also carries its `approve_at`
+    link. A chain step carries `chain` (after, when, hold, depth, and for a
+    skipped step its reason and skippedBy). A skipped step never runs: submit it
+    again under a new key.
 
     `refused` means the job was approved but the server refused to start it
     (for example over the storage quota, or a mount outside the allowed data
@@ -7574,7 +7596,9 @@ def workspace_cancel(workspace_id: str, submission_key: str) -> str:
     """
     Cancel a queued or running job of your workspace through its run
     environment's scheduler. Returns once the scheduler took the cancel; call
-    workspace_job_status to see how the job ended. A job still waiting for
+    workspace_job_status to see how the job ended. A chain step still `waiting`
+    can be cancelled too: it is skipped without touching the scheduler. Either
+    way, every step waiting below it is skipped (ancestor_cancelled). A job still waiting for
     approval is not cancelled here: a person rejects it at its approval link.
 
     WARNING: This stops cluster work. Confirm with the user first.
@@ -7592,7 +7616,7 @@ def workspace_cancel(workspace_id: str, submission_key: str) -> str:
         return json.dumps({
             "status": "cancel_requested",
             "submission_key": submission_key,
-            "message": "The scheduler took the cancel. Call workspace_job_status to see how the job ended.",
+            "message": "The cancel was accepted (the scheduler took it, or a waiting step was skipped). Call workspace_job_status to see how the job ended.",
         }, indent=2)
     if isinstance(body, dict) and body.get("reason") == "job_not_cancellable":
         job_status = body.get("status")
