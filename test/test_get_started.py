@@ -74,8 +74,21 @@ class TestGetStarted:
 
     def test_an_unknown_topic_falls_back_to_everything(self):
         parsed = _recipes(topic="quantum teleportation")
-        assert len(parsed["data"]["recipes"]) == 3
+        assert len(parsed["data"]["recipes"]) == 4
         assert "all" in parsed["summary"].lower()
+
+    def test_the_chain_recipe_runs_the_steps_as_one_job(self):
+        parsed = _recipes(topic="chain")
+        assert [r["id"] for r in parsed["data"]["recipes"]] == ["chain_workspace_steps"]
+        recipe = parsed["data"]["recipes"][0]
+        chained = " ".join(recipe["steps"])
+        assert "set -e" in chained
+        assert "exit 1" in chained
+        assert "workspace_run" in chained
+        assert "workspace_job_status" in chained
+        # The trade-off is told, not hidden.
+        assert "largest step" in chained
+        assert "review" in chained
 
     def test_repeats_the_compute_guardrail(self):
         parsed = _recipes()
