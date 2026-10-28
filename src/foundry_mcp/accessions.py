@@ -332,6 +332,60 @@ def resolve_all(accessions):
     return out
 
 
+# Studies and projects expand to runs only inside ENA, so they cannot be cut
+# into sample pages before the lookup that a page is meant to keep small.
+_STUDY_LEVEL = re.compile(r"^(?:[ESDR]RP\d{6,}|PRJ[A-Z]{2}\d+)$")
+
+
+def _gsm_number(acc):
+    return int(acc[3:])
+
+
+def sample_units(accessions):
+    """Flatten accessions into one ordered list of sample level accessions.
+
+    Returns (units, unresolved). A GEO series becomes its GSMs sorted by
+    accession number, so the order is the same on every call; every other
+    accession stays one unit, in the order given. A repeated unit is kept once.
+    A series GEO cannot list goes to unresolved. Raises ValueError for study,
+    project and ArrayExpress accessions, which cannot be split before lookup.
+    """
+    cleaned = [(a or "").strip().upper() for a in accessions]
+    refused = [a for a in cleaned if classify(a) == "arrayexpress" or _STUDY_LEVEL.match(a)]
+    if refused:
+        raise ValueError(
+            f"max_samples and offset cannot page {', '.join(refused)}: study, project and "
+            f"ArrayExpress accessions resolve to their runs in one lookup. Pass the GEO "
+            f"series (GSE) or the sample, experiment or run accessions instead, or call "
+            f"without max_samples and offset.")
+    series = [a for a in dict.fromkeys(cleaned) if classify(a) == "geo_series"]
+    records = _geo_records(series, "gse") if series else {}
+    units, unresolved, seen = [], [], set()
+    for acc in cleaned:
+        if classify(acc) != "geo_series":
+            members = [acc]
+        else:
+            record = records[acc]
+            if isinstance(record, Exception):
+                reason = str(record) if isinstance(record, Unresolved) else (
+                    f"could not reach the archive: {record}")
+                if acc not in seen:
+                    unresolved.append({"accession": acc, "reason": reason})
+                    seen.add(acc)
+                continue
+            members = sorted({(s.get("accession") or "").strip().upper()
+                              for s in record.get("samples") or []
+                              if classify(s.get("accession")) == "geo_sample"}, key=_gsm_number)
+            if not members and acc not in seen:
+                unresolved.append({"accession": acc, "reason": f"GEO lists no samples for {acc}."})
+                seen.add(acc)
+        for unit in members:
+            if unit not in seen:
+                seen.add(unit)
+                units.append(unit)
+    return units, unresolved
+
+
 def _safe_name(text):
     return _UNSAFE_NAME.sub("_", (text or "").strip()).strip("_")
 

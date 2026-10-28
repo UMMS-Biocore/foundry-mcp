@@ -516,3 +516,146 @@ class TestTool:
         assert "cleanup_delay_hours" in doc
         assert "peak_inputs_bytes_estimate" in doc
         assert "mate" in doc
+
+
+def _big_gse(n, series="GSE1"):
+    """A GEO series of n sequenced GSMs. GEO lists a series' samples in no
+    particular order, so the fake shuffles them, and the numbers cross a digit
+    boundary (GSM95 .. GSM95+n) so a text sort would differ from a numeric one."""
+    nums = list(range(95, 95 + n))
+    listed = nums[::2][::-1] + nums[1::2]
+    gds = {series: {"entrytype": "GSE", "bioproject": "PRJNA1",
+                    "extrelations": [{"relationtype": "SRA", "targetobject": "SRP000001"}],
+                    "samples": [{"accession": f"GSM{i}", "title": f"cell {i}"} for i in listed]}}
+    ena = {}
+    for i in nums:
+        gds[f"GSM{i}"] = {"entrytype": "GSM", "extrelations": [
+            {"relationtype": "SRA", "targetobject": f"SRX{i:06d}"}]}
+        ena[f"SRX{i:06d}"] = [_run(f"SRR{i:06d}", f"SAMN{i:08d}", f"GSM{i}", f"cell {i}",
+                                   experiment=f"SRX{i:06d}")]
+    return gds, ena, [f"SRR{i:06d}" for i in nums]
+
+
+def _page_runs(out):
+    return [row.split(" | ")[4] for row in out["data"]["samples"]]
+
+
+class TestPaging:
+    """max_samples and offset page through a large GEO series."""
+
+    def test_pages_cover_every_sample_once_in_a_stable_order(self):
+        gds, ena, expected = _big_gse(350)
+        seen, offset, offsets = [], 0, []
+        while offset is not None:
+            out, client = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), dry_run=True,
+                                max_samples=100, offset=offset)
+            data = out["data"]
+            assert data["total_samples"] == 350 and data["offset"] == offset
+            offsets.append(offset)
+            seen.extend(_page_runs(out))
+            offset = data["next_offset"]
+        assert offsets == [0, 100, 200, 300]
+        assert seen == expected
+        assert client.call.call_count == 0
+        again, _ = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), dry_run=True,
+                         max_samples=100, offset=100)
+        assert _page_runs(again) == expected[100:200]
+
+    def test_a_page_looks_up_only_its_own_samples(self):
+        gds, ena, _ = _big_gse(350)
+        http = FakeHttp(gds=gds, ena=ena)
+        _tool(["GSE1"], http, dry_run=True, max_samples=100, offset=200)
+        gsm_terms = [p["term"] for p in _urls(http, accessions.EUTILS_ESEARCH) if "gsm[ETYP]" in p["term"]]
+        assert len(gsm_terms) == 1 and gsm_terms[0].count("[ACCN]") == 100
+        searched = [a for p in _urls(http, accessions.ENA_SEARCH) for a in p["includeAccessions"].split(",")]
+        assert len(searched) == 100
+        assert _urls(http, accessions.ENA_FILEREPORT) == []
+
+    def test_reply_says_how_to_get_the_next_page(self):
+        gds, ena, _ = _big_gse(250)
+        out, _ = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), dry_run=True, max_samples=100)
+        assert out["data"]["next_offset"] == 100
+        assert "offset=100" in out["summary"] or "offset=100" in " ".join(out["next_steps"])
+        last, _ = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), dry_run=True, max_samples=100, offset=200)
+        assert last["data"]["next_offset"] is None
+        assert last["data"]["sample_count"] == 50
+
+    def test_offset_past_the_end_is_an_empty_page_on_a_dry_run(self):
+        gds, ena, _ = _big_gse(120)
+        http = FakeHttp(gds=gds, ena=ena)
+        out, _ = _tool(["GSE1"], http, dry_run=True, max_samples=100, offset=500)
+        data = out["data"]
+        assert data["total_samples"] == 120 and data["sample_count"] == 0
+        assert data["samples"] == [] and data["next_offset"] is None
+        assert _urls(http, accessions.ENA_SEARCH) == []
+
+    def test_offset_past_the_end_creates_nothing(self):
+        gds, ena, _ = _big_gse(120)
+        out, client = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), max_samples=100, offset=500)
+        assert "120" in out["tool_error"]["error"]
+        assert client.call.call_count == 0
+
+    def test_a_page_without_dry_run_creates_a_dataset_of_that_page(self):
+        gds, ena, expected = _big_gse(150)
+        out, client = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), max_samples=100, offset=100)
+        posts = [c.kwargs["data"]["file"]["geo_id"] for c in client.call.call_args_list
+                 if c.kwargs["endpoint"].endswith("/addFile")]
+        assert posts == expected[100:]
+        assert out["data"]["vmetaCollectionId"] and out["data"]["next_offset"] is None
+
+    def test_run_accessions_page_in_the_order_given(self):
+        runs = _runs(5)
+        order = ["SRR000005", "SRR000001", "SRR000004", "SRR000002", "SRR000003"]
+        out, _ = _tool(order, FakeHttp(ena=runs), dry_run=True, max_samples=2, offset=2)
+        assert _page_runs(out) == ["SRR000004", "SRR000002"]
+        assert out["data"]["total_samples"] == 5 and out["data"]["next_offset"] == 4
+
+    def test_gsm_accessions_page_in_the_order_given(self):
+        gds, ena, _ = _big_gse(10)
+        gsms = [f"GSM{i}" for i in (104, 95, 99, 100)]
+        out, _ = _tool(gsms, FakeHttp(gds=gds, ena=ena), dry_run=True, max_samples=3)
+        assert _page_runs(out) == ["SRR000104", "SRR000095", "SRR000099"]
+        assert out["data"]["next_offset"] == 3
+
+    def test_a_series_expands_in_place_in_a_mixed_list(self):
+        gds, ena, expected = _big_gse(3)
+        ena.update(_runs(2))
+        out, _ = _tool(["SRR000001", "GSE1", "GSM96", "SRR000002"], FakeHttp(gds=gds, ena=ena),
+                       dry_run=True, max_samples=10)
+        assert _page_runs(out) == ["SRR000001"] + expected + ["SRR000002"]
+        assert out["data"]["total_samples"] == 5
+
+    @pytest.mark.parametrize("acc", ["SRP000001", "PRJNA1", "ERP000001", "E-MTAB-1"])
+    def test_study_accessions_cannot_be_paged(self, acc):
+        http = FakeHttp()
+        out, _ = _tool([acc], http, dry_run=True, max_samples=10)
+        assert acc in out["tool_error"]["error"]
+        assert http.calls == []
+
+    @pytest.mark.parametrize("kwargs", [{"max_samples": 0}, {"max_samples": -5}, {"offset": -1},
+                                        {"max_samples": 10, "offset": -1}])
+    def test_invalid_window_is_refused(self, kwargs):
+        http = FakeHttp()
+        out, _ = _tool(["SRR000001"], http, dry_run=True, **kwargs)
+        assert "tool_error" in out
+        assert http.calls == []
+
+    def test_a_wide_page_still_lists_only_the_first_hundred(self):
+        gds, ena, _ = _big_gse(350)
+        out, _ = _tool(["GSE1"], FakeHttp(gds=gds, ena=ena), dry_run=True, max_samples=150)
+        data = out["data"]
+        assert data["sample_count"] == 150 and len(data["samples"]) == 100
+        assert data["samples_omitted"] == 50 and data["next_offset"] == 150
+
+    def test_no_window_resolves_a_series_as_before(self):
+        gds, ena, _ = _big_gse(3)
+        ena["SRP000001"] = [_run("SRR000001", "SAMN00000001", "GSM1", "c1")]
+        http = FakeHttp(gds=gds, ena=ena)
+        out, _ = _tool(["GSE1"], http, dry_run=True)
+        assert [p["accession"] for p in _urls(http, accessions.ENA_FILEREPORT)] == ["SRP000001"]
+        assert out["data"]["sample_count"] == 1
+        assert out["data"]["offset"] == 0 and out["data"]["next_offset"] is None
+
+    def test_docstring_explains_paging(self):
+        doc = server.create_dataset_from_accessions.__doc__
+        assert "max_samples" in doc and "offset" in doc and "next_offset" in doc
