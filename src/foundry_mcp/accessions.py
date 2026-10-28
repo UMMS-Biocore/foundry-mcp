@@ -332,6 +332,73 @@ def resolve_all(accessions):
     return out
 
 
+# Studies and projects expand to runs only inside ENA, so they cannot be cut
+# into sample pages before the lookup that a page is meant to keep small.
+_STUDY_LEVEL = re.compile(r"^(?:[ESDR]RP\d{6,}|PRJ[A-Z]{2}\d+)$")
+
+
+def _gsm_number(acc):
+    return int(acc[3:])
+
+
+def sample_units(accessions):
+    """Flatten accessions into one ordered list of sample level accessions.
+
+    Returns (units, unresolved). A GEO series becomes its GSMs sorted by
+    accession number, so the order is the same on every call; every other
+    accession stays one unit, in the order given. A repeated unit is kept once.
+    Raises ValueError for study, project and ArrayExpress accessions, which
+    cannot be split before lookup, and when a series cannot be expanded while
+    other units remain: dropping its GSMs would shift total_samples and every
+    later offset between calls. When nothing expands at all, units is empty
+    and unresolved says why.
+    """
+    cleaned = [(a or "").strip().upper() for a in accessions]
+    refused = [a for a in cleaned if classify(a) == "arrayexpress" or _STUDY_LEVEL.match(a)]
+    if refused:
+        raise ValueError(
+            f"max_samples and offset cannot page {', '.join(refused)}: study, project and "
+            f"ArrayExpress accessions resolve to their runs in one lookup. Pass the GEO "
+            f"series (GSE) or the sample, experiment or run accessions instead, or call "
+            f"without max_samples and offset.")
+    series = [a for a in dict.fromkeys(cleaned) if classify(a) == "geo_series"]
+    records = _geo_records(series, "gse") if series else {}
+    units, unresolved, seen = [], [], set()
+    for acc in cleaned:
+        if classify(acc) != "geo_series":
+            members = [acc]
+        else:
+            record, members = records[acc], []
+            try:
+                if isinstance(record, Exception):
+                    raise record
+                # The series level check the unpaged call makes, so an array
+                # series or a SuperSeries is refused with the same reason.
+                _sra_targets(acc, "geo_series", record)
+                members = sorted({(s.get("accession") or "").strip().upper()
+                                  for s in record.get("samples") or []
+                                  if classify(s.get("accession")) == "geo_sample"}, key=_gsm_number)
+                if not members:
+                    raise Unresolved(f"GEO lists no samples for {acc}.")
+            except Exception as e:
+                if acc not in seen:
+                    reason = str(e) if isinstance(e, Unresolved) else f"could not reach the archive: {e}"
+                    unresolved.append({"accession": acc, "reason": reason})
+                    seen.add(acc)
+                continue
+        for unit in members:
+            if unit not in seen:
+                seen.add(unit)
+                units.append(unit)
+    if unresolved and units:
+        failed = "; ".join(f"{u['accession']} ({u['reason']})" for u in unresolved)
+        raise ValueError(
+            f"Cannot page these accessions: a series could not be expanded into its samples, "
+            f"so the page boundaries would shift between calls. {failed}. Retry, or leave "
+            f"that series out.")
+    return units, unresolved
+
+
 def _safe_name(text):
     return _UNSAFE_NAME.sub("_", (text or "").strip()).strip("_")
 

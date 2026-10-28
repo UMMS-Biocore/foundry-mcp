@@ -3514,6 +3514,8 @@ def create_dataset_from_accessions(
     accessions: list,
     canvas_id: str = "",
     dry_run: bool = False,
+    max_samples: Optional[int] = None,
+    offset: int = 0,
 ) -> str:
     """
     Build a sample dataset from public sequencing accessions, ready to set as
@@ -3567,12 +3569,41 @@ def create_dataset_from_accessions(
     run does not remove its files from the cluster, and it destroys the
     user's results.
 
+    Paging a large GEO series: a GSE with several hundred or more samples can
+    take longer than the client waits. Pass max_samples (for example 100) and
+    offset to work through it one page at a time. The accessions are first
+    flattened into one ordered list of input entries: a GSE becomes its GSMs
+    sorted by accession number (the same order on every call), and every
+    other sample, experiment or run accession (GSM, SRS, ERS, DRS, SAMN,
+    SAMEA, SAMD, SRX, ERX, DRX, SRR, ERR, DRR) stays one entry in the order
+    given. The page is entries offset to offset+max_samples, and only those
+    are looked up. When paging, `total_samples` counts those input entries
+    (one per GSM of a series, one per other accession given), which can
+    differ from the resolved sample count of an unpaged call. `next_offset`
+    is the offset of the next page, or null on the last page. Do not mix a
+    GSE with run, experiment or sample accessions that belong to it when
+    paging: each counts as its own entry, so the same sample can land on two
+    pages. If a series cannot be expanded (GEO unreachable, no record, or no
+    sequencing linked), the paged call is refused rather than shift every
+    later offset; retry it. Study and project accessions (SRP, ERP, DRP,
+    PRJNA, PRJEB) and ArrayExpress studies (E-MTAB) resolve to runs in one
+    lookup, so they cannot be paged: for an SRA or ENA study pass its GSE or
+    its run accessions instead, and take an ArrayExpress study without
+    max_samples and offset. Without dry_run, a paged call creates a dataset
+    holding only that page, so give each page its own dataset name (for
+    example GSE12345_part1, GSE12345_part2) and run each one; an offset past
+    the end creates nothing. A dry run of every page shows the whole plan.
+
     Args:
         name: Dataset name (non-empty, unique in the project).
         accessions: Accessions to include, any mix of the types above.
         canvas_id: Optional study-tracker canvas; resolved automatically if
             omitted.
         dry_run: True returns the plan and writes nothing.
+        max_samples: Optional page size, a whole number of at least 1. Omit
+            it, with offset 0, to take every sample in one call.
+        offset: Index of the first entry of the page, a whole number of 0 or
+            more, usually the previous reply's `next_offset`.
     """
     try:
         if not name or not name.strip():
@@ -3580,8 +3611,35 @@ def create_dataset_from_accessions(
         wanted = [a.strip() for a in (accessions or []) if isinstance(a, str) and a.strip()]
         if not wanted:
             raise ValueError("No accessions given: pass a list such as ['GSE36552']")
+        def _whole(value):
+            return isinstance(value, int) and not isinstance(value, bool)
+        if max_samples is not None and not (_whole(max_samples) and max_samples >= 1):
+            raise ValueError(f"max_samples must be a whole number of 1 or more, got {max_samples!r}")
+        offset = 0 if offset is None else offset
+        if not (_whole(offset) and offset >= 0):
+            raise ValueError(f"offset must be a whole number of 0 or more, got {offset!r}")
+        paged = max_samples is not None or offset > 0
 
-        plan = _accessions.build_plan(wanted)
+        next_offset = None
+        if paged:
+            units, unit_unresolved = _accessions.sample_units(wanted)
+            total_samples = len(units)
+            if not total_samples:
+                raise ValueError(
+                    "None of the accessions resolved to sequencing runs, so no dataset was "
+                    f"created. Unresolved: {json.dumps(unit_unresolved)}")
+            end = total_samples if max_samples is None else min(total_samples, offset + max_samples)
+            page = units[offset:end]
+            next_offset = end if end < total_samples else None
+            if not page and not dry_run:
+                raise ValueError(
+                    f"offset {offset} is past the end: the accessions hold {total_samples} "
+                    f"sample(s), so this page is empty and no dataset was created.")
+            plan = _accessions.build_plan(page)
+            plan["unresolved"] = unit_unresolved + plan["unresolved"]
+        else:
+            plan = _accessions.build_plan(wanted)
+            total_samples = plan["sample_count"]
         layout, mate, breakdown = _dataset_layout(plan)
         peak = plan["total_raw_bytes"] * _PEAK_INPUTS_FACTOR
         sample_rows, samples_omitted = _sample_rows(plan["samples"])
@@ -3602,10 +3660,13 @@ def create_dataset_from_accessions(
             "sample_columns": _SAMPLE_COLUMNS,
             "samples": sample_rows,
             "samples_omitted": samples_omitted,
+            "total_samples": total_samples,
+            "offset": offset,
+            "next_offset": next_offset,
             "unresolved": plan["unresolved"],
             "warnings": plan["warnings"],
         }
-        if not plan["records"]:
+        if not plan["records"] and not (paged and dry_run):
             raise ValueError(
                 "None of the accessions resolved to sequencing runs, so no dataset was "
                 f"created. Unresolved: {json.dumps(plan['unresolved'])}")
@@ -3616,6 +3677,19 @@ def create_dataset_from_accessions(
         if samples_omitted:
             summary += (f" (the first {len(sample_rows)} samples are listed, "
                         f"{samples_omitted} more are counted but not shown)")
+        page_steps = []
+        if paged:
+            shown = len(page)
+            first = f"samples {offset + 1} to {offset + shown}" if shown else "no samples"
+            summary += f"; this page is {first} of {total_samples}"
+            if next_offset is not None:
+                summary += f", next page offset={next_offset}"
+                page_steps = [
+                    f"Next page: call again with the same accessions, max_samples={max_samples} "
+                    f"and offset={next_offset}. Without dry_run each page is its own dataset, "
+                    f"so give it its own name."]
+            else:
+                summary += ", the last page"
         if dry_run:
             return json.dumps(envelope(
                 summary=f"Plan only, nothing written: {summary}.",
@@ -3623,8 +3697,9 @@ def create_dataset_from_accessions(
                 next_steps=[
                     "Show the user the samples, layout, total raw size, peak inputs estimate, "
                     "unresolved and warnings.",
-                    "If they agree, call again with dry_run=False to create the dataset.",
-                ] + _layout_steps(layout, mate),
+                ] + (["If they agree, call again with dry_run=False to create the dataset."]
+                     if plan["records"] else [])
+                + page_steps + (_layout_steps(layout, mate) if plan["records"] else []),
             ), indent=2)
 
         via_client = get_client()
@@ -3668,7 +3743,7 @@ def create_dataset_from_accessions(
             ] + _layout_steps(layout, mate) + [
                 "Set a short cleanup delay on that run, for example update_run(cleanup_delay_hours=6).",
                 "Then preflight_run(run_id=...) before launching.",
-            ],
+            ] + page_steps,
         ), indent=2)
     except Exception as e:
         logger.error(f"Error creating dataset from accessions for '{name}': {e}")
