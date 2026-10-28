@@ -7206,6 +7206,9 @@ _TYPED_REFUSAL_FIELDS = {
 
 def _refusal_next_step(reason: str, category, retryable):
     """What the client should do about a quota or ceiling refusal, or None."""
+    if reason == "chain_depth":
+        # The server's own remedy (name an earlier job as after) is the advice.
+        return None
     if category == "quota":
         if reason == "storage":
             return (
@@ -7243,6 +7246,11 @@ def _workspace_error(body, http_status: int, fallback_reason: str, fallback_mess
     for field, valid in _TYPED_REFUSAL_FIELDS.items():
         if field in body and valid(body[field]):
             error[field] = body[field]
+    if isinstance(body.get("skipReason"), str) and body["skipReason"]:
+        error["skip_reason"] = body["skipReason"]
+    step_refusal = body.get("refusal")
+    if isinstance(step_refusal, dict) and isinstance(step_refusal.get("reason"), str):
+        error["step_refusal"] = step_refusal["reason"]
     next_step = _refusal_next_step(reason, error.get("category"), error.get("retryable"))
     if next_step:
         error["next_step"] = next_step
@@ -7275,11 +7283,11 @@ def _check_workspace_id(workspace_id: str) -> None:
         _refuse("invalid_workspace_id", "workspace_id must be a workspace id as workspace_list or workspace_create returned it.")
 
 
-def _check_submission_key(key: str) -> None:
+def _check_submission_key(key: str, field: str = "submission_key") -> None:
     if not isinstance(key, str) or not _SUBMISSION_KEY_PATTERN.match(key):
         _refuse(
             "invalid_submission_key",
-            "submission_key must be 1 to 128 characters of letters, digits and . _ : -",
+            f"{field} must be 1 to 128 characters of letters, digits and . _ : -",
         )
 
 
@@ -7311,7 +7319,8 @@ def workspace_list(run_environment_id: str = "") -> str:
     """
     List your workspaces, newest first, optionally only those on one run
     environment. Each gives its workspace_id, name, run environment, image and
-    state (provisioning, ready, archived, destroyed).
+    state (provisioning, ready, archived, destroyed), and `waitingSteps`, the
+    number of chain steps waiting in it.
     """
     params = None
     if str(run_environment_id or "").strip():
@@ -7363,19 +7372,33 @@ def workspace_run(
     memory_mb: int = 1024,
     wall_minutes: int = 30,
     submission_key: str = "",
+    after: str = "",
+    when: str = "completed",
+    hold: bool = False,
 ) -> str:
     """
     Run a command in a container in one of your workspaces, as a job on the
     workspace's run environment.
 
     This LAUNCHES cluster compute (it consumes cluster time). Always confirm with
-    the user before calling.
+    the user before calling, and when you declare a chain, confirm the compute of
+    every step you declare, not only the first.
+
+    Chains: declare every step now. Give a step `after` (the submission_key of
+    the step it follows) and the server submits it by itself once that step
+    ends, so no client has to stay connected. By default it runs only if the
+    earlier step completed; with when="finished" it runs on any end. With
+    hold=True the step is not run until the user reviews it on Foundry Connect
+    (it then comes back as awaiting_approval with an `approve_at` link). `when`
+    and `hold` need `after`. A step that waits answers with status "waiting".
 
     To check or retry the same job, call again with the submission_key this
     returned. A new key starts a new job.
 
     `status` in the answer is one of:
     - "submitted": the job is on the scheduler (`scheduler_job_id`).
+    - "waiting": a chain step, stored until `after` ends; the server submits
+      it then. Check it with workspace_job_status.
     - "awaiting_approval": the run environment needs a person's approval. A
       person must open the `approve_at` link in Foundry Connect and approve; no
       tool can approve. Share the link, then call workspace_job_status.
@@ -7400,6 +7423,19 @@ def workspace_run(
         _check_submission_key(key)
     else:
         key = "mcp-" + uuid.uuid4().hex
+    chain_after = after.strip() if isinstance(after, str) else ""
+    if isinstance(after, str) and after and not chain_after:
+        _refuse("invalid_submission_key", "after must be the submission_key of an earlier step, not blank.")
+    if chain_after:
+        _check_submission_key(chain_after, "after")
+        if when not in ("completed", "finished"):
+            _refuse("invalid_argument", 'when must be "completed" or "finished".')
+        if not isinstance(hold, bool):
+            _refuse("invalid_argument", "hold must be true or false.")
+    elif hold is not False:
+        _refuse("hold_needs_after", "hold applies only to a step that names after.")
+    elif when != "completed":
+        _refuse("when_needs_after", "when applies only to a step that names after.")
     if not isinstance(command, str) or not command.strip():
         _refuse("invalid_argument", "command is required.")
     if len(command.encode("utf-8")) > _MAX_COMMAND_BYTES:
@@ -7410,6 +7446,8 @@ def workspace_run(
         "memoryMb": _positive_int(memory_mb, "memory_mb"),
         "wallMinutes": _positive_int(wall_minutes, "wall_minutes"),
     }
+    if chain_after:
+        data.update(after=chain_after, when=when, hold=hold)
 
     # One key for the whole call: every retry inside it is the same logical submit.
     try:
@@ -7442,6 +7480,14 @@ def workspace_run(
     if kind == "submitted":
         result.update(status="submitted", scheduler_job_id=outcome.get("jobId"),
                       message="The job was submitted. Call workspace_job_status with this submission_key to follow it.")
+        return json.dumps(result, indent=2)
+    if kind == "waiting":
+        result.update(
+            status="waiting",
+            after=outcome.get("after"), when=outcome.get("when"),
+            hold=outcome.get("hold"), depth=outcome.get("depth"),
+            message=_waiting_message(outcome.get("when"), outcome.get("hold")),
+        )
         return json.dumps(result, indent=2)
     if kind == "awaiting_approval":
         result.update(
@@ -7497,6 +7543,20 @@ def workspace_run(
     _workspace_error(outcome, status, "submit_refused", "The job was not submitted.", submission_key=key)
 
 
+def _waiting_message(when, hold) -> str:
+    if when == "finished":
+        text = "The step is stored. The server submits it once the step it follows ends."
+    else:
+        text = (
+            "The step is stored. The server submits it once the step it follows completes, "
+            "and it is skipped if that step does not."
+        )
+    text += " Check it with workspace_job_status."
+    if hold is True:
+        text += " Once released it needs a person's approval at its approve_at link."
+    return text
+
+
 def _refuse_with_key(reason: str, message: str, key: str, http_status: int):
     raise ToolError(json.dumps({"error": message, "reason": reason, "http_status": http_status, "submission_key": key}))
 
@@ -7506,8 +7566,11 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     """
     Read one job of your workspace by the submission_key workspace_run returned.
     `status` is one of awaiting_approval, rejected, expired, starting, refused,
-    uncertain, dispatch_refused, queued, running, completed, failed, unknown.
-    A job waiting for approval also carries its `approve_at` link.
+    uncertain, dispatch_refused, queued, running, completed, failed, unknown,
+    waiting, skipped. A job waiting for approval also carries its `approve_at`
+    link. A chain step carries `chain` (after, when, hold, depth, and for a
+    skipped step its reason and skippedBy). A skipped step never runs: submit it
+    again under a new key.
 
     `refused` means the job was approved but the server refused to start it
     (for example over the storage quota, or a mount outside the allowed data
@@ -7533,7 +7596,9 @@ def workspace_cancel(workspace_id: str, submission_key: str) -> str:
     """
     Cancel a queued or running job of your workspace through its run
     environment's scheduler. Returns once the scheduler took the cancel; call
-    workspace_job_status to see how the job ended. A job still waiting for
+    workspace_job_status to see how the job ended. A chain step still `waiting`
+    can be cancelled too: it is skipped without touching the scheduler. Either
+    way, every step waiting below it is skipped (ancestor_cancelled). A job still waiting for
     approval is not cancelled here: a person rejects it at its approval link.
 
     WARNING: This stops cluster work. Confirm with the user first.
@@ -7551,7 +7616,7 @@ def workspace_cancel(workspace_id: str, submission_key: str) -> str:
         return json.dumps({
             "status": "cancel_requested",
             "submission_key": submission_key,
-            "message": "The scheduler took the cancel. Call workspace_job_status to see how the job ended.",
+            "message": "The cancel was accepted (the scheduler took it, or a waiting step was skipped). Call workspace_job_status to see how the job ended.",
         }, indent=2)
     if isinstance(body, dict) and body.get("reason") == "job_not_cancellable":
         job_status = body.get("status")
