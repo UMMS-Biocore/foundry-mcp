@@ -19,6 +19,8 @@ record, because the initial run step downloads only the first id of a GEO
 record and addFile refuses a repeated name.
 """
 import json
+import re
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,17 +58,28 @@ class FakeHttp:
             if isinstance(answer, tuple):
                 return answer
             return 200, json.dumps(answer)
+        if url == accessions.ENA_SEARCH:
+            rows = []
+            for acc in params["includeAccessions"].split(","):
+                answer = self.ena.get(acc, [])
+                if isinstance(answer, tuple):
+                    return answer
+                rows.extend(answer)
+            # ENA does not answer in the order asked (seen live), so neither does the fake.
+            return 200, json.dumps(rows[::-1])
         if url == accessions.EUTILS_ESEARCH:
-            acc = params["term"].split("[")[0]
-            rec = self.gds.get(acc)
-            ids = [f"uid-{acc}"] if rec else []
+            accs = re.findall(r"(\w+)\[ACCN\]", params["term"])
+            ids = [f"uid-{acc}" for acc in accs if self.gds.get(acc)]
             return 200, json.dumps({"esearchresult": {"count": str(len(ids)), "idlist": ids}})
         if url == accessions.EUTILS_ESUMMARY:
-            uid = params["id"]
-            acc = uid[len("uid-"):]
-            rec = dict(self.gds[acc])
-            rec.setdefault("accession", acc)
-            return 200, json.dumps({"result": {"uids": [uid], uid: rec}})
+            uids = params["id"].split(",")
+            result = {"uids": uids}
+            for uid in uids:
+                acc = uid[len("uid-"):]
+                rec = dict(self.gds[acc])
+                rec.setdefault("accession", acc)
+                result[uid] = rec
+            return 200, json.dumps({"result": result})
         if url.startswith(accessions.BIOSTUDIES_STUDIES):
             acc = url.rsplit("/", 1)[1]
             body = self.biostudies.get(acc)
@@ -76,9 +89,21 @@ class FakeHttp:
         raise AssertionError(f"unexpected url {url}")
 
 
+def _patched(http):
+    stack = ExitStack()
+    for target in ("_http_get", "_http_post"):
+        stack.enter_context(patch.object(accessions, target, http))
+    stack.enter_context(patch.object(accessions, "_pause", lambda: None))
+    return stack
+
+
 def _resolve(accs, http):
-    with patch.object(accessions, "_http_get", http), patch.object(accessions, "_pause", lambda: None):
+    with _patched(http):
         return accessions.build_plan(accs)
+
+
+def _urls(http, url):
+    return [p for u, p in http.calls if u == url]
 
 
 class TestClassify:
@@ -137,7 +162,8 @@ class TestResolve:
         http = FakeHttp(
             gds={"GSM5": {"entrytype": "GSM", "title": "x",
                           "extrelations": [{"relationtype": "SRA", "targetobject": "SRX000005"}]}},
-            ena={"SRX000005": [_run("SRR000005", "SAMN00000005", "GSM5", "cell 5")]})
+            ena={"SRX000005": [_run("SRR000005", "SAMN00000005", "GSM5", "cell 5",
+                                              experiment="SRX000005")]})
         plan = _resolve(["GSM5"], http)
         assert plan["run_count"] == 1
         term = [p["term"] for u, p in http.calls if u == accessions.EUTILS_ESEARCH][0]
@@ -185,17 +211,105 @@ class TestResolve:
 
     def test_network_failure_is_per_accession(self):
         def http(url, params=None):
-            if params and params.get("accession") == "SRR000001":
+            if url == accessions.ENA_SEARCH:
                 raise accessions.requests.ConnectionError("down")
-            return 200, json.dumps([_run("SRR000002", "SAMN00000002", "GSM2", "c2")])
-        plan = _resolve(["SRR000001", "SRR000002"], http)
+            return 200, json.dumps([_run("SRR000003", "SAMN00000003", "GSM3", "c3")])
+        plan = _resolve(["SRR000001", "SRP000003", "SRR000002"], http)
         assert plan["run_count"] == 1
-        assert plan["unresolved"][0]["accession"] == "SRR000001"
+        assert [u["accession"] for u in plan["unresolved"]] == ["SRR000001", "SRR000002"]
+        assert all("could not reach the archive" in u["reason"] for u in plan["unresolved"])
 
     def test_runs_reached_twice_are_counted_once(self):
         row = _run("SRR000001", "SAMN00000001", "GSM1", "c1")
         http = FakeHttp(ena={"SRR000001": [row], "SAMN00000001": [row]})
         assert _resolve(["SRR000001", "SAMN00000001"], http)["run_count"] == 1
+
+
+def _runs(n, start=1):
+    return {f"SRR{i:06d}": [_run(f"SRR{i:06d}", f"SAMN{i:08d}", f"GSM{i}", f"cell {i}")]
+            for i in range(start, start + n)}
+
+
+class TestBatching:
+    """A long list of runs, experiments or GEO samples costs a few calls, not one per accession."""
+
+    def test_twenty_runs_take_one_ena_call(self):
+        http = FakeHttp(ena=_runs(20))
+        plan = _resolve(list(_runs(20)), http)
+        assert plan["run_count"] == 20 and plan["unresolved"] == []
+        searches = _urls(http, accessions.ENA_SEARCH)
+        assert len(searches) == 1 and _urls(http, accessions.ENA_FILEREPORT) == []
+        assert searches[0]["result"] == "read_run"
+        assert searches[0]["fields"] == accessions.ENA_FIELDS
+
+    def test_long_run_lists_are_chunked(self):
+        http = FakeHttp(ena=_runs(450))
+        plan = _resolve(list(_runs(450)), http)
+        assert plan["run_count"] == 450
+        sizes = [len(p["includeAccessions"].split(",")) for p in _urls(http, accessions.ENA_SEARCH)]
+        assert sizes == [200, 200, 50]
+
+    def test_records_follow_the_order_asked_not_the_order_answered(self):
+        http = FakeHttp(ena=_runs(3))
+        plan = _resolve(["SRR000002", "SRR000003", "SRR000001"], http)
+        assert [r["geo_id"] for r in plan["records"]] == ["SRR000002", "SRR000003", "SRR000001"]
+
+    def test_a_run_missing_from_the_batch_is_unresolved_with_the_reason(self):
+        http = FakeHttp(ena=_runs(1))
+        plan = _resolve(["SRR000001", "SRR000404"], http)
+        assert plan["run_count"] == 1
+        assert plan["unresolved"] == [{"accession": "SRR000404",
+                                       "reason": "ENA lists no public read runs for SRR000404."}]
+
+    def test_runs_and_experiments_go_in_separate_batches(self):
+        # ENA refuses a batch that mixes accession types (400, seen live).
+        ena = _runs(2)
+        ena["SRX000009"] = [_run("SRR000009", "SAMN00000009", "GSM9", "c9", experiment="SRX000009")]
+        http = FakeHttp(ena=ena)
+        plan = _resolve(["SRR000001", "SRX000009", "SRR000002"], http)
+        assert plan["run_count"] == 3
+        batches = sorted(p["includeAccessions"] for p in _urls(http, accessions.ENA_SEARCH))
+        assert batches == ["SRR000001,SRR000002", "SRX000009"]
+
+    def test_a_refused_batch_falls_back_to_one_lookup_each(self):
+        ena = _runs(2)
+        ena["SRR000009"] = (400, json.dumps({"message": "bad accession"}))
+        http = FakeHttp(ena=ena)
+        plan = _resolve(["SRR000001", "SRR000009", "SRR000002"], http)
+        assert plan["run_count"] == 2
+        assert plan["unresolved"][0]["accession"] == "SRR000009"
+        assert "bad accession" in plan["unresolved"][0]["reason"]
+
+    def test_twenty_gsms_take_one_esearch_one_esummary_and_one_ena_call(self):
+        gds = {f"GSM{i}": {"entrytype": "GSM", "extrelations": [
+            {"relationtype": "SRA", "targetobject": f"SRX{i:06d}"}]} for i in range(1, 21)}
+        ena = {f"SRX{i:06d}": [_run(f"SRR{i:06d}", f"SAMN{i:08d}", f"GSM{i}", f"cell {i}",
+                                    experiment=f"SRX{i:06d}")] for i in range(1, 21)}
+        http = FakeHttp(gds=gds, ena=ena)
+        plan = _resolve(list(gds), http)
+        assert plan["run_count"] == 20 and plan["unresolved"] == []
+        assert len(_urls(http, accessions.EUTILS_ESEARCH)) == 1
+        assert len(_urls(http, accessions.EUTILS_ESUMMARY)) == 1
+        assert len(_urls(http, accessions.ENA_SEARCH)) == 1
+        assert _urls(http, accessions.ENA_FILEREPORT) == []
+
+    def test_a_repeated_gsm_is_looked_up_once(self):
+        http = FakeHttp(
+            gds={"GSM1": {"entrytype": "GSM", "extrelations": [
+                {"relationtype": "SRA", "targetobject": "SRX000001"}]}},
+            ena={"SRX000001": [_run("SRR000001", "SAMN00000001", "GSM1", "c1", experiment="SRX000001")]})
+        plan = _resolve(["GSM1", "gsm1"], http)
+        assert plan["run_count"] == 1
+        assert _urls(http, accessions.EUTILS_ESEARCH)[0]["term"] == "GSM1[ACCN] AND gsm[ETYP]"
+
+    def test_an_unknown_gsm_in_a_batch_is_unresolved_alone(self):
+        http = FakeHttp(
+            gds={"GSM1": {"entrytype": "GSM", "extrelations": [
+                {"relationtype": "SRA", "targetobject": "SRX000001"}]}},
+            ena={"SRX000001": [_run("SRR000001", "SAMN00000001", "GSM1", "c1", experiment="SRX000001")]})
+        plan = _resolve(["GSM1", "GSM404"], http)
+        assert plan["run_count"] == 1
+        assert plan["unresolved"] == [{"accession": "GSM404", "reason": "GEO has no record for GSM404."}]
 
 
 class TestGrouping:
@@ -286,8 +400,7 @@ def _client(dataset_id="6a62b921c5d9e44e73f433ac", fail_add=False):
 
 def _tool(accs, http, client=None, **kwargs):
     client = client or _client()
-    with patch.object(accessions, "_http_get", http), patch.object(accessions, "_pause", lambda: None), \
-            patch.object(server, "get_client", return_value=client):
+    with _patched(http), patch.object(server, "get_client", return_value=client):
         try:
             out = json.loads(server.create_dataset_from_accessions("geo_study", accs, **kwargs))
         except ToolError as e:
