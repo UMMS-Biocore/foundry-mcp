@@ -7243,6 +7243,11 @@ def _workspace_error(body, http_status: int, fallback_reason: str, fallback_mess
     for field, valid in _TYPED_REFUSAL_FIELDS.items():
         if field in body and valid(body[field]):
             error[field] = body[field]
+    if isinstance(body.get("skipReason"), str) and body["skipReason"]:
+        error["skip_reason"] = body["skipReason"]
+    step_refusal = body.get("refusal")
+    if isinstance(step_refusal, dict) and isinstance(step_refusal.get("reason"), str):
+        error["step_refusal"] = step_refusal["reason"]
     next_step = _refusal_next_step(reason, error.get("category"), error.get("retryable"))
     if next_step:
         error["next_step"] = next_step
@@ -7363,19 +7368,33 @@ def workspace_run(
     memory_mb: int = 1024,
     wall_minutes: int = 30,
     submission_key: str = "",
+    after: str = "",
+    when: str = "completed",
+    hold: bool = False,
 ) -> str:
     """
     Run a command in a container in one of your workspaces, as a job on the
     workspace's run environment.
 
     This LAUNCHES cluster compute (it consumes cluster time). Always confirm with
-    the user before calling.
+    the user before calling, and when you declare a chain, confirm the compute of
+    every step you declare, not only the first.
+
+    Chains: declare every step now. Give a step `after` (the submission_key of
+    the step it follows) and the server submits it by itself once that step
+    ends, so no client has to stay connected. By default it runs only if the
+    earlier step completed; with when="finished" it runs on any end. With
+    hold=True the step is not run until the user reviews it on Foundry Connect
+    (it then comes back as awaiting_approval with an `approve_at` link). `when`
+    and `hold` need `after`. A step that waits answers with status "waiting".
 
     To check or retry the same job, call again with the submission_key this
     returned. A new key starts a new job.
 
     `status` in the answer is one of:
     - "submitted": the job is on the scheduler (`scheduler_job_id`).
+    - "waiting": a chain step, stored until `after` ends; the server submits
+      it then. Check it with workspace_job_status.
     - "awaiting_approval": the run environment needs a person's approval. A
       person must open the `approve_at` link in Foundry Connect and approve; no
       tool can approve. Share the link, then call workspace_job_status.
@@ -7400,6 +7419,15 @@ def workspace_run(
         _check_submission_key(key)
     else:
         key = "mcp-" + uuid.uuid4().hex
+    chain_after = after.strip() if isinstance(after, str) else ""
+    if chain_after:
+        _check_submission_key(chain_after)
+        if when not in ("completed", "finished"):
+            _refuse("invalid_argument", 'when must be "completed" or "finished".')
+        if not isinstance(hold, bool):
+            _refuse("invalid_argument", "hold must be true or false.")
+    elif hold is not False or when != "completed":
+        _refuse("invalid_argument", "hold and when need after: name the step this one follows.")
     if not isinstance(command, str) or not command.strip():
         _refuse("invalid_argument", "command is required.")
     if len(command.encode("utf-8")) > _MAX_COMMAND_BYTES:
@@ -7410,6 +7438,8 @@ def workspace_run(
         "memoryMb": _positive_int(memory_mb, "memory_mb"),
         "wallMinutes": _positive_int(wall_minutes, "wall_minutes"),
     }
+    if chain_after:
+        data.update(after=chain_after, when=when, hold=hold)
 
     # One key for the whole call: every retry inside it is the same logical submit.
     try:
@@ -7442,6 +7472,17 @@ def workspace_run(
     if kind == "submitted":
         result.update(status="submitted", scheduler_job_id=outcome.get("jobId"),
                       message="The job was submitted. Call workspace_job_status with this submission_key to follow it.")
+        return json.dumps(result, indent=2)
+    if kind == "waiting":
+        result.update(
+            status="waiting",
+            after=outcome.get("after"), when=outcome.get("when"),
+            hold=outcome.get("hold"), depth=outcome.get("depth"),
+            message=(
+                "The step is stored. The server submits it once the step it follows ends. Check it with "
+                "workspace_job_status. A hold step needs a person's approval at its approve_at link once released."
+            ),
+        )
         return json.dumps(result, indent=2)
     if kind == "awaiting_approval":
         result.update(
