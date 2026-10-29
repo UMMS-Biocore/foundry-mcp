@@ -771,3 +771,133 @@ class TestDownloadFile:
 
         assert "via_mcp_test" not in raw
         assert "Authorization" not in raw
+
+    # delivery: "auto" (default), "url" (a link at any size), "inline" (bytes or a refusal)
+
+    def test_delivery_url_returns_a_link_for_a_small_file_without_reading_it(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get") as mock_get:
+            raw = server.download_file(report_id="77", file_path="out/file.txt", delivery="url")
+        result = json.loads(raw)
+
+        mock_get.assert_not_called()
+        client.call.assert_called_once_with(
+            method="POST",
+            endpoint="/api/v1/run/77/download-link",
+            data={"attemptUuid": self.UUID, "filePath": "out/file.txt"},
+        )
+        assert result["success"] is True
+        assert result["delivery"] == "url"
+        assert "file_content_base64" not in result
+        assert result["download_url"] == "https://foundry.example.com" + self.MINT_PATH
+        assert result["download_command"] == (
+            "curl -fL -o ./file.txt https://foundry.example.com" + self.MINT_PATH
+        )
+        assert "larger than" not in result["message"]
+        assert "report-resources" not in raw
+        assert "via_mcp_test" not in raw
+
+    def test_delivery_is_case_and_space_tolerant(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get") as mock_get:
+            result = json.loads(
+                server.download_file(report_id="77", file_path="out/file.txt", delivery=" URL ")
+            )
+
+        mock_get.assert_not_called()
+        assert result["delivery"] == "url"
+
+    def test_delivery_url_mint_404_does_not_claim_the_file_is_large(self):
+        client = self._client(route_path=self._route())
+        client.call.side_effect = RuntimeError("Error 305: Not Found: no route")
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get"):
+            raw = server.download_file(report_id="77", file_path="out/file.txt", delivery="url")
+        result = json.loads(raw)
+
+        assert "larger than" not in result["error"]
+        assert "did not issue a download link" in result["error"]
+        assert "delivery='auto'" in result["hint"]
+        assert "download_url" not in result
+        assert "report-resources" not in raw
+
+    def test_delivery_url_mint_405_says_the_server_issues_no_links(self):
+        client = self._client(route_path=self._route())
+        client.call.side_effect = RuntimeError(
+            "Error 307: Unexpected HTTP error occurred. Status code: 405."
+        )
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get"):
+            result = json.loads(
+                server.download_file(report_id="77", file_path="out/file.txt", delivery="url")
+            )
+
+        assert "does not issue download links" in result["error"]
+        assert "larger than" not in result["error"]
+        assert "delivery='auto'" in result["hint"]
+
+    def test_delivery_url_still_reports_a_missing_file(self):
+        client = self._client(route_path=self._route())
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(
+                server.download_file(report_id="77", file_path="nope.txt", delivery="url")
+            )
+
+        assert "not found" in result["error"]
+        client.call.assert_not_called()
+
+    def test_delivery_inline_returns_a_small_file_inline(self):
+        import base64
+        client = self._client(route_path=self._route())
+        response = self._response([b"hi"])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response):
+            result = json.loads(
+                server.download_file(report_id="1", file_path="out/file.txt", delivery="inline")
+            )
+
+        assert result["delivery"] == "inline"
+        assert base64.b64decode(result["file_content_base64"]) == b"hi"
+        client.call.assert_not_called()
+
+    def test_delivery_inline_refuses_an_oversize_file_without_a_link(self):
+        client = self._client(route_path=self._route())
+        response = self._response([b"x" * 20])
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response), \
+                patch.object(server, "INLINE_DOWNLOAD_MAX_BYTES", 10):
+            raw = server.download_file(report_id="77", file_path="out/file.txt", delivery="inline")
+        result = json.loads(raw)
+
+        client.call.assert_not_called()
+        assert "too large to return inline" in result["error"]
+        assert "delivery='url'" in result["hint"]
+        assert "download_url" not in result
+        assert "file_content_base64" not in result
+        response.close.assert_called()
+
+    def test_default_delivery_is_auto_and_unchanged(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        result = json.loads(self._large(client))
+
+        assert result["delivery"] == "url"
+        assert "larger than" in result["message"]
+
+    def test_unknown_delivery_is_rejected_before_any_call(self):
+        client = self._client(route_path=self._route())
+        with patch.object(server, "get_client", return_value=client) as mock_client, \
+                patch.object(server.requests, "get") as mock_get:
+            result = json.loads(
+                server.download_file(report_id="77", file_path="out/file.txt", delivery="link")
+            )
+
+        assert "delivery" in result["error"]
+        for value in ("auto", "url", "inline"):
+            assert value in result["error"]
+        mock_client.assert_not_called()
+        mock_get.assert_not_called()

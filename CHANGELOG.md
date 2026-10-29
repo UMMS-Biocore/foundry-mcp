@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Ask `download_file` for a link at any size**
+  - `download_file` takes an optional `delivery`: `auto` (the default, and
+    the behaviour so far: inline base64 up to 5MB, a link above), `url` (a
+    short lived link with a ready curl command at any size, and no body is
+    read first) or `inline` (the bytes, refused with a hint above 5MB). An
+    unknown value is refused before any call. A code sandbox should pass
+    `url`, because a client that truncates long tool results corrupts inline
+    base64 well under 5MB.
 - **Workspace job results**
   - `get_job_result` reads a finished workspace job's result: the
     `figure.png` it wrote to `outputs/<submission_key>/`, returned as an image,
