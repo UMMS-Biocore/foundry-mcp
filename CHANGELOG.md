@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Workspace job results**
+  - `get_job_result` reads a finished workspace job's result: the
+    `figure.png` it wrote to `outputs/<submission_key>/`, returned as an image,
+    its `values.csv` capped at 500 rows, its `provenance.json` blocks, its exit
+    code and the end of its standard output and error. A file that is missing,
+    too large or malformed is listed in `unavailable`. Read only; it needs a
+    Foundry Connect server with the job result route.
 - **Chains of workspace steps**
   - `get_started` has a fourth recipe, `chain_workspace_steps` (topic
     "chain"): when no step needs a person's decision, a chain of steps runs as

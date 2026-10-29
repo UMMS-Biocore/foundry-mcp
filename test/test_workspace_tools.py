@@ -6,6 +6,8 @@ The HTTP layer is patched at `requests.request`, so these tests see exactly the
 headers, bodies and retries the tools send.
 """
 
+import asyncio
+import base64
 import json
 import pathlib
 import re
@@ -13,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from mcp.server.fastmcp import Image
 from mcp.server.fastmcp.exceptions import ToolError
 
 from src.foundry_mcp import client as client_module
@@ -909,3 +912,98 @@ def test_no_tool_can_approve_or_reject_a_job_request():
     source = pathlib.Path(server.__file__).read_text()
     assert not re.search(r"requests/[^\"'\s]*/(approve|reject)", source)
     assert not any(name.startswith("workspace_") and ("approve" in name or "reject" in name) for name in dir(server))
+
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+_SHA = "a" * 64
+
+
+def _result_body(**over):
+    body = {
+        "workspaceId": WS,
+        "submissionKey": "plot-1",
+        "status": "completed",
+        "exitCode": 0,
+        "outputDir": "outputs/plot-1",
+        "figure": {"path": "figure.png", "contentType": "image/png", "bytes": len(_PNG), "data": base64.b64encode(_PNG).decode()},
+        "values": {"path": "values.csv", "text": "gene,log2FoldChange\nGENEA,1.5", "rows": 1, "truncated": False},
+        "provenance": [{"run": "5001", "file": "DE/a.csv", "sha256": _SHA, "filter": "padj < 0.05", "rows_read": 12000}],
+        "stdout": {"text": "=== END ===\n", "truncated": False},
+        "stderr": {"text": "", "truncated": False},
+        "unavailable": [],
+    }
+    body.update(over)
+    return body
+
+
+class TestGetJobResult:
+    def test_reads_the_result_route_and_returns_the_figure_as_an_image(self, via_client, http):
+        http.return_value = _response(200, _result_body())
+        content = server.get_job_result(WS, "plot-1")
+        assert http.call_args.args == ("GET", f"{HOST}/api/v1/agent-workspace/{WS}/jobs/plot-1/result")
+        text, image = content
+        out = json.loads(text)
+        assert out["status"] == "completed"
+        assert out["exit_code"] == 0
+        assert out["values"] == {
+            "path": "values.csv",
+            "uri": f"job://{WS}/plot-1/values.csv",
+            "rows": 1,
+            "truncated": False,
+            "csv": "gene,log2FoldChange\nGENEA,1.5",
+        }
+        assert out["provenance"][0]["sha256"] == _SHA
+        assert out["figure"] == {"path": "figure.png", "bytes": len(_PNG), "uri": f"job://{WS}/plot-1/figure.png"}
+        # The image travels as image content, never as base64 inside the text.
+        assert "data" not in out["figure"] and base64.b64encode(_PNG).decode() not in text
+        assert isinstance(image, Image)
+        assert image.to_image_content().mimeType == "image/png"
+        assert base64.b64decode(image.to_image_content().data) == _PNG
+
+    def test_a_result_without_a_figure_is_text_only_and_lists_what_is_missing(self, via_client, http):
+        http.return_value = _response(200, _result_body(
+            status="failed", exitCode=1, figure=None, values=None, provenance=None,
+            unavailable=[{"file": "figure.png", "reason": "absent"}, {"file": "values.csv", "reason": "absent"}],
+        ))
+        content = server.get_job_result(WS, "plot-1")
+        assert len(content) == 1
+        out = json.loads(content[0])
+        assert (out["status"], out["exit_code"], out["figure"], out["values"]) == ("failed", 1, None, None)
+        assert [u["file"] for u in out["unavailable"]] == ["figure.png", "values.csv"]
+
+    def test_a_figure_that_is_not_base64_is_listed_as_invalid(self, via_client, http):
+        http.return_value = _response(200, _result_body(figure={"path": "figure.png", "contentType": "image/png", "bytes": 3, "data": "not base64!"}))
+        content = server.get_job_result(WS, "plot-1")
+        assert len(content) == 1
+        out = json.loads(content[0])
+        assert out["figure"] is None
+        assert out["unavailable"] == [{"file": "figure.png", "reason": "invalid"}]
+
+    def test_a_job_not_finished_says_to_follow_it_first(self, via_client, http):
+        http.return_value = _response(409, {"reason": "job_not_finished", "message": "The job has not finished.", "status": "running"})
+        with pytest.raises(ToolError) as exc:
+            server.get_job_result(WS, "plot-1")
+        error = _error(exc)
+        assert (error["reason"], error["job_status"]) == ("job_not_finished", "running")
+        assert "workspace_job_status" in error["next_step"]
+
+    def test_another_persons_job_is_a_not_found_error(self, via_client, http):
+        http.return_value = _response(404, {"reason": "job_not_found", "message": "No job in a workspace of yours has this submission key."})
+        with pytest.raises(ToolError) as exc:
+            server.get_job_result(WS, "plot-1")
+        assert _error(exc)["reason"] == "job_not_found"
+
+    def test_a_bad_key_or_workspace_is_refused_before_any_request(self, via_client, http):
+        with pytest.raises(ToolError):
+            server.get_job_result(WS, "../x")
+        with pytest.raises(ToolError):
+            server.get_job_result("../ws", "plot-1")
+        http.assert_not_called()
+
+    def test_the_tool_is_registered_and_documents_the_output_layout(self):
+        tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+        doc = tools["get_job_result"].description
+        for name in ("outputs/<submission_key>/", "figure.png", "values.csv", "provenance.json", "script.py", "job://"):
+            assert name in doc
