@@ -97,7 +97,7 @@ Access and manage Foundry Connect reports and files.
 | `fetch_report`         | Get complete report data with metadata               |
 | `list_processes`       | List all processes that generated output in a report |
 | `list_files`           | List files (all or by specific process)              |
-| `download_file`        | Download files from reports to local machine         |
+| `download_file`        | Download a file inline, or as a link (delivery=url)  |
 | `load_file`            | View file contents directly (tabular data formatted) |
 | `upload_file`          | Upload files to reports                              |
 | `get_report_dirs`      | Get available directories for file uploads           |
