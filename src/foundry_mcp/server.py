@@ -33,7 +33,7 @@ from typing import Annotated, Optional
 from pydantic import Strict
 
 from starlette.types import ASGIApp, Receive, Scope, Send
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -7589,6 +7589,84 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     if isinstance(body, dict) and body.get("status") == "awaiting_approval" and body.get("requestId"):
         result["approve_at"] = _approve_link(workspace_id, body["requestId"])
     return json.dumps(result, indent=2)
+
+
+_JOB_RESULT_NEXT_STEPS = {
+    "job_not_finished": "Follow the job with workspace_job_status, then call get_job_result once it is completed or failed.",
+    "result_not_supported": (
+        "This job has no result to read here. Its output stays in the workspace; tell the user where it is "
+        "and abstain on its numbers."
+    ),
+}
+
+
+@mcp.tool()
+def get_job_result(workspace_id: str, submission_key: str):
+    """
+    Read the result of a finished workspace job (completed or failed): the
+    figure it drew, returned as an image, its values table capped at 500 rows,
+    its provenance blocks, its exit code, and the end of its standard output
+    and error. Read only; it starts nothing on the cluster.
+
+    The job must write its outputs to `outputs/<submission_key>/` under the
+    workspace root, which is `/workspace/outputs/<submission_key>/` inside the
+    job's container, with these names: `figure.png` (a PNG of at most 384 KiB),
+    `values.csv` (one row per plotted point or stated value, feature first),
+    `provenance.json` (a list of `{run, file, sha256, filter, rows_read}`, one
+    per input file) and `script.py` (the script itself, so the plot reruns).
+
+    Cite a value as `[src: job://<workspace_id>/<submission_key>/values.csv#row=<first column value>&col=<column>]`
+    and a provenance block with `[prov: ...]`, copied as returned. A file that
+    is missing, too large or malformed is listed in `unavailable`; then say so
+    and abstain on what it would have held. A failed job produced no numbers.
+    """
+    _check_workspace_id(workspace_id)
+    _check_submission_key(submission_key)
+    status, body = _workspace_request(
+        "GET", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}/result", retry=True,
+    )
+    if status != 200 or not isinstance(body, dict):
+        reason = body.get("reason") if isinstance(body, dict) else None
+        _workspace_error(
+            body, status, "job_result_failed", "Could not read the job's result.",
+            job_status=body.get("status") if isinstance(body, dict) else None,
+            next_step=_JOB_RESULT_NEXT_STEPS.get(reason),
+        )
+    base = f"job://{workspace_id}/{submission_key}"
+    figure = body.get("figure") if isinstance(body.get("figure"), dict) else None
+    values = body.get("values") if isinstance(body.get("values"), dict) else None
+    result = {
+        "workspace_id": workspace_id,
+        "submission_key": submission_key,
+        "status": body.get("status"),
+        "exit_code": body.get("exitCode"),
+        "output_dir": body.get("outputDir"),
+        "job_uri": base,
+        "figure": None if figure is None else {
+            "path": figure.get("path"), "bytes": figure.get("bytes"), "uri": f"{base}/{figure.get('path')}",
+        },
+        "values": None if values is None else {
+            "path": values.get("path"),
+            "uri": f"{base}/{values.get('path')}",
+            "rows": values.get("rows"),
+            "truncated": values.get("truncated"),
+            "csv": values.get("text"),
+        },
+        "provenance": body.get("provenance"),
+        "stdout": body.get("stdout"),
+        "stderr": body.get("stderr"),
+        "unavailable": body.get("unavailable") or [],
+    }
+    content = [json.dumps(result, indent=2)]
+    data = figure.get("data") if figure is not None else None
+    if isinstance(data, str) and data:
+        try:
+            content.append(Image(data=base64.b64decode(data, validate=True), format="png"))
+        except ValueError:
+            result["unavailable"].append({"file": figure.get("path"), "reason": "invalid"})
+            result["figure"] = None
+            content = [json.dumps(result, indent=2)]
+    return content
 
 
 @mcp.tool()
