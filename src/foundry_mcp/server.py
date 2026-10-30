@@ -18,6 +18,7 @@ Run with: python -m foundry_mcp.server --port 8705
 
 import json
 import logging
+import math
 import argparse
 import base64
 import gzip
@@ -696,7 +697,7 @@ def _json_cell(value):
         return None
     if hasattr(value, "item"):
         value = value.item()
-    if isinstance(value, float) and value != value:
+    if isinstance(value, float) and math.isnan(value):
         return None
     return value
 

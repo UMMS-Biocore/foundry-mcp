@@ -940,7 +940,7 @@ class TestDownloadFile:
         raw, _ = self._auto(client, b"x" * (60 * 1024))
         result = json.loads(raw)
 
-        assert list(result)[0] == "action"
+        assert next(iter(result)) == "action"
         assert result["action"] == "fetch_in_sandbox"
         assert isinstance(result["file_size"], int)
         assert result["file_size"] > 48 * 1024
