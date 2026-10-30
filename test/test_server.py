@@ -981,6 +981,33 @@ class TestDownloadFile:
         assert "too large to return inline" in result["error"]
         client.call.assert_not_called()
 
+    def test_link_answer_names_the_host_to_allow_when_the_sandbox_blocks_it(self):
+        client = self._client(route_path=self._route())
+        client.auth.hostname = "https://foundry.example.org:8443/base"
+        client.call.return_value = self._mint_ok()
+        raw, _ = self._auto(client, b"x" * (60 * 1024))
+        result = json.loads(raw)
+
+        hint = result["if_download_blocked"]
+        assert "foundry.example.org" in hint
+        assert "8443" not in hint and "/base" not in hint
+        assert "403" in hint
+        assert "allowed domains" in hint
+        assert "Settings" in hint and "Capabilities" in hint
+        assert "admin" in hint
+        assert "new chat" in hint
+        assert "retry" in hint.lower() and "inline" in hint
+        assert "if_download_blocked" in result["message"]
+        assert "/api/v1/report-download/" not in hint
+
+    def test_requested_link_also_carries_the_blocked_download_hint(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        raw, _ = self._auto(client, b"x" * 10, delivery="url")
+        result = json.loads(raw)
+
+        assert "foundry.example.com" in result["if_download_blocked"]
+
     def test_auto_mint_failure_points_at_explicit_inline(self):
         client = self._client(route_path=self._route())
         client.call.side_effect = RuntimeError("Error 305: Not Found: no route")

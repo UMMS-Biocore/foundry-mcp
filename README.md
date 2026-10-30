@@ -448,6 +448,18 @@ Edit the Claude Desktop configuration file:
 
 Restart Claude Desktop after saving for the changes to take effect.
 
+### claude.ai code sandbox
+
+`download_file` hands a large file over as a link for Claude to fetch in its
+code sandbox. On claude.ai that sandbox reaches only allowlisted hosts, so add
+your Foundry Connect host first: Settings, Capabilities, Code execution and
+file creation, set network egress to **Package managers and specific domains**
+and add the host under **Additional allowed domains**. On a Team or Enterprise
+plan an org admin does this in Admin settings, Capabilities. Then start a new
+chat. Without it the download fails with HTTP 403, and the link answer's
+`if_download_blocked` tells Claude to say so. Claude Code and other local
+clients need nothing.
+
 ### Cursor / VS Code
 
 Foundry Connect generates a ready-to-use config snippet when you create your token — select **Cursor** or **VS Code** from the dropdown and click **Copy Code**. Paste it into:

@@ -31,6 +31,17 @@
     `list_results(run_id)`.
 
 ### Added
+- **Say which host the claude.ai code sandbox must allow**
+  - The `download_file` link answer carries `if_download_blocked`, naming
+    the Foundry host from the link: if the sandbox refuses the download
+    (HTTP 403 from a proxy, connection rejected), Claude tells the user to
+    add that host under claude.ai Settings, Capabilities, allowed domains
+    (or ask an org admin), then start a new chat, rather than retrying or
+    asking for the file inline.
+  - `get_started` adds a `next_steps` line with the same reminder, naming
+    the configured Foundry host when a client can be built and using
+    generic wording otherwise. The results recipe points at
+    `if_download_blocked`.
 - **Ask `download_file` for a link at any size**
   - `download_file` takes an optional `delivery`: `auto` (the default, and
     the behaviour so far: inline base64 up to 5MB, a link above), `url` (a

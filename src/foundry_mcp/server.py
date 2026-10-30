@@ -32,6 +32,7 @@ import os
 import uuid
 import requests
 from typing import Annotated, Optional
+from urllib.parse import urlparse
 
 from pydantic import Strict
 
@@ -404,6 +405,32 @@ _ROUTE_PATH_ATTEMPT = re.compile(
 _DOWNLOAD_LINK_PATH = re.compile(r"^/api/v1/report-download/[A-Za-z0-9._-]+\Z")
 
 
+_ALLOWLIST_STEPS = (
+    "claude.ai Settings, Capabilities, Code execution and file creation: set "
+    "network egress to Package managers and specific domains and add {host} under "
+    "Additional allowed domains (on a Team or Enterprise plan an org admin does "
+    "this in Admin settings, Capabilities), then start a new chat"
+)
+
+
+def _url_host(url) -> Optional[str]:
+    """The bare host name of a URL, or None when there is none."""
+    try:
+        return urlparse(url).hostname if isinstance(url, str) else None
+    except ValueError:
+        return None
+
+
+def _download_blocked_hint(host: str) -> str:
+    """What to tell the user when a code sandbox refuses to reach host."""
+    return (
+        "If the sandbox refuses this download (HTTP 403 from a proxy, connection "
+        f"rejected, host not allowed), its network allowlist does not include {host}. "
+        "Do not retry and do not ask for the file inline. Tell the user to open "
+        + _ALLOWLIST_STEPS.format(host=host) + "."
+    )
+
+
 def _size_text(num_bytes) -> str:
     """Write a byte limit the way the messages say it: 5MB, 48KB or 10 bytes."""
     if num_bytes >= 1024 * 1024 and num_bytes % (1024 * 1024) == 0:
@@ -508,7 +535,11 @@ def _signed_download_link(via_client, report_id, file_path, route_path, limit_by
             + "Run download_command in your code sandbox to fetch the file there, then work "
             "on it with code. Do not call download_file again with delivery='inline' to read "
             "it in the conversation. The link is for this one file and "
-            f"{expiry}. Calling download_file again gives a new link."
+            f"{expiry}. Calling download_file again gives a new link. If the "
+            "sandbox refuses the download, follow if_download_blocked."
+        ),
+        "if_download_blocked": _download_blocked_hint(
+            _url_host(download_url) or "this Foundry Connect host"
         ),
     })
     return json.dumps(answer, indent=2)
@@ -4994,7 +5025,9 @@ _RECIPES = [
             "Lead with this, not with a file list.",
             "list_results(run_id='<id>') — the outputs grouped by what they "
             "are, if the user wants the files themselves. Pass a file's "
-            "`file_path` verbatim to load_file or download_file.",
+            "`file_path` verbatim to load_file or download_file. If a code "
+            "sandbox refuses download_file's download_command, tell the user "
+            "what its if_download_blocked says.",
             "suggest_apps(run_id='<id>') — which viewer opens these results, "
             "then launch_app to open it (confirm with the user first).",
         ],
@@ -5041,6 +5074,25 @@ _RECIPE_TOPICS = {
 }
 
 
+def _sandbox_allowlist_reminder() -> str:
+    """Remind the model that claude.ai's code sandbox reaches only allowlisted
+    hosts. Names this server's Foundry host when a client can be built, and
+    uses generic wording otherwise, so get_started never fails over it."""
+    host = None
+    try:
+        host = _url_host(get_client().auth.hostname)
+    except Exception as e:
+        logger.debug(f"No Foundry host for the sandbox reminder: {type(e).__name__}")
+    host = host or "this Foundry Connect host"
+    return (
+        f"To analyse files in claude.ai's code sandbox, {host} must be on the "
+        "sandbox's allowed domains. If a download_command is refused (HTTP 403 "
+        "from a proxy), tell the user to open "
+        + _ALLOWLIST_STEPS.format(host=host)
+        + ". Claude Code and other local clients need nothing."
+    )
+
+
 @mcp.tool()
 def get_started(topic: str = "") -> str:
     """
@@ -5079,6 +5131,7 @@ def get_started(topic: str = "") -> str:
                 "asked for; each step names the exact tool to call.",
                 "Launching a run uses HPC compute — always confirm with the "
                 "user before initiate_run.",
+                _sandbox_allowlist_reminder(),
             ],
         )
         return json.dumps(result, indent=2)
