@@ -62,6 +62,12 @@ MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
 # returns a download link instead of the bytes.
 INLINE_DOWNLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5MB
 
+# Largest file download_file returns inline when the caller did not choose a
+# delivery. Base64 of 48KB is about 64k characters, which still fits a client
+# that truncates long tool results near 100k. Anything larger gets a link the
+# model fetches in its code sandbox. delivery="inline" keeps the 5MB cap.
+AUTO_INLINE_MAX_BYTES = 48 * 1024  # 49152 bytes
+
 # How download_file may hand a file back. "auto" keeps the size based choice,
 # "url" always mints a link, "inline" only ever returns the bytes.
 DOWNLOAD_DELIVERY_MODES = ("auto", "url", "inline")
@@ -359,20 +365,44 @@ _ROUTE_PATH_ATTEMPT = re.compile(
 _DOWNLOAD_LINK_PATH = re.compile(r"^/api/v1/report-download/[A-Za-z0-9._-]+\Z")
 
 
-def _signed_download_link(via_client, report_id, file_path, route_path, limit_mb, requested=False) -> str:
+def _size_text(num_bytes) -> str:
+    """Write a byte limit the way the messages say it: 5MB, 48KB or 10 bytes."""
+    if num_bytes >= 1024 * 1024 and num_bytes % (1024 * 1024) == 0:
+        return f"{num_bytes // (1024 * 1024)}MB"
+    if num_bytes >= 1024 and num_bytes % 1024 == 0:
+        return f"{num_bytes // 1024}KB"
+    return f"{num_bytes} bytes"
+
+
+def _metadata_file_size(file_details):
+    """The fileSize the report lists for a file, as an int, or None when absent."""
+    if "fileSize" not in file_details.columns:
+        return None
+    value = file_details["fileSize"].iloc[0]
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _signed_download_link(via_client, report_id, file_path, route_path, limit_bytes,
+                          requested=False, file_size=None) -> str:
     """Ask the server for a signed, expiring link to one file and format the answer.
 
     requested is True when the caller asked for a link (delivery="url"), so the
-    answer never claims the file was too large. Never falls back to the plain
-    report resource URL.
+    answer never claims the file was too large. limit_bytes is the inline limit
+    that applied, and file_size is the size to report when one is known. Never
+    falls back to the plain report resource URL.
     """
+    limit_text = _size_text(limit_bytes)
+    inline_text = _size_text(INLINE_DOWNLOAD_MAX_BYTES)
+    retry_hint = {"hint": "Call download_file again with delivery='inline' to get a file up to "
+                          f"{inline_text} inline as base64."}
     if requested:
         reason = "A download link was requested"
-        retry_hint = {"hint": "Call download_file again with delivery='auto' to get a file up to "
-                              f"{limit_mb:.0f}MB inline as base64."}
     else:
-        reason = f"File is larger than {limit_mb:.0f}MB, too large to return inline,"
-        retry_hint = {}
+        reason = f"File is larger than {limit_text}, too large to return inline,"
     match = _ROUTE_PATH_ATTEMPT.match(str(route_path))
     if not match:
         return json.dumps({
@@ -419,54 +449,71 @@ def _signed_download_link(via_client, report_id, file_path, route_path, limit_mb
         if c not in "/\\" and unicodedata.category(c) not in ("Cc", "Cf")
     )
     link_name = link_name or "download"
-    return json.dumps({
+    expires_at = minted.get("expiresAt")
+    expiry = f"expires at {expires_at}" if expires_at else "expires in about 15 minutes"
+    answer = {
+        "action": "fetch_in_sandbox",
         "success": True,
         "delivery": "url",
         "file_name": link_name,
+    }
+    if file_size is not None:
+        answer["file_size"] = file_size
+    answer.update({
         "download_url": download_url,
         "download_command": f"curl -fL -o {shlex.quote('./' + link_name)} {shlex.quote(download_url)}",
-        "expires_at": minted.get("expiresAt"),
+        "expires_at": expires_at,
         "message": (
             ("Download link created as requested. " if requested else
-             f"File is larger than {limit_mb:.0f}MB, too large to return inline. ")
-            + "Run download_command to save it to disk, or open download_url in a browser. "
-            "The link is for this one file and expires in about 15 minutes."
-        )
-    }, indent=2)
+             f"File is larger than {limit_text}, too large to return inline. ")
+            + "Run download_command in your code sandbox to fetch the file there, then work "
+            "on it with code. Do not call download_file again with delivery='inline' to read "
+            "it in the conversation. The link is for this one file and "
+            f"{expiry}. Calling download_file again gives a new link."
+        ),
+    })
+    return json.dumps(answer, indent=2)
 
 
 @mcp.tool()
 def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str:
     """
     Download a file from a report.
-    By default (delivery="auto") a file up to 5MB comes back inline as base64
-    ("delivery": "inline") and a larger file comes back as a link
+    By default (delivery="auto") a file up to 48KB comes back inline as
+    base64 ("delivery": "inline") and a larger file comes back as a link
     ("delivery": "url") with a ready curl command.
+
+    A link answer starts with "action": "fetch_in_sandbox". Run its
+    download_command in your code sandbox and work on the file there. Do not
+    ask for the same file again with delivery="inline": inline base64 counts
+    against the tool result, and a client that truncates long tool results
+    (some cut off near 100k characters, which is about 75KB of file)
+    corrupts it.
 
     Pass delivery="url" when you will process the file in a code sandbox or
     any shell that can run curl: you get the link at any size, so the bytes
-    never pass through the conversation. Inline base64 counts against the
-    tool result, and a client that truncates long tool results (some cut off
-    near 100k characters, which is about 75KB of file) corrupts it. Pass
-    delivery="inline" only when you need the bytes in the conversation; a
-    file over 5MB is then refused rather than linked.
+    never pass through the conversation. Pass delivery="inline" only when you
+    need the bytes in the conversation and no sandbox is available; a file up
+    to 5MB then comes back inline, and a larger one is refused rather than
+    linked. To read part of a table, use load_file instead.
 
-    Run download_command to save a linked file to disk. The link is for that
-    one file and expires in about 15 minutes. It keeps working until then
-    even if the token used to request it is revoked, so ask for a new link
-    rather than reusing an old one.
+    The link is for that one file and expires at expires_at, about 15
+    minutes after it is issued. It keeps working until then even if the token
+    used to request it is revoked. Calling download_file again gives a new
+    link, so ask for one rather than reusing an old one.
 
     Args:
         report_id: The ID of the report containing the file.
         file_path: The path of the file within the report (from list_files output).
-        delivery: "auto" (default; inline up to 5MB, a link above), "url"
+        delivery: "auto" (default; inline up to 48KB, a link above), "url"
             (always a link, best for a code sandbox), or "inline" (always the
             bytes, refused above 5MB).
 
     Returns:
         Inline: JSON with file_name, file_content_base64, and file_size.
         The client should decode the base64 content and save to disk.
-        Link: JSON with file_name, download_url, download_command, and expires_at.
+        Link: JSON with action ("fetch_in_sandbox"), file_name, file_size
+        (when known), download_url, download_command, expires_at and message.
 
     Example:
         # Get the file content (returns JSON string)
@@ -487,7 +534,10 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
                 + ", ".join(f"'{m}'" for m in DOWNLOAD_DELIVERY_MODES) + "."
             )
         }, indent=2)
-    limit_mb = INLINE_DOWNLOAD_MAX_BYTES / (1024 * 1024)
+    if mode == "inline":
+        limit_bytes = INLINE_DOWNLOAD_MAX_BYTES
+    else:
+        limit_bytes = min(AUTO_INLINE_MAX_BYTES, INLINE_DOWNLOAD_MAX_BYTES)
 
     try:
         via_client = get_client()
@@ -521,10 +571,13 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
                 "hint": "The file may not be accessible for download"
             }, indent=2)
         
+        listed_size = _metadata_file_size(file_details)
+
         # A requested link needs no size probe, so no body is read at all.
         if mode == "url":
             return _signed_download_link(
-                via_client, report_id, file_path, route_path, limit_mb, requested=True
+                via_client, report_id, file_path, route_path, limit_bytes,
+                requested=True, file_size=listed_size,
             )
 
         # Build the file URL
@@ -557,7 +610,7 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
             too_large = False
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 content.extend(chunk)
-                if len(content) > INLINE_DOWNLOAD_MAX_BYTES:
+                if len(content) > limit_bytes:
                     too_large = True
                     break
         finally:
@@ -565,13 +618,16 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
 
         if too_large and mode == "inline":
             return json.dumps({
-                "error": f"File is larger than {limit_mb:.0f}MB, too large to return inline.",
+                "error": f"File is larger than {_size_text(limit_bytes)}, too large to return inline.",
                 "hint": "Call download_file again with delivery='url' to get a download link instead."
             }, indent=2)
 
         if too_large:
-            logger.info(f"File '{file_name}' is over {limit_mb:.0f}MB, requesting a download link")
-            return _signed_download_link(via_client, report_id, file_path, route_path, limit_mb)
+            logger.info(f"File '{file_name}' is over {_size_text(limit_bytes)}, requesting a download link")
+            return _signed_download_link(
+                via_client, report_id, file_path, route_path, limit_bytes,
+                file_size=listed_size if listed_size is not None else len(content),
+            )
 
         content_size = len(content)
         file_content_base64 = base64.b64encode(bytes(content)).decode('utf-8')

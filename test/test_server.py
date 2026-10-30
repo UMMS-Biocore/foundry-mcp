@@ -821,7 +821,7 @@ class TestDownloadFile:
 
         assert "larger than" not in result["error"]
         assert "did not issue a download link" in result["error"]
-        assert "delivery='auto'" in result["hint"]
+        assert "delivery='inline'" in result["hint"]
         assert "download_url" not in result
         assert "report-resources" not in raw
 
@@ -838,7 +838,7 @@ class TestDownloadFile:
 
         assert "does not issue download links" in result["error"]
         assert "larger than" not in result["error"]
-        assert "delivery='auto'" in result["hint"]
+        assert "delivery='inline'" in result["hint"]
 
     def test_delivery_url_still_reports_a_missing_file(self):
         client = self._client(route_path=self._route())
@@ -901,3 +901,92 @@ class TestDownloadFile:
             assert value in result["error"]
         mock_client.assert_not_called()
         mock_get.assert_not_called()
+
+    # Auto mode inlines only small files; anything larger is a link for a sandbox.
+
+    def _auto(self, client, body, chunk=4096, delivery="auto"):
+        chunks = [body[i:i + chunk] for i in range(0, len(body), chunk)]
+        response = self._response(chunks)
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response):
+            raw = server.download_file(report_id="77", file_path="out/file.txt", delivery=delivery)
+        return raw, response
+
+    def test_auto_links_a_49_kib_file(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        raw, response = self._auto(client, b"x" * (49 * 1024))
+        result = json.loads(raw)
+
+        assert result["delivery"] == "url"
+        assert "file_content_base64" not in result
+        client.call.assert_called_once()
+        response.close.assert_called()
+
+    def test_auto_inlines_a_47_kib_file(self):
+        import base64
+        client = self._client(route_path=self._route())
+        body = b"y" * (47 * 1024)
+        raw, _ = self._auto(client, body)
+        result = json.loads(raw)
+
+        assert result["delivery"] == "inline"
+        assert base64.b64decode(result["file_content_base64"]) == body
+        client.call.assert_not_called()
+
+    def test_auto_link_reply_leads_with_the_sandbox_action(self):
+        client = self._client(route_path=self._route())
+        client.call.return_value = self._mint_ok()
+        raw, _ = self._auto(client, b"x" * (60 * 1024))
+        result = json.loads(raw)
+
+        assert list(result)[0] == "action"
+        assert result["action"] == "fetch_in_sandbox"
+        assert isinstance(result["file_size"], int)
+        assert result["file_size"] > 48 * 1024
+        message = result["message"]
+        assert "download_command" in message
+        assert "sandbox" in message
+        assert "delivery='inline'" in message
+        assert "2026-10-17T12:15:00Z" in message
+        assert "again" in message
+
+    def test_auto_link_file_size_comes_from_report_metadata(self):
+        import pandas as pd
+        client = self._client(route_path=self._route())
+        client.reports.get_all_files.return_value = pd.DataFrame(
+            [{"file_path": "out/file.txt", "routePath": self._route(), "fileSize": 7340032}]
+        )
+        client.call.return_value = self._mint_ok()
+        raw, _ = self._auto(client, b"x" * (60 * 1024))
+
+        assert json.loads(raw)["file_size"] == 7340032
+
+    def test_explicit_inline_still_returns_a_file_just_under_5_mb(self):
+        import base64
+        client = self._client(route_path=self._route())
+        body = b"z" * (5 * 1024 * 1024 - 1)
+        raw, _ = self._auto(client, body, chunk=1024 * 1024, delivery="inline")
+        result = json.loads(raw)
+
+        assert result["delivery"] == "inline"
+        assert len(base64.b64decode(result["file_content_base64"])) == len(body)
+        client.call.assert_not_called()
+
+    def test_explicit_inline_refuses_a_file_over_5_mb(self):
+        client = self._client(route_path=self._route())
+        raw, _ = self._auto(client, b"z" * (5 * 1024 * 1024 + 1), chunk=1024 * 1024, delivery="inline")
+        result = json.loads(raw)
+
+        assert "too large to return inline" in result["error"]
+        client.call.assert_not_called()
+
+    def test_auto_mint_failure_points_at_explicit_inline(self):
+        client = self._client(route_path=self._route())
+        client.call.side_effect = RuntimeError("Error 305: Not Found: no route")
+        raw, _ = self._auto(client, b"x" * (60 * 1024))
+        result = json.loads(raw)
+
+        assert "did not issue a download link" in result["error"]
+        assert "delivery='inline'" in result["hint"]
+
