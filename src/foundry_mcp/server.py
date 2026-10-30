@@ -357,13 +357,24 @@ def list_files(report_id: str, process_name: str = None) -> str:
             return json.dumps({"files": files_df.to_dict(orient='records')}, indent=2)
 
         all_files = via_client.reports.get_all_files(report_data)
-        process_names = sorted({str(p) for p in all_files["processName"].dropna()})
+        process_names = sorted(
+            {str(p) for p in all_files["processName"].dropna()}
+            if "processName" in all_files.columns else set()
+        )
         if process_name in process_names:
             files_df = via_client.reports.get_file_names(report_data, process_name)
             return json.dumps({"files": files_df.to_dict(orient='records')}, indent=2)
 
-        folder = process_name.strip().strip("/")
-        paths = all_files["file_path"].fillna("").astype(str)
+        import pandas as pd
+
+        folder = process_name.strip()
+        while folder.startswith("./"):
+            folder = folder[2:]
+        folder = folder.strip("/")
+        if "file_path" in all_files.columns:
+            paths = all_files["file_path"].fillna("").astype(str)
+        else:
+            paths = pd.Series([], dtype=str)
         in_folder = all_files[paths.str.startswith(folder + "/")] if folder else all_files.iloc[0:0]
         if not in_folder.empty:
             return json.dumps({

@@ -1333,6 +1333,21 @@ class TestListFiles:
         assert "summary" in result["available_folders"]
         assert "list_results(" in result["hint"]
 
+    def test_folder_fallback_accepts_a_dot_slash_prefix(self):
+        result = self._list(self._client(), process_name="./summary")
+
+        assert [f["file_path"] for f in result["files"]] == ["summary/overall_summary.tsv"]
+
+    def test_empty_report_gives_the_no_match_error(self):
+        import pandas as pd
+        client = self._client()
+        client.reports.get_all_files.return_value = pd.DataFrame()
+        result = self._list(client, process_name="summary")
+
+        assert "No process or top level folder" in result["error"]
+        assert result["available_processes"] == []
+        assert result["available_folders"] == []
+
     def test_no_process_name_lists_everything(self):
         result = self._list(self._client())
 
