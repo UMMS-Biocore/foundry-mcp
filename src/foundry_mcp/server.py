@@ -20,7 +20,9 @@ import json
 import logging
 import argparse
 import base64
+import gzip
 import html
+import io
 import re
 import shlex
 import tempfile
@@ -651,37 +653,254 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
         return json.dumps({"error": message})
 
 
+LOAD_FILE_DEFAULT_LIMIT = 200
+LOAD_FILE_MAX_LIMIT = 2000
+# Stop adding rows once the answer reaches this many characters, so a page
+# stays well inside a client that truncates long tool results.
+LOAD_FILE_MAX_CHARS = 80_000
+# A file that is not a table comes back as text only up to this size.
+LOAD_FILE_TEXT_MAX_BYTES = 64 * 1024
+LOAD_FILE_FORMATS = ("split", "records")
+_TABULAR_EXTENSIONS = ("csv", "tsv", "txt")
+
+
+class _ChunkReader(io.RawIOBase):
+    """A read only file over an iterator of byte chunks.
+
+    A parser on top pulls only the bytes it needs, so the rest of a streamed
+    body is never downloaded.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+        self._pending = b""
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        while not self._pending:
+            try:
+                self._pending = next(self._chunks)
+            except StopIteration:
+                return 0
+        count = min(len(buffer), len(self._pending))
+        buffer[:count] = self._pending[:count]
+        self._pending = self._pending[count:]
+        return count
+
+
+def _json_cell(value):
+    """A table cell as a JSON value: numpy scalars become Python, NaN becomes null."""
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, float) and value != value:
+        return None
+    return value
+
+
+def _read_table_page(stream, separator, offset, limit, columns, fmt, file_path):
+    """Read one page of a delimited table from a byte stream and shape the answer."""
+    import pandas as pd
+
+    text = io.TextIOWrapper(stream, encoding="utf-8", errors="replace", newline="")
+    try:
+        frame = pd.read_csv(
+            text,
+            sep=separator,
+            skiprows=(lambda index: 0 < index <= offset) if offset else None,
+            nrows=limit + 1,
+            usecols=columns,
+        )
+    except ValueError as e:
+        return {
+            "error": f"Could not read '{file_path}' as a table: {e}",
+            "hint": "Check the separator, or leave out columns to see every column name.",
+        }
+    if columns:
+        frame = frame[columns]
+    more_rows = len(frame) > limit
+    frame = frame.iloc[:limit]
+    names = [str(c) for c in frame.columns]
+    rows = [[_json_cell(v) for v in row] for row in frame.itertuples(index=False, name=None)]
+
+    rows_field = "rows" if fmt == "split" else "data"
+    answer = {
+        "type": "dataframe",
+        "format": fmt,
+        "file_path": file_path,
+        "columns": names,
+        "offset": offset,
+        "limit": limit,
+        "returned": 0,
+        "has_more": True,
+        "next_offset": offset + limit,
+        "truncated": True,
+        rows_field: [],
+    }
+    budget = LOAD_FILE_MAX_CHARS - len(json.dumps(answer, separators=(",", ":")))
+    kept = []
+    used = 0
+    truncated = False
+    for row in rows:
+        item = row if fmt == "split" else dict(zip(names, row))
+        size = len(json.dumps(item, separators=(",", ":"), default=str)) + 1
+        if used + size > budget:
+            truncated = True
+            break
+        kept.append(item)
+        used += size
+
+    if truncated and not kept:
+        return {
+            "error": (
+                f"Row {offset} of '{file_path}' alone is larger than the "
+                f"{LOAD_FILE_MAX_CHARS} character limit for one answer."
+            ),
+            "hint": "Pass columns to select fewer columns, or call download_file with "
+                    "delivery='url' and read the file in your code sandbox.",
+        }
+
+    has_more = truncated or more_rows
+    answer.update({
+        "returned": len(kept),
+        "has_more": has_more,
+        "next_offset": offset + len(kept) if has_more else None,
+        "truncated": truncated,
+        rows_field: kept,
+    })
+    return answer
+
+
+def _read_small_text(stream, file_path):
+    """Return a file that is not a table as text, or refuse it when it is large."""
+    data = stream.read(LOAD_FILE_TEXT_MAX_BYTES + 1)
+    if len(data) > LOAD_FILE_TEXT_MAX_BYTES:
+        return {
+            "error": (
+                f"'{file_path}' is not a table and is larger than "
+                f"{_size_text(LOAD_FILE_TEXT_MAX_BYTES)}, too large to return as text."
+            ),
+            "hint": "Call download_file(report_id, file_path, delivery='url') and read the "
+                    "file in your code sandbox.",
+        }
+    return {"type": "text", "file_path": file_path, "content": data.decode("utf-8", errors="replace")}
+
+
 @mcp.tool()
-def load_file(report_id: str, file_path: str, separator: str = "\t") -> str:
+def load_file(
+    report_id: str,
+    file_path: str,
+    separator: Optional[str] = None,
+    offset: int = 0,
+    limit: int = LOAD_FILE_DEFAULT_LIMIT,
+    columns: Optional[list[str]] = None,
+    format: str = "split",
+) -> str:
     """
-    Load and return the contents of a file from a report. For tabular files
-    (CSV, TSV, TXT), returns a formatted table. For other files, returns raw content.
-    Use this when you need to analyze file contents without downloading.
+    Read one page of a table from a report, or a small text file.
+
+    Tabular files (.csv, .tsv, .txt, also gzipped as .gz) come back a page at
+    a time: "columns" once, then "rows" as arrays in the same order. The
+    answer carries offset, returned, has_more and next_offset; to read on,
+    call again with offset=next_offset. A page stops early when the answer
+    reaches about 80,000 characters, and then "truncated" is true. Only the
+    rows needed are downloaded, so a large table is cheap to sample.
+
+    Any other file comes back as text when it is at most 64KB, and is refused
+    above that. To work with a whole large file, call download_file with
+    delivery='url' and read it in your code sandbox.
+
+    Note: report_id is the same as run_id.
+
+    Args:
+        report_id: The ID of the report containing the file.
+        file_path: The path of the file within the report (from list_files output).
+        separator: Column separator. Default: a comma for .csv, a tab otherwise.
+        offset: Number of data rows to skip; the header is always kept. Default 0.
+        limit: Most rows to return, from 1 to 2000 (clamped). Default 200.
+        columns: Column names to return, in this order. Default: every column.
+        format: "split" (default; "columns" plus "rows" as arrays) or
+            "records" (each row an object, under "data"). Both are paged.
     """
+    fmt = str(format).strip().lower() if format is not None else "split"
+    if fmt not in LOAD_FILE_FORMATS:
+        return json.dumps({
+            "error": f"Unknown format {format!r}. Use one of: "
+                     + ", ".join(f"'{f}'" for f in LOAD_FILE_FORMATS) + "."
+        })
+    try:
+        offset = max(0, int(offset or 0))
+        limit = int(limit if limit is not None else LOAD_FILE_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "offset and limit must be whole numbers."})
+    limit = max(1, min(limit, LOAD_FILE_MAX_LIMIT))
+    if isinstance(columns, str):
+        columns = [c.strip() for c in columns.split(",") if c.strip()]
+    columns = [str(c) for c in columns] if columns else None
+
     try:
         via_client = get_client()
-        logger.info(f"Loading file {file_path} from report {report_id}")
-        
+        logger.info(f"Loading file {file_path} from report {report_id} (offset={offset}, limit={limit})")
+
         report_data = via_client.reports.fetch_report_data(report_id)
-        content = via_client.reports.load_file(report_data, file_path, sep=separator)
-        
-        if hasattr(content, 'to_dict'):
-            result = {
-                "type": "dataframe",
-                "data": content.to_dict(orient='records'),
-                "shape": content.shape,
-                "columns": list(content.columns)
-            }
-        else:
-            result = {
-                "type": "text",
-                "content": str(content)
-            }
-        
-        return json.dumps(result, indent=2)
+        files_df = via_client.reports.get_all_files(report_data)
+        file_details = files_df[files_df["file_path"] == file_path]
+        if file_details.empty:
+            return json.dumps({
+                "error": f"File '{file_path}' not found in report",
+                "hint": "Use list_files(report_id) to see available files"
+            })
+        route_path = file_details["routePath"].iloc[0] if "routePath" in file_details.columns else None
+        if not route_path or route_path != route_path:
+            return json.dumps({"error": f"File '{file_path}' has no download path available"})
+
+        name = os.path.basename(file_path).lower()
+        compressed = name.endswith(".gz")
+        inner = name[:-3] if compressed else name
+        extension = inner.rsplit(".", 1)[-1] if "." in inner else ""
+        tabular = extension in _TABULAR_EXTENSIONS
+        sep = separator if separator else ("," if extension == "csv" else "\t")
+
+        # Stream the body; the parser pulls only the rows it needs.
+        try:
+            response = requests.get(
+                via_client.auth.hostname + route_path,
+                headers=via_client.auth.get_headers(), timeout=(20, 300), stream=True,
+            )
+        except Exception as fetch_error:
+            logger.error(f"File fetch failed: {type(fetch_error).__name__}")
+            return json.dumps({
+                "error": f"Could not reach the server to read the file ({type(fetch_error).__name__})"
+            })
+        try:
+            if response.status_code != 200:
+                reason = str(getattr(response, "reason", "Unknown"))
+                if "report-resources" in reason:
+                    reason = "Unknown"
+                return json.dumps({
+                    "error": f"Failed to read file: HTTP {response.status_code} {reason}",
+                    "status_code": response.status_code,
+                })
+            stream = io.BufferedReader(_ChunkReader(response.iter_content(chunk_size=64 * 1024)))
+            if compressed:
+                stream = gzip.GzipFile(fileobj=stream)
+            if tabular:
+                result = _read_table_page(stream, sep, offset, limit, columns, fmt, file_path)
+            else:
+                result = _read_small_text(stream, file_path)
+        finally:
+            response.close()
+
+        return json.dumps(result, separators=(",", ":"), default=str)
     except Exception as e:
         logger.error(f"Error loading file: {e}")
-        return json.dumps({"error": str(e)})
+        message = str(e)
+        if "report-resources" in message:
+            message = f"Error loading file ({type(e).__name__})"
+        return json.dumps({"error": message})
 
 
 @mcp.tool()

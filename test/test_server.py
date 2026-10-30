@@ -990,3 +990,214 @@ class TestDownloadFile:
         assert "did not issue a download link" in result["error"]
         assert "delivery='inline'" in result["hint"]
 
+
+def _tsv(rows, header="gene\tcount\tpadj"):
+    return (header + "\n" + "".join(rows)).encode()
+
+
+def _gene_rows(n):
+    return [f"g{i}\t{i}\t0.{i}\n" for i in range(n)]
+
+
+class TestLoadFile:
+    """Tests for the load_file tool.
+
+    These mock the SDK client and the streamed HTTP body. They prove the tool
+    pages a table, keeps each answer small and stops reading early. They do
+    not exercise a real deployment.
+    """
+
+    def _client(self, file_path="out/table.tsv", extension=None, file_size=None):
+        import pandas as pd
+        client = MagicMock()
+        client.auth.hostname = "https://foundry.example.com"
+        client.auth.get_headers.return_value = {"Authorization": "Bearer via_mcp_test-token"}
+        client.reports.get_all_files.return_value = pd.DataFrame([{
+            "file_path": file_path,
+            "routePath": "/report-resources/run1/pubweb/" + file_path,
+            "extension": extension or file_path.rsplit(".", 1)[-1],
+            "fileSize": file_size,
+        }])
+        return client
+
+    def _load(self, client, body, chunk=4096, chunks=None, **kwargs):
+        if chunks is None:
+            chunks = iter([body[i:i + chunk] for i in range(0, len(body), chunk)])
+        response = MagicMock()
+        response.status_code = 200
+        response.iter_content.return_value = chunks
+        file_path = kwargs.pop("file_path", "out/table.tsv")
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response) as mock_get:
+            raw = server.load_file(report_id="5", file_path=file_path, **kwargs)
+        return raw, response, mock_get
+
+    def test_pages_with_offset_and_limit(self):
+        client = self._client()
+        raw, response, mock_get = self._load(client, _tsv(_gene_rows(100)), offset=10, limit=5)
+        result = json.loads(raw)
+
+        assert mock_get.call_args.kwargs["stream"] is True
+        client.reports.load_file.assert_not_called()
+        assert result["columns"] == ["gene", "count", "padj"]
+        assert result["rows"][0] == ["g10", 10, 0.1]
+        assert [r[0] for r in result["rows"]] == ["g10", "g11", "g12", "g13", "g14"]
+        assert result["offset"] == 10
+        assert result["returned"] == 5
+        assert result["has_more"] is True
+        assert result["next_offset"] == 15
+        assert result.get("truncated") is not True
+        assert "data" not in result
+        response.close.assert_called()
+
+    def test_last_page_has_no_more(self):
+        client = self._client()
+        raw, _, _ = self._load(client, _tsv(_gene_rows(100)), offset=95, limit=10)
+        result = json.loads(raw)
+
+        assert result["returned"] == 5
+        assert result["has_more"] is False
+        assert result["next_offset"] is None
+
+    def test_default_limit_is_200(self):
+        client = self._client()
+        raw, _, _ = self._load(client, _tsv(_gene_rows(500)))
+        result = json.loads(raw)
+
+        assert result["returned"] == 200
+        assert result["next_offset"] == 200
+
+    def test_selects_columns(self):
+        client = self._client()
+        raw, _, _ = self._load(client, _tsv(_gene_rows(10)), columns=["gene", "padj"], limit=3)
+        result = json.loads(raw)
+
+        assert result["columns"] == ["gene", "padj"]
+        assert result["rows"] == [["g0", 0.0], ["g1", 0.1], ["g2", 0.2]]
+
+    def test_unknown_column_is_an_error(self):
+        client = self._client()
+        raw, _, _ = self._load(client, _tsv(_gene_rows(10)), columns=["nope"])
+
+        assert "nope" in json.loads(raw)["error"]
+
+    def test_reads_a_gzipped_tsv(self):
+        import gzip
+        client = self._client(file_path="out/table.tsv.gz", extension="gz")
+        body = gzip.compress(_tsv(_gene_rows(50)))
+        raw, _, _ = self._load(client, body, chunk=97, file_path="out/table.tsv.gz", offset=2, limit=3)
+        result = json.loads(raw)
+
+        assert result["columns"] == ["gene", "count", "padj"]
+        assert [r[0] for r in result["rows"]] == ["g2", "g3", "g4"]
+        assert result["has_more"] is True
+
+    def test_csv_uses_a_comma_by_default(self):
+        client = self._client(file_path="out/table.csv")
+        body = b"a,b\n1,2\n3,4\n"
+        raw, _, _ = self._load(client, body, file_path="out/table.csv")
+        result = json.loads(raw)
+
+        assert result["columns"] == ["a", "b"]
+        assert result["rows"] == [[1, 2], [3, 4]]
+
+    def test_payload_cap_sets_truncated(self):
+        client = self._client()
+        wide = "w" * 1000
+        rows = [f"g{i}\t{i}\t{wide}\n" for i in range(500)]
+        raw, _, _ = self._load(client, _tsv(rows), offset=4, limit=2000)
+        result = json.loads(raw)
+
+        assert result["truncated"] is True
+        assert 0 < result["returned"] < 500
+        assert len(raw) <= 82_000
+        assert result["has_more"] is True
+        assert result["next_offset"] == 4 + result["returned"]
+        assert result["rows"][-1][0] == f"g{4 + result['returned'] - 1}"
+
+    def test_limit_is_clamped_to_2000(self):
+        client = self._client()
+        rows = [f"{i}\t1\n" for i in range(3000)]
+        raw, _, _ = self._load(client, _tsv(rows, header="a\tb"), limit=5000)
+        result = json.loads(raw)
+
+        assert result["limit"] == 2000
+        assert result["returned"] == 2000
+        assert result["has_more"] is True
+        assert result["next_offset"] == 2000
+
+    def test_closes_the_stream_early(self):
+        client = self._client()
+        total = 200_000
+        consumed = []
+
+        def chunks():
+            yield b"gene\tcount\tpadj\n"
+            for i in range(total):
+                consumed.append(1)
+                yield f"g{i}\t{i}\t0.5\n".encode()
+
+        raw, response, _ = self._load(client, None, chunks=chunks(), limit=5)
+        result = json.loads(raw)
+
+        assert result["returned"] == 5
+        assert len(consumed) < total
+        response.close.assert_called()
+
+    def test_records_format_is_still_available_and_paged(self):
+        client = self._client()
+        raw, _, _ = self._load(client, _tsv(_gene_rows(20)), format="records", offset=3, limit=2)
+        result = json.loads(raw)
+
+        assert result["data"] == [
+            {"gene": "g3", "count": 3, "padj": 0.3},
+            {"gene": "g4", "count": 4, "padj": 0.4},
+        ]
+        assert result["columns"] == ["gene", "count", "padj"]
+        assert result["next_offset"] == 5
+
+    def test_unknown_format_is_rejected(self):
+        client = self._client()
+        raw, _, mock_get = self._load(client, b"", format="xml")
+
+        assert "format" in json.loads(raw)["error"]
+        mock_get.assert_not_called()
+
+    def test_small_text_file_comes_back_as_text(self):
+        client = self._client(file_path="out/notes.log")
+        raw, _, _ = self._load(client, b"line one\nline two\n", file_path="out/notes.log")
+        result = json.loads(raw)
+
+        assert result["type"] == "text"
+        assert result["content"] == "line one\nline two\n"
+
+    def test_oversize_text_file_is_refused_with_the_download_hint(self):
+        client = self._client(file_path="out/report.html")
+        raw, response, _ = self._load(client, b"<p>" * 30_000, file_path="out/report.html")
+        result = json.loads(raw)
+
+        assert "content" not in result
+        assert "64" in result["error"]
+        assert "download_file" in result["hint"]
+        assert "delivery='url'" in result["hint"]
+        response.close.assert_called()
+
+    def test_missing_file_is_an_error(self):
+        client = self._client()
+        raw, _, mock_get = self._load(client, b"", file_path="out/other.tsv")
+
+        assert "not found" in json.loads(raw)["error"]
+        mock_get.assert_not_called()
+
+    def test_http_error_has_no_plain_url(self):
+        client = self._client()
+        response = MagicMock()
+        response.status_code = 403
+        response.reason = "Forbidden /report-resources/run1/pubweb/out/table.tsv"
+        with patch.object(server, "get_client", return_value=client), \
+                patch.object(server.requests, "get", return_value=response):
+            raw = server.load_file(report_id="5", file_path="out/table.tsv")
+
+        assert "403" in json.loads(raw)["error"]
+        assert "report-resources" not in raw
+
