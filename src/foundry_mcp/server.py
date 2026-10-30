@@ -18,9 +18,12 @@ Run with: python -m foundry_mcp.server --port 8705
 
 import json
 import logging
+import math
 import argparse
 import base64
+import gzip
 import html
+import io
 import re
 import shlex
 import tempfile
@@ -61,6 +64,12 @@ MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200MB
 # well below MAX_FILE_SIZE_BYTES (seen at 15 to 20MB). Above this, the tool
 # returns a download link instead of the bytes.
 INLINE_DOWNLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+
+# Largest file download_file returns inline when the caller did not choose a
+# delivery. Base64 of 48KB is about 64k characters, which still fits a client
+# that truncates long tool results near 100k. Anything larger gets a link the
+# model fetches in its code sandbox. delivery="inline" keeps the 5MB cap.
+AUTO_INLINE_MAX_BYTES = 48 * 1024  # 49152 bytes
 
 # How download_file may hand a file back. "auto" keeps the size based choice,
 # "url" always mints a link, "inline" only ever returns the bytes.
@@ -329,22 +338,58 @@ def list_files(report_id: str, process_name: str = None) -> str:
     List files in a report. If process_name is provided, lists files for that
     specific process. Otherwise, lists all files across all processes in the report.
     Returns file metadata including file paths, sizes, and extensions.
+
+    When no process has that name, process_name is read as a top level
+    folder: files whose path starts with "<process_name>/" are listed, and
+    the answer has "matched_by": "folder". When neither matches, the error
+    lists the process names and top level folders the report has.
     Note: report_id is the same as run_id.
     """
     try:
         via_client = get_client()
         logger.info(f"Listing files for report {report_id}" +
                    (f", process {process_name}" if process_name else " (all processes)"))
-        
+
         report_data = via_client.reports.fetch_report_data(report_id)
-        
-        if process_name:
-            files_df = via_client.reports.get_file_names(report_data, process_name)
-        else:
+
+        if not process_name:
             files_df = via_client.reports.get_all_files(report_data)
-        
-        files_dict = files_df.to_dict(orient='records')
-        return json.dumps({"files": files_dict}, indent=2)
+            return json.dumps({"files": files_df.to_dict(orient='records')}, indent=2)
+
+        all_files = via_client.reports.get_all_files(report_data)
+        process_names = sorted(
+            {str(p) for p in all_files["processName"].dropna()}
+            if "processName" in all_files.columns else set()
+        )
+        if process_name in process_names:
+            files_df = via_client.reports.get_file_names(report_data, process_name)
+            return json.dumps({"files": files_df.to_dict(orient='records')}, indent=2)
+
+        import pandas as pd
+
+        folder = process_name.strip()
+        while folder.startswith("./"):
+            folder = folder[2:]
+        folder = folder.strip("/")
+        if "file_path" in all_files.columns:
+            paths = all_files["file_path"].fillna("").astype(str)
+        else:
+            paths = pd.Series([], dtype=str)
+        in_folder = all_files[paths.str.startswith(folder + "/")] if folder else all_files.iloc[0:0]
+        if not in_folder.empty:
+            return json.dumps({
+                "matched_by": f"folder '{folder}/' (no process is named '{process_name}')",
+                "files": in_folder.to_dict(orient='records'),
+            }, indent=2)
+
+        folders = sorted({p.split("/", 1)[0] for p in paths if "/" in p})
+        return json.dumps({
+            "error": f"No process or top level folder named '{process_name}' in report {report_id}.",
+            "available_processes": process_names,
+            "available_folders": folders,
+            "hint": f"Pass one of these as process_name, or call list_results({report_id!r}) "
+                    "to see the run's outputs grouped by kind.",
+        }, indent=2)
     except Exception as e:
         logger.error(f"Error listing files: {e}")
         return json.dumps({"error": str(e)})
@@ -359,20 +404,44 @@ _ROUTE_PATH_ATTEMPT = re.compile(
 _DOWNLOAD_LINK_PATH = re.compile(r"^/api/v1/report-download/[A-Za-z0-9._-]+\Z")
 
 
-def _signed_download_link(via_client, report_id, file_path, route_path, limit_mb, requested=False) -> str:
+def _size_text(num_bytes) -> str:
+    """Write a byte limit the way the messages say it: 5MB, 48KB or 10 bytes."""
+    if num_bytes >= 1024 * 1024 and num_bytes % (1024 * 1024) == 0:
+        return f"{num_bytes // (1024 * 1024)}MB"
+    if num_bytes >= 1024 and num_bytes % 1024 == 0:
+        return f"{num_bytes // 1024}KB"
+    return f"{num_bytes} bytes"
+
+
+def _metadata_file_size(file_details):
+    """The fileSize the report lists for a file, as an int, or None when absent."""
+    if "fileSize" not in file_details.columns:
+        return None
+    value = file_details["fileSize"].iloc[0]
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _signed_download_link(via_client, report_id, file_path, route_path, limit_bytes,
+                          requested=False, file_size=None) -> str:
     """Ask the server for a signed, expiring link to one file and format the answer.
 
     requested is True when the caller asked for a link (delivery="url"), so the
-    answer never claims the file was too large. Never falls back to the plain
-    report resource URL.
+    answer never claims the file was too large. limit_bytes is the inline limit
+    that applied, and file_size is the size to report when one is known. Never
+    falls back to the plain report resource URL.
     """
+    limit_text = _size_text(limit_bytes)
+    inline_text = _size_text(INLINE_DOWNLOAD_MAX_BYTES)
+    retry_hint = {"hint": "Call download_file again with delivery='inline' to get a file up to "
+                          f"{inline_text} inline as base64."}
     if requested:
         reason = "A download link was requested"
-        retry_hint = {"hint": "Call download_file again with delivery='auto' to get a file up to "
-                              f"{limit_mb:.0f}MB inline as base64."}
     else:
-        reason = f"File is larger than {limit_mb:.0f}MB, too large to return inline,"
-        retry_hint = {}
+        reason = f"File is larger than {limit_text}, too large to return inline,"
     match = _ROUTE_PATH_ATTEMPT.match(str(route_path))
     if not match:
         return json.dumps({
@@ -419,54 +488,71 @@ def _signed_download_link(via_client, report_id, file_path, route_path, limit_mb
         if c not in "/\\" and unicodedata.category(c) not in ("Cc", "Cf")
     )
     link_name = link_name or "download"
-    return json.dumps({
+    expires_at = minted.get("expiresAt")
+    expiry = f"expires at {expires_at}" if expires_at else "expires in about 15 minutes"
+    answer = {
+        "action": "fetch_in_sandbox",
         "success": True,
         "delivery": "url",
         "file_name": link_name,
+    }
+    if file_size is not None:
+        answer["file_size"] = file_size
+    answer.update({
         "download_url": download_url,
         "download_command": f"curl -fL -o {shlex.quote('./' + link_name)} {shlex.quote(download_url)}",
-        "expires_at": minted.get("expiresAt"),
+        "expires_at": expires_at,
         "message": (
             ("Download link created as requested. " if requested else
-             f"File is larger than {limit_mb:.0f}MB, too large to return inline. ")
-            + "Run download_command to save it to disk, or open download_url in a browser. "
-            "The link is for this one file and expires in about 15 minutes."
-        )
-    }, indent=2)
+             f"File is larger than {limit_text}, too large to return inline. ")
+            + "Run download_command in your code sandbox to fetch the file there, then work "
+            "on it with code. Do not call download_file again with delivery='inline' to read "
+            "it in the conversation. The link is for this one file and "
+            f"{expiry}. Calling download_file again gives a new link."
+        ),
+    })
+    return json.dumps(answer, indent=2)
 
 
 @mcp.tool()
 def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str:
     """
     Download a file from a report.
-    By default (delivery="auto") a file up to 5MB comes back inline as base64
-    ("delivery": "inline") and a larger file comes back as a link
+    By default (delivery="auto") a file up to 48KB comes back inline as
+    base64 ("delivery": "inline") and a larger file comes back as a link
     ("delivery": "url") with a ready curl command.
+
+    A link answer starts with "action": "fetch_in_sandbox". Run its
+    download_command in your code sandbox and work on the file there. Do not
+    ask for the same file again with delivery="inline": inline base64 counts
+    against the tool result, and a client that truncates long tool results
+    (some cut off near 100k characters, which is about 75KB of file)
+    corrupts it.
 
     Pass delivery="url" when you will process the file in a code sandbox or
     any shell that can run curl: you get the link at any size, so the bytes
-    never pass through the conversation. Inline base64 counts against the
-    tool result, and a client that truncates long tool results (some cut off
-    near 100k characters, which is about 75KB of file) corrupts it. Pass
-    delivery="inline" only when you need the bytes in the conversation; a
-    file over 5MB is then refused rather than linked.
+    never pass through the conversation. Pass delivery="inline" only when you
+    need the bytes in the conversation and no sandbox is available; a file up
+    to 5MB then comes back inline, and a larger one is refused rather than
+    linked. To read part of a table, use load_file instead.
 
-    Run download_command to save a linked file to disk. The link is for that
-    one file and expires in about 15 minutes. It keeps working until then
-    even if the token used to request it is revoked, so ask for a new link
-    rather than reusing an old one.
+    The link is for that one file and expires at expires_at, about 15
+    minutes after it is issued. It keeps working until then even if the token
+    used to request it is revoked. Calling download_file again gives a new
+    link, so ask for one rather than reusing an old one.
 
     Args:
         report_id: The ID of the report containing the file.
         file_path: The path of the file within the report (from list_files output).
-        delivery: "auto" (default; inline up to 5MB, a link above), "url"
+        delivery: "auto" (default; inline up to 48KB, a link above), "url"
             (always a link, best for a code sandbox), or "inline" (always the
             bytes, refused above 5MB).
 
     Returns:
         Inline: JSON with file_name, file_content_base64, and file_size.
         The client should decode the base64 content and save to disk.
-        Link: JSON with file_name, download_url, download_command, and expires_at.
+        Link: JSON with action ("fetch_in_sandbox"), file_name, file_size
+        (when known), download_url, download_command, expires_at and message.
 
     Example:
         # Get the file content (returns JSON string)
@@ -487,7 +573,10 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
                 + ", ".join(f"'{m}'" for m in DOWNLOAD_DELIVERY_MODES) + "."
             )
         }, indent=2)
-    limit_mb = INLINE_DOWNLOAD_MAX_BYTES / (1024 * 1024)
+    if mode == "inline":
+        limit_bytes = INLINE_DOWNLOAD_MAX_BYTES
+    else:
+        limit_bytes = min(AUTO_INLINE_MAX_BYTES, INLINE_DOWNLOAD_MAX_BYTES)
 
     try:
         via_client = get_client()
@@ -521,10 +610,13 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
                 "hint": "The file may not be accessible for download"
             }, indent=2)
         
+        listed_size = _metadata_file_size(file_details)
+
         # A requested link needs no size probe, so no body is read at all.
         if mode == "url":
             return _signed_download_link(
-                via_client, report_id, file_path, route_path, limit_mb, requested=True
+                via_client, report_id, file_path, route_path, limit_bytes,
+                requested=True, file_size=listed_size,
             )
 
         # Build the file URL
@@ -557,7 +649,7 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
             too_large = False
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 content.extend(chunk)
-                if len(content) > INLINE_DOWNLOAD_MAX_BYTES:
+                if len(content) > limit_bytes:
                     too_large = True
                     break
         finally:
@@ -565,13 +657,16 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
 
         if too_large and mode == "inline":
             return json.dumps({
-                "error": f"File is larger than {limit_mb:.0f}MB, too large to return inline.",
+                "error": f"File is larger than {_size_text(limit_bytes)}, too large to return inline.",
                 "hint": "Call download_file again with delivery='url' to get a download link instead."
             }, indent=2)
 
         if too_large:
-            logger.info(f"File '{file_name}' is over {limit_mb:.0f}MB, requesting a download link")
-            return _signed_download_link(via_client, report_id, file_path, route_path, limit_mb)
+            logger.info(f"File '{file_name}' is over {_size_text(limit_bytes)}, requesting a download link")
+            return _signed_download_link(
+                via_client, report_id, file_path, route_path, limit_bytes,
+                file_size=listed_size if listed_size is not None else len(content),
+            )
 
         content_size = len(content)
         file_content_base64 = base64.b64encode(bytes(content)).decode('utf-8')
@@ -595,37 +690,342 @@ def download_file(report_id: str, file_path: str, delivery: str = "auto") -> str
         return json.dumps({"error": message})
 
 
+LOAD_FILE_DEFAULT_LIMIT = 200
+LOAD_FILE_MAX_LIMIT = 2000
+# Stop adding rows once the answer reaches this many characters, so a page
+# stays well inside a client that truncates long tool results.
+LOAD_FILE_MAX_CHARS = 80_000
+# A file that is not a table comes back as text only up to this size.
+LOAD_FILE_TEXT_MAX_BYTES = 64 * 1024
+LOAD_FILE_FORMATS = ("split", "records")
+_TABULAR_EXTENSIONS = ("csv", "tsv", "txt")
+# Rows the table parser hands back at a time while paging.
+_LOAD_FILE_CHUNK_ROWS = 500
+# Most bytes load_file reads from one file after decompression, including
+# the rows it skips to reach offset. A small .gz can expand without bound,
+# so the count is taken after gzip.
+LOAD_FILE_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+# Longest line load_file accepts, so one huge line is refused, not buffered.
+LOAD_FILE_MAX_LINE_BYTES = 1024 * 1024
+# Largest read handed to the parser at once. Keeping it well under the line
+# cap means a line inside one read is still bounded by the cap.
+_LOAD_FILE_READ_BYTES = 64 * 1024
+
+
+class _LoadFileLimit(Exception):
+    """Raised when load_file reaches its byte or line length cap."""
+
+
+class _CappedReader(io.RawIOBase):
+    """A read only file that counts bytes from another file and enforces the caps."""
+
+    def __init__(self, source, max_bytes, max_line):
+        self._source = source
+        self._max_bytes = max_bytes
+        self._max_line = max_line
+        self._total = 0
+        self._since_newline = 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        data = self._source.read(min(len(buffer), _LOAD_FILE_READ_BYTES))
+        if not data:
+            return 0
+        count = len(data)
+        self._total += count
+        if self._total > self._max_bytes:
+            raise _LoadFileLimit(
+                f"more than {_size_text(self._max_bytes)} would have to be read"
+            )
+        # A read is at most _LOAD_FILE_READ_BYTES, so only a line that runs
+        # across reads can pass the cap; track the open line's length.
+        first = data.find(b"\n")
+        if first == -1:
+            self._since_newline += count
+            longest = self._since_newline
+        else:
+            longest = self._since_newline + first
+            self._since_newline = count - data.rfind(b"\n") - 1
+        if longest > self._max_line:
+            raise _LoadFileLimit(f"a line is longer than {_size_text(self._max_line)}")
+        buffer[:count] = data
+        return count
+
+
+class _ChunkReader(io.RawIOBase):
+    """A read only file over an iterator of byte chunks.
+
+    A parser on top pulls only the bytes it needs, so the rest of a streamed
+    body is never downloaded.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+        self._pending = b""
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        while not self._pending:
+            try:
+                self._pending = next(self._chunks)
+            except StopIteration:
+                return 0
+        count = min(len(buffer), len(self._pending))
+        buffer[:count] = self._pending[:count]
+        self._pending = self._pending[count:]
+        return count
+
+
+def _json_cell(value):
+    """A table cell as a JSON value: numpy scalars become Python, NaN and inf become null."""
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _read_table_page(stream, separator, offset, limit, columns, fmt, file_path):
+    """Read one page of a delimited table from a byte stream and shape the answer."""
+    import pandas as pd
+
+    text = io.TextIOWrapper(stream, encoding="utf-8", errors="replace", newline="")
+    # Count parsed records, not physical lines: the parser drops blank lines
+    # and resolves the header itself, so offset never lands mid header.
+    wanted = limit + 1
+    try:
+        parts = []
+        got = 0
+        skipped = 0
+        empty = None
+        with pd.read_csv(text, sep=separator, usecols=columns,
+                         chunksize=_LOAD_FILE_CHUNK_ROWS) as reader:
+            for chunk in reader:
+                empty = chunk.iloc[0:0]
+                if skipped < offset:
+                    drop = min(offset - skipped, len(chunk))
+                    skipped += drop
+                    chunk = chunk.iloc[drop:]
+                if chunk.empty:
+                    continue
+                chunk = chunk.iloc[:wanted - got]
+                parts.append(chunk)
+                got += len(chunk)
+                if got >= wanted:
+                    break
+            if parts:
+                frame = pd.concat(parts, ignore_index=True)
+            elif empty is not None:
+                frame = empty
+            else:
+                names = list(getattr(reader, "orig_names", None) or [])
+                if columns:
+                    names = [c for c in names if c in columns]
+                frame = pd.DataFrame(columns=names)
+    except ValueError as e:
+        return {
+            "error": f"Could not read '{file_path}' as a table: {e}",
+            "hint": "Check the separator, or leave out columns to see every column name.",
+        }
+    if columns:
+        frame = frame[columns]
+    more_rows = len(frame) > limit
+    frame = frame.iloc[:limit]
+    names = [str(c) for c in frame.columns]
+    rows = [[_json_cell(v) for v in row] for row in frame.itertuples(index=False, name=None)]
+
+    rows_field = "rows" if fmt == "split" else "data"
+    answer = {
+        "type": "dataframe",
+        "format": fmt,
+        "file_path": file_path,
+        "columns": names,
+        "offset": offset,
+        "limit": limit,
+        "returned": 0,
+        "has_more": True,
+        "next_offset": offset + limit,
+        "truncated": True,
+        rows_field: [],
+    }
+    budget = LOAD_FILE_MAX_CHARS - len(json.dumps(answer, separators=(",", ":")))
+    kept = []
+    used = 0
+    truncated = False
+    for row in rows:
+        item = row if fmt == "split" else dict(zip(names, row))
+        size = len(json.dumps(item, separators=(",", ":"), default=str)) + 1
+        if used + size > budget:
+            truncated = True
+            break
+        kept.append(item)
+        used += size
+
+    if truncated and not kept:
+        return {
+            "error": (
+                f"Row {offset} of '{file_path}' alone is larger than the "
+                f"{LOAD_FILE_MAX_CHARS} character limit for one answer."
+            ),
+            "hint": "Pass columns to select fewer columns, or call download_file with "
+                    "delivery='url' and read the file in your code sandbox.",
+        }
+
+    has_more = truncated or more_rows
+    answer.update({
+        "returned": len(kept),
+        "has_more": has_more,
+        "next_offset": offset + len(kept) if has_more else None,
+        "truncated": truncated,
+        rows_field: kept,
+    })
+    return answer
+
+
+def _read_small_text(stream, file_path):
+    """Return a file that is not a table as text, or refuse it when it is large."""
+    data = stream.read(LOAD_FILE_TEXT_MAX_BYTES + 1)
+    if len(data) > LOAD_FILE_TEXT_MAX_BYTES:
+        return {
+            "error": (
+                f"'{file_path}' is not a table and is larger than "
+                f"{_size_text(LOAD_FILE_TEXT_MAX_BYTES)}, too large to return as text."
+            ),
+            "hint": "Call download_file(report_id, file_path, delivery='url') and read the "
+                    "file in your code sandbox.",
+        }
+    return {"type": "text", "file_path": file_path, "content": data.decode("utf-8", errors="replace")}
+
+
 @mcp.tool()
-def load_file(report_id: str, file_path: str, separator: str = "\t") -> str:
+def load_file(
+    report_id: str,
+    file_path: str,
+    separator: Optional[str] = None,
+    offset: int = 0,
+    limit: int = LOAD_FILE_DEFAULT_LIMIT,
+    columns: Optional[list[str]] = None,
+    format: str = "split",
+) -> str:
     """
-    Load and return the contents of a file from a report. For tabular files
-    (CSV, TSV, TXT), returns a formatted table. For other files, returns raw content.
-    Use this when you need to analyze file contents without downloading.
+    Read one page of a table from a report, or a small text file.
+
+    Tabular files (.csv, .tsv, .txt, also gzipped as .gz) come back a page at
+    a time: "columns" once, then "rows" as arrays in the same order. The
+    answer carries offset, returned, has_more and next_offset; to read on,
+    call again with offset=next_offset. A page stops early when the answer
+    reaches about 80,000 characters, and then "truncated" is true. Only the
+    rows needed are downloaded, so a large table is cheap to sample.
+    Reading stops with an error once 64MB (after decompression) would have
+    to be read to reach the page, or a single line is longer than 1MB.
+
+    Any other file comes back as text when it is at most 64KB, and is refused
+    above that. To work with a whole large file, call download_file with
+    delivery='url' and read it in your code sandbox.
+
+    Note: report_id is the same as run_id.
+
+    Args:
+        report_id: The ID of the report containing the file.
+        file_path: The path of the file within the report (from list_files output).
+        separator: Column separator. Default: a comma for .csv, a tab otherwise.
+        offset: Number of data rows to skip; the header is always kept. Default 0.
+        limit: Most rows to return, from 1 to 2000 (clamped). Default 200.
+        columns: Column names to return, in this order. Default: every column.
+        format: "split" (default; "columns" plus "rows" as arrays) or
+            "records" (each row an object, under "data"). Both are paged.
     """
+    fmt = str(format).strip().lower() if format is not None else "split"
+    if fmt not in LOAD_FILE_FORMATS:
+        return json.dumps({
+            "error": f"Unknown format {format!r}. Use one of: "
+                     + ", ".join(f"'{f}'" for f in LOAD_FILE_FORMATS) + "."
+        })
+    try:
+        offset = max(0, int(offset or 0))
+        limit = int(limit if limit is not None else LOAD_FILE_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "offset and limit must be whole numbers."})
+    limit = max(1, min(limit, LOAD_FILE_MAX_LIMIT))
+    if isinstance(columns, str):
+        columns = [c.strip() for c in columns.split(",") if c.strip()]
+    columns = [str(c) for c in columns] if columns else None
+
     try:
         via_client = get_client()
-        logger.info(f"Loading file {file_path} from report {report_id}")
-        
+        logger.info(f"Loading file {file_path} from report {report_id} (offset={offset}, limit={limit})")
+
         report_data = via_client.reports.fetch_report_data(report_id)
-        content = via_client.reports.load_file(report_data, file_path, sep=separator)
-        
-        if hasattr(content, 'to_dict'):
-            result = {
-                "type": "dataframe",
-                "data": content.to_dict(orient='records'),
-                "shape": content.shape,
-                "columns": list(content.columns)
-            }
-        else:
-            result = {
-                "type": "text",
-                "content": str(content)
-            }
-        
-        return json.dumps(result, indent=2)
+        files_df = via_client.reports.get_all_files(report_data)
+        file_details = files_df[files_df["file_path"] == file_path]
+        if file_details.empty:
+            return json.dumps({
+                "error": f"File '{file_path}' not found in report",
+                "hint": "Use list_files(report_id) to see available files"
+            })
+        route_path = file_details["routePath"].iloc[0] if "routePath" in file_details.columns else None
+        if not route_path or route_path != route_path:
+            return json.dumps({"error": f"File '{file_path}' has no download path available"})
+
+        name = os.path.basename(file_path).lower()
+        compressed = name.endswith(".gz")
+        inner = name[:-3] if compressed else name
+        extension = inner.rsplit(".", 1)[-1] if "." in inner else ""
+        tabular = extension in _TABULAR_EXTENSIONS
+        sep = separator if separator else ("," if extension == "csv" else "\t")
+
+        # Stream the body; the parser pulls only the rows it needs.
+        try:
+            response = requests.get(
+                via_client.auth.hostname + route_path,
+                headers=via_client.auth.get_headers(), timeout=(20, 300), stream=True,
+            )
+        except Exception as fetch_error:
+            logger.error(f"File fetch failed: {type(fetch_error).__name__}")
+            return json.dumps({
+                "error": f"Could not reach the server to read the file ({type(fetch_error).__name__})"
+            })
+        try:
+            if response.status_code != 200:
+                reason = str(getattr(response, "reason", "Unknown"))
+                if "report-resources" in reason:
+                    reason = "Unknown"
+                return json.dumps({
+                    "error": f"Failed to read file: HTTP {response.status_code} {reason}",
+                    "status_code": response.status_code,
+                })
+            stream = io.BufferedReader(_ChunkReader(response.iter_content(chunk_size=64 * 1024)))
+            if compressed:
+                stream = gzip.GzipFile(fileobj=stream)
+            stream = io.BufferedReader(_CappedReader(
+                stream, LOAD_FILE_MAX_DECOMPRESSED_BYTES, LOAD_FILE_MAX_LINE_BYTES
+            ), buffer_size=_LOAD_FILE_READ_BYTES)
+            if tabular:
+                result = _read_table_page(stream, sep, offset, limit, columns, fmt, file_path)
+            else:
+                result = _read_small_text(stream, file_path)
+        except _LoadFileLimit as limit_error:
+            return json.dumps({
+                "error": f"Stopped reading '{file_path}': {limit_error}.",
+                "hint": "Call download_file(report_id, file_path, delivery='url') and read the "
+                        "file in your code sandbox.",
+            })
+        finally:
+            response.close()
+
+        return json.dumps(result, separators=(",", ":"), default=str)
     except Exception as e:
         logger.error(f"Error loading file: {e}")
-        return json.dumps({"error": str(e)})
+        message = str(e)
+        if "report-resources" in message:
+            message = f"Error loading file ({type(e).__name__})"
+        return json.dumps({"error": message})
 
 
 @mcp.tool()
