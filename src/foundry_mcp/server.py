@@ -688,6 +688,8 @@ LOAD_FILE_MAX_CHARS = 80_000
 LOAD_FILE_TEXT_MAX_BYTES = 64 * 1024
 LOAD_FILE_FORMATS = ("split", "records")
 _TABULAR_EXTENSIONS = ("csv", "tsv", "txt")
+# Rows the table parser hands back at a time while paging.
+_LOAD_FILE_CHUNK_ROWS = 500
 # Most bytes load_file reads from one file after decompression, including
 # the rows it skips to reach offset. A small .gz can expand without bound,
 # so the count is taken after gzip.
@@ -768,12 +770,12 @@ class _ChunkReader(io.RawIOBase):
 
 
 def _json_cell(value):
-    """A table cell as a JSON value: numpy scalars become Python, NaN becomes null."""
+    """A table cell as a JSON value: numpy scalars become Python, NaN and inf become null."""
     if value is None:
         return None
     if hasattr(value, "item"):
         value = value.item()
-    if isinstance(value, float) and math.isnan(value):
+    if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
 
@@ -783,14 +785,38 @@ def _read_table_page(stream, separator, offset, limit, columns, fmt, file_path):
     import pandas as pd
 
     text = io.TextIOWrapper(stream, encoding="utf-8", errors="replace", newline="")
+    # Count parsed records, not physical lines: the parser drops blank lines
+    # and resolves the header itself, so offset never lands mid header.
+    wanted = limit + 1
     try:
-        frame = pd.read_csv(
-            text,
-            sep=separator,
-            skiprows=(lambda index: 0 < index <= offset) if offset else None,
-            nrows=limit + 1,
-            usecols=columns,
-        )
+        parts = []
+        got = 0
+        skipped = 0
+        empty = None
+        with pd.read_csv(text, sep=separator, usecols=columns,
+                         chunksize=_LOAD_FILE_CHUNK_ROWS) as reader:
+            for chunk in reader:
+                empty = chunk.iloc[0:0]
+                if skipped < offset:
+                    drop = min(offset - skipped, len(chunk))
+                    skipped += drop
+                    chunk = chunk.iloc[drop:]
+                if chunk.empty:
+                    continue
+                chunk = chunk.iloc[:wanted - got]
+                parts.append(chunk)
+                got += len(chunk)
+                if got >= wanted:
+                    break
+            if parts:
+                frame = pd.concat(parts, ignore_index=True)
+            elif empty is not None:
+                frame = empty
+            else:
+                names = list(getattr(reader, "orig_names", None) or [])
+                if columns:
+                    names = [c for c in names if c in columns]
+                frame = pd.DataFrame(columns=names)
     except ValueError as e:
         return {
             "error": f"Could not read '{file_path}' as a table: {e}",

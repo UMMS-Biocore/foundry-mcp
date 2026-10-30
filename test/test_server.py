@@ -1180,6 +1180,46 @@ class TestLoadFile:
         assert result["rows"][0][0] == "g19990"
         assert result["has_more"] is False
 
+    def _page(self, body, file_path="out/table.csv", **kwargs):
+        client = self._client(file_path=file_path)
+        raw, _, _ = self._load(client, body, file_path=file_path, **kwargs)
+        return json.loads(raw)
+
+    def test_blank_lines_do_not_shift_pages(self):
+        for newline in (b"\n", b"\r\n"):
+            body = newline.join([b"a,b", b"1,x", b"", b"2,y", b"3,z", b""])
+            first = self._page(body, limit=2)
+            second = self._page(body, offset=first["next_offset"], limit=2)
+
+            assert first["rows"] == [[1, "x"], [2, "y"]]
+            assert first["next_offset"] == 2
+            assert second["rows"] == [[3, "z"]]
+            assert second["has_more"] is False
+
+    def test_blank_line_before_the_header_keeps_the_header(self):
+        result = self._page(b"\na,b\n1,2\n3,4\n5,6\n", offset=1, limit=5)
+
+        assert result["columns"] == ["a", "b"]
+        assert result["rows"] == [[3, 4], [5, 6]]
+
+    def test_offset_past_the_end_keeps_the_header(self):
+        result = self._page(b"a,b\n1,2\n", offset=5)
+
+        assert result["columns"] == ["a", "b"]
+        assert result["rows"] == []
+        assert result["has_more"] is False
+
+    def test_infinite_values_become_null(self):
+        raw_result = self._page(b"a,b\n1,inf\n2,-inf\n")
+
+        assert raw_result["rows"] == [[1, None], [2, None]]
+
+    def test_output_is_strict_json(self):
+        client = self._client(file_path="out/t.csv")
+        raw, _, _ = self._load(client, b"a,b\n1,inf\n", file_path="out/t.csv")
+
+        assert "Infinity" not in raw
+
     def test_records_format_is_still_available_and_paged(self):
         client = self._client()
         raw, _, _ = self._load(client, _tsv(_gene_rows(20)), format="records", offset=3, limit=2)
