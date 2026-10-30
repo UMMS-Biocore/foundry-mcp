@@ -688,6 +688,57 @@ LOAD_FILE_MAX_CHARS = 80_000
 LOAD_FILE_TEXT_MAX_BYTES = 64 * 1024
 LOAD_FILE_FORMATS = ("split", "records")
 _TABULAR_EXTENSIONS = ("csv", "tsv", "txt")
+# Most bytes load_file reads from one file after decompression, including
+# the rows it skips to reach offset. A small .gz can expand without bound,
+# so the count is taken after gzip.
+LOAD_FILE_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+# Longest line load_file accepts, so one huge line is refused, not buffered.
+LOAD_FILE_MAX_LINE_BYTES = 1024 * 1024
+# Largest read handed to the parser at once. Keeping it well under the line
+# cap means a line inside one read is still bounded by the cap.
+_LOAD_FILE_READ_BYTES = 64 * 1024
+
+
+class _LoadFileLimit(Exception):
+    """Raised when load_file reaches its byte or line length cap."""
+
+
+class _CappedReader(io.RawIOBase):
+    """A read only file that counts bytes from another file and enforces the caps."""
+
+    def __init__(self, source, max_bytes, max_line):
+        self._source = source
+        self._max_bytes = max_bytes
+        self._max_line = max_line
+        self._total = 0
+        self._since_newline = 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        data = self._source.read(min(len(buffer), _LOAD_FILE_READ_BYTES))
+        if not data:
+            return 0
+        count = len(data)
+        self._total += count
+        if self._total > self._max_bytes:
+            raise _LoadFileLimit(
+                f"more than {_size_text(self._max_bytes)} would have to be read"
+            )
+        # A read is at most _LOAD_FILE_READ_BYTES, so only a line that runs
+        # across reads can pass the cap; track the open line's length.
+        first = data.find(b"\n")
+        if first == -1:
+            self._since_newline += count
+            longest = self._since_newline
+        else:
+            longest = self._since_newline + first
+            self._since_newline = count - data.rfind(b"\n") - 1
+        if longest > self._max_line:
+            raise _LoadFileLimit(f"a line is longer than {_size_text(self._max_line)}")
+        buffer[:count] = data
+        return count
 
 
 class _ChunkReader(io.RawIOBase):
@@ -834,6 +885,8 @@ def load_file(
     call again with offset=next_offset. A page stops early when the answer
     reaches about 80,000 characters, and then "truncated" is true. Only the
     rows needed are downloaded, so a large table is cheap to sample.
+    Reading stops with an error once 64MB (after decompression) would have
+    to be read to reach the page, or a single line is longer than 1MB.
 
     Any other file comes back as text when it is at most 64KB, and is refused
     above that. To work with a whole large file, call download_file with
@@ -913,10 +966,19 @@ def load_file(
             stream = io.BufferedReader(_ChunkReader(response.iter_content(chunk_size=64 * 1024)))
             if compressed:
                 stream = gzip.GzipFile(fileobj=stream)
+            stream = io.BufferedReader(_CappedReader(
+                stream, LOAD_FILE_MAX_DECOMPRESSED_BYTES, LOAD_FILE_MAX_LINE_BYTES
+            ), buffer_size=_LOAD_FILE_READ_BYTES)
             if tabular:
                 result = _read_table_page(stream, sep, offset, limit, columns, fmt, file_path)
             else:
                 result = _read_small_text(stream, file_path)
+        except _LoadFileLimit as limit_error:
+            return json.dumps({
+                "error": f"Stopped reading '{file_path}': {limit_error}.",
+                "hint": "Call download_file(report_id, file_path, delivery='url') and read the "
+                        "file in your code sandbox.",
+            })
         finally:
             response.close()
 

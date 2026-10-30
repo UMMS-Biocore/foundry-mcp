@@ -17,7 +17,11 @@
     read too. The answer lists `columns` once and `rows` as arrays, with
     `offset`, `returned`, `has_more` and `next_offset`, and stops near 80,000
     characters with `truncated` set. `format="records"` keeps one object per
-    row under `data`, also paged. The separator defaults to a comma for
+    row under `data`, also paged. Reading stops with an error that points
+    at `download_file(delivery='url')` once 64MB after decompression would
+    have to be read, or a line is longer than 1MB, so a small `.gz` that
+    expands without bound or a huge offset cannot exhaust the server. The
+    separator defaults to a comma for
     `.csv` and a tab otherwise. A file that is not a table is returned as
     text up to 64KB and refused above that, with a hint to use
     `download_file(delivery='url')`.

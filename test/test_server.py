@@ -1144,6 +1144,42 @@ class TestLoadFile:
         assert len(consumed) < total
         response.close.assert_called()
 
+    def test_gzip_bomb_is_refused(self):
+        import gzip
+        client = self._client(file_path="out/bomb.tsv.gz", extension="gz")
+        body = gzip.compress(b"a\tb\n" + b"1\t2\n" * (2 * 1024 * 1024))
+        assert len(body) < 100_000
+        with patch.object(server, "LOAD_FILE_MAX_DECOMPRESSED_BYTES", 1024 * 1024):
+            raw, response, _ = self._load(client, body, file_path="out/bomb.tsv.gz", offset=1_000_000)
+        result = json.loads(raw)
+
+        assert "rows" not in result
+        assert "download_file" in result["hint"]
+        assert "delivery='url'" in result["hint"]
+        response.close.assert_called()
+
+    def test_one_oversized_line_is_refused(self):
+        client = self._client()
+        body = b"a\tb\n1\t" + b"x" * (3 * 1024 * 1024) + b"\n2\t3\n"
+        raw, response, _ = self._load(client, body, chunk=64 * 1024)
+        result = json.loads(raw)
+
+        assert "rows" not in result
+        assert "line" in result["error"]
+        assert "delivery='url'" in result["hint"]
+        response.close.assert_called()
+
+    def test_paged_read_near_the_byte_cap_still_works(self):
+        client = self._client()
+        body = _tsv(_gene_rows(20_000))
+        with patch.object(server, "LOAD_FILE_MAX_DECOMPRESSED_BYTES", len(body) + 10):
+            raw, _, _ = self._load(client, body, offset=19_990, limit=50)
+        result = json.loads(raw)
+
+        assert result["returned"] == 10
+        assert result["rows"][0][0] == "g19990"
+        assert result["has_more"] is False
+
     def test_records_format_is_still_available_and_paged(self):
         client = self._client()
         raw, _, _ = self._load(client, _tsv(_gene_rows(20)), format="records", offset=3, limit=2)
