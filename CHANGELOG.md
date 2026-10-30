@@ -37,7 +37,10 @@
     (HTTP 403 from a proxy, connection rejected), Claude tells the user to
     add that host under claude.ai Settings, Capabilities, allowed domains
     (or ask an org admin), then start a new chat, rather than retrying or
-    asking for the file inline.
+    asking for the file inline. Until the host is allowed, the hint tells
+    Claude to read a table a page at a time with `load_file` (`offset`,
+    `limit`, `columns`, following `next_offset` while `has_more`), which
+    works without the sandbox reaching the host.
   - `get_started` adds a `next_steps` line with the same reminder, naming
     the configured Foundry host when a client can be built and using
     generic wording otherwise. The results recipe points at

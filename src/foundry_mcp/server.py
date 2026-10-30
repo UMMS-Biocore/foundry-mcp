@@ -427,7 +427,11 @@ def _download_blocked_hint(host: str) -> str:
         "If the sandbox refuses this download (HTTP 403 from a proxy, connection "
         f"rejected, host not allowed), its network allowlist does not include {host}. "
         "Do not retry and do not ask for the file inline. Tell the user to open "
-        + _ALLOWLIST_STEPS.format(host=host) + "."
+        + _ALLOWLIST_STEPS.format(host=host) + ". "
+        "Until then, if the file is a table (.csv, .tsv, .txt, or gzipped), read it "
+        "in the conversation a page at a time with load_file (offset, limit, columns), "
+        "calling again with offset=next_offset while has_more is true. load_file "
+        "works without the sandbox reaching the host."
     )
 
 
