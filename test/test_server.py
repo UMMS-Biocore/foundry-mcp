@@ -1201,3 +1201,63 @@ class TestLoadFile:
         assert "403" in json.loads(raw)["error"]
         assert "report-resources" not in raw
 
+
+class TestListFiles:
+    """Tests for list_files process matching and the folder fallback."""
+
+    def _client(self):
+        import pandas as pd
+        rows = [
+            ("Overall_Summary", "summary/overall_summary.tsv"),
+            ("RSEM_module", "rsem_summary/genes_expression_expected_count.tsv"),
+            ("MultiQC", "multiqc/multiqc_report.html"),
+            ("MultiQC", "multiqc/data/multiqc_general_stats.txt"),
+        ]
+        client = MagicMock()
+        client.reports.get_all_files.return_value = pd.DataFrame([
+            {"id": i, "processName": p, "file_path": f, "name": f.rsplit("/", 1)[-1],
+             "extension": f.rsplit(".", 1)[-1], "fileSize": 10,
+             "routePath": "/report-resources/u/pubweb/" + f}
+            for i, (p, f) in enumerate(rows)
+        ])
+        client.reports.get_file_names.side_effect = RuntimeError("Process not found")
+        return client
+
+    def _list(self, client, **kwargs):
+        with patch.object(server, "get_client", return_value=client):
+            return json.loads(server.list_files(report_id="9", **kwargs))
+
+    def test_process_name_match_is_unchanged(self):
+        import pandas as pd
+        client = self._client()
+        client.reports.get_file_names.side_effect = None
+        client.reports.get_file_names.return_value = pd.DataFrame(
+            [{"processName": "MultiQC", "file_path": "multiqc/multiqc_report.html"}]
+        )
+        result = self._list(client, process_name="MultiQC")
+
+        assert result["files"] == [{"processName": "MultiQC", "file_path": "multiqc/multiqc_report.html"}]
+
+    def test_folder_fallback_for_summary(self):
+        result = self._list(self._client(), process_name="summary")
+
+        assert [f["file_path"] for f in result["files"]] == ["summary/overall_summary.tsv"]
+        assert "folder" in result["matched_by"]
+
+    def test_folder_fallback_accepts_a_trailing_slash(self):
+        result = self._list(self._client(), process_name="multiqc/")
+
+        assert len(result["files"]) == 2
+
+    def test_no_match_lists_processes_and_folders(self):
+        result = self._list(self._client(), process_name="nothing_here")
+
+        assert "nothing_here" in result["error"]
+        assert "MultiQC" in result["available_processes"]
+        assert "summary" in result["available_folders"]
+        assert "list_results(" in result["hint"]
+
+    def test_no_process_name_lists_everything(self):
+        result = self._list(self._client())
+
+        assert len(result["files"]) == 4

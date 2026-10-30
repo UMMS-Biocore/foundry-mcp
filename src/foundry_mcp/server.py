@@ -338,22 +338,47 @@ def list_files(report_id: str, process_name: str = None) -> str:
     List files in a report. If process_name is provided, lists files for that
     specific process. Otherwise, lists all files across all processes in the report.
     Returns file metadata including file paths, sizes, and extensions.
+
+    When no process has that name, process_name is read as a top level
+    folder: files whose path starts with "<process_name>/" are listed, and
+    the answer has "matched_by": "folder". When neither matches, the error
+    lists the process names and top level folders the report has.
     Note: report_id is the same as run_id.
     """
     try:
         via_client = get_client()
         logger.info(f"Listing files for report {report_id}" +
                    (f", process {process_name}" if process_name else " (all processes)"))
-        
+
         report_data = via_client.reports.fetch_report_data(report_id)
-        
-        if process_name:
-            files_df = via_client.reports.get_file_names(report_data, process_name)
-        else:
+
+        if not process_name:
             files_df = via_client.reports.get_all_files(report_data)
-        
-        files_dict = files_df.to_dict(orient='records')
-        return json.dumps({"files": files_dict}, indent=2)
+            return json.dumps({"files": files_df.to_dict(orient='records')}, indent=2)
+
+        all_files = via_client.reports.get_all_files(report_data)
+        process_names = sorted({str(p) for p in all_files["processName"].dropna()})
+        if process_name in process_names:
+            files_df = via_client.reports.get_file_names(report_data, process_name)
+            return json.dumps({"files": files_df.to_dict(orient='records')}, indent=2)
+
+        folder = process_name.strip().strip("/")
+        paths = all_files["file_path"].fillna("").astype(str)
+        in_folder = all_files[paths.str.startswith(folder + "/")] if folder else all_files.iloc[0:0]
+        if not in_folder.empty:
+            return json.dumps({
+                "matched_by": f"folder '{folder}/' (no process is named '{process_name}')",
+                "files": in_folder.to_dict(orient='records'),
+            }, indent=2)
+
+        folders = sorted({p.split("/", 1)[0] for p in paths if "/" in p})
+        return json.dumps({
+            "error": f"No process or top level folder named '{process_name}' in report {report_id}.",
+            "available_processes": process_names,
+            "available_folders": folders,
+            "hint": f"Pass one of these as process_name, or call list_results({report_id!r}) "
+                    "to see the run's outputs grouped by kind.",
+        }, indent=2)
     except Exception as e:
         logger.error(f"Error listing files: {e}")
         return json.dumps({"error": str(e)})
