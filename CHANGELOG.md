@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Changed
+- **Large result files stay out of the conversation**
+  - `download_file` in `auto` mode (the default) now returns a file inline
+    only up to 48KB; a larger file comes back as the signed link. The link
+    answer starts with `"action": "fetch_in_sandbox"`, carries `file_size`
+    and tells the model to run `download_command` in its code sandbox rather
+    than ask for the file inline, when the link expires, and that calling
+    again gives a new link. `delivery="inline"` still returns up to 5MB.
+    When a server issues no link, the hint now points at `delivery="inline"`.
+  - `load_file` no longer reads the whole file through the SDK. It streams
+    the file and pages it: `offset` (default 0), `limit` (default 200, at
+    most 2000) and `columns` select the rows and columns, and `.gz` files are
+    read too. The answer lists `columns` once and `rows` as arrays, with
+    `offset`, `returned`, `has_more` and `next_offset`, and stops near 80,000
+    characters with `truncated` set. `format="records"` keeps one object per
+    row under `data`, also paged. The separator defaults to a comma for
+    `.csv` and a tab otherwise. A file that is not a table is returned as
+    text up to 64KB and refused above that, with a hint to use
+    `download_file(delivery='url')`.
+  - `list_files` with a `process_name` that names no process now lists the
+    files under the top level folder of that name. When neither matches,
+    the error lists the process names and folders and suggests
+    `list_results(run_id)`.
+
 ### Added
 - **Ask `download_file` for a link at any size**
   - `download_file` takes an optional `delivery`: `auto` (the default, and
