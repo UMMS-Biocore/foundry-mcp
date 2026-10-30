@@ -7,6 +7,7 @@ is unconfirmed — and an unsurfaced recipe helps nobody. Tools are surfaced for
 certain, so the recipes live in one.
 """
 import json
+from unittest.mock import MagicMock, patch
 
 from src.foundry_mcp import server
 
@@ -98,3 +99,44 @@ class TestGetStarted:
 
     def test_uses_the_standard_envelope(self):
         assert list(_recipes()) == ["summary", "next_steps", "data"]
+
+
+class TestSandboxAllowlistReminder:
+    """get_started reminds the model that claude.ai's code sandbox reaches only
+    allowlisted hosts, naming this server's Foundry host when it is known."""
+
+    def _with_host(self, hostname):
+        client = MagicMock()
+        client.auth.hostname = hostname
+        with patch.object(server, "get_client", return_value=client):
+            return _recipes()
+
+    def _reminder(self, parsed):
+        lines = [s for s in parsed["next_steps"] if "allowed domains" in s]
+        assert len(lines) == 1
+        return lines[0]
+
+    def test_names_the_configured_host(self):
+        line = self._reminder(self._with_host("https://foundry.example.org/base"))
+        assert "foundry.example.org" in line
+        assert "/base" not in line
+        assert "sandbox" in line
+        assert "download_command" in line
+        assert "Settings" in line and "Capabilities" in line
+        assert "new chat" in line
+
+    def test_falls_back_to_generic_wording_without_a_client(self):
+        with patch.object(server, "get_client", side_effect=ValueError("no client")):
+            parsed = _recipes()
+        line = self._reminder(parsed)
+        assert "Foundry Connect host" in line
+        assert "no client" not in json.dumps(parsed)
+
+    def test_falls_back_when_the_host_is_not_a_url(self):
+        line = self._reminder(self._with_host(None))
+        assert "Foundry Connect host" in line
+
+    def test_results_recipe_points_at_the_blocked_download_hint(self):
+        parsed = self._with_host("https://foundry.example.org")
+        recipe = next(r for r in parsed["data"]["recipes"] if r["id"] == "find_my_results")
+        assert "if_download_blocked" in " ".join(recipe["steps"])
