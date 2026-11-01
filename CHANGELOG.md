@@ -31,6 +31,14 @@
     `list_results(run_id)`.
 
 ### Added
+- **Workspace commands that run in a session**
+  - `workspace_run` reads the answer a server gives when a run environment
+    runs short commands in one session per workspace. Such a command comes
+    back with status `routed`, its `lane` (`session` when a live session
+    takes it, `wait_for_session` while one starts), the server's `reason`, and
+    `session_requested_at` (null when it waits for the next session), instead
+    of `uncertain`. A command that got its own job still reads `submitted`,
+    and now carries `lane` and `reason` when the server sends them.
 - **Say which host the claude.ai code sandbox must allow**
   - The `download_file` link answer carries `if_download_blocked`, naming
     the Foundry host from the link: if the sandbox refuses the download

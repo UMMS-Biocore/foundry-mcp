@@ -190,6 +190,61 @@ class TestWorkspaceRun:
         assert out["submission_key"] == "my-key.1"
         assert out["scheduler_job_id"] == "123"
 
+    def test_a_job_routed_to_its_own_job_says_which_lane_and_why(self, via_client, http):
+        http.return_value = _response(
+            201, {"kind": "submitted", "jobId": "9", "attemptId": 1, "lane": "job", "reason": "exceeds_session_size"},
+        )
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert (out["status"], out["scheduler_job_id"]) == ("submitted", "9")
+        assert (out["lane"], out["reason"]) == ("job", "exceeds_session_size")
+
+    def test_a_submit_with_the_session_lane_off_carries_no_lane(self, via_client, http):
+        http.return_value = _response(201, {"kind": "submitted", "jobId": "9", "attemptId": 1})
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert "lane" not in out and "reason" not in out
+
+    def test_a_command_routed_into_the_live_session_reads_routed_not_uncertain(self, via_client, http):
+        http.return_value = _response(202, {
+            "kind": "routed", "lane": "session", "reason": "fits_session", "attemptId": 7,
+            "sessionRequestedAt": "2026-11-01T10:00:00.000Z",
+        })
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert out["status"] == "routed"
+        assert (out["lane"], out["reason"]) == ("session", "fits_session")
+        assert out["session_requested_at"] == "2026-11-01T10:00:00.000Z"
+        assert "server_outcome" not in out
+        assert "live session" in out["message"]
+        assert "workspace_job_status" in out["message"]
+
+    def test_a_command_waiting_for_a_requested_session_names_when_it_was_requested(self, via_client, http):
+        http.return_value = _response(202, {
+            "kind": "routed", "lane": "wait_for_session", "reason": "session_starting", "attemptId": 7,
+            "sessionRequestedAt": "2026-11-01T10:00:00.000Z",
+        })
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert (out["status"], out["lane"]) == ("routed", "wait_for_session")
+        assert out["session_requested_at"] == "2026-11-01T10:00:00.000Z"
+        assert "was requested" in out["message"]
+
+    @pytest.mark.parametrize("lane", ["agent", None, ["session"]])
+    def test_a_routed_answer_with_a_lane_this_client_cannot_read_stays_uncertain(self, via_client, http, lane):
+        http.return_value = _response(202, {
+            "kind": "routed", "lane": lane, "reason": "fits_session", "attemptId": 7, "sessionRequestedAt": None,
+        })
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert (out["status"], out["server_outcome"]) == ("uncertain", "routed")
+        assert "lane" not in out
+
+    def test_a_command_waiting_with_no_session_requested_yet_says_the_next_one(self, via_client, http):
+        http.return_value = _response(202, {
+            "kind": "routed", "lane": "wait_for_session", "reason": "session_draining", "attemptId": 7,
+            "sessionRequestedAt": None,
+        })
+        out = json.loads(server.workspace_run(WS, "echo hi", submission_key="k"))
+        assert (out["status"], out["lane"]) == ("routed", "wait_for_session")
+        assert out["session_requested_at"] is None
+        assert "next session" in out["message"]
+
     def test_an_empty_key_is_minted_once_and_returned(self, via_client, http):
         http.side_effect = [
             requests.Timeout("slow"),

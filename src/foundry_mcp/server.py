@@ -7898,7 +7898,15 @@ def workspace_run(
     returned. A new key starts a new job.
 
     `status` in the answer is one of:
-    - "submitted": the job is on the scheduler (`scheduler_job_id`).
+    - "submitted": the job is on the scheduler (`scheduler_job_id`). When the
+      run environment runs short commands in a workspace session, `lane` is
+      "job" and `reason` says why this one got its own job.
+    - "routed": the command runs in the workspace's session instead of its own
+      job. `lane` is "session" (a live session takes it) or "wait_for_session"
+      (it waits for the session to start; `session_requested_at` is when that
+      session was requested, or null when it waits for the next one). The
+      server dispatches it; do not submit it again. Follow it with
+      workspace_job_status.
     - "waiting": a chain step, stored until `after` ends; the server submits
       it then. Check it with workspace_job_status.
     - "awaiting_approval": the run environment needs a person's approval. A
@@ -7982,6 +7990,19 @@ def workspace_run(
     if kind == "submitted":
         result.update(status="submitted", scheduler_job_id=outcome.get("jobId"),
                       message="The job was submitted. Call workspace_job_status with this submission_key to follow it.")
+        # Only a server whose run environment has a session lane says which lane and why.
+        for field in ("lane", "reason"):
+            if isinstance(outcome.get(field), str):
+                result[field] = outcome[field]
+        return json.dumps(result, indent=2)
+    # A lane this client does not know falls through to uncertain below, not to a guessed message.
+    if kind == "routed" and outcome.get("lane") in ("session", "wait_for_session"):
+        requested_at = outcome.get("sessionRequestedAt")
+        result.update(
+            status="routed", lane=outcome.get("lane"), reason=outcome.get("reason"),
+            session_requested_at=requested_at if isinstance(requested_at, str) else None,
+            message=_routed_message(outcome.get("lane"), requested_at),
+        )
         return json.dumps(result, indent=2)
     if kind == "waiting":
         result.update(
@@ -8043,6 +8064,19 @@ def workspace_run(
             status, reason, message, submission_key=key,
         )
     _workspace_error(outcome, status, "submit_refused", "The job was not submitted.", submission_key=key)
+
+
+def _routed_message(lane, requested_at) -> str:
+    if lane == "session":
+        text = "The command runs in this workspace's live session, which the server dispatches it into."
+    elif isinstance(requested_at, str):
+        text = (
+            f"The command waits for this workspace's session, which was requested at {requested_at}. "
+            "The server runs it there once the session starts."
+        )
+    else:
+        text = "The command waits for this workspace's next session. The server runs it there once one starts."
+    return text + " Call workspace_job_status with this submission_key to follow it."
 
 
 def _waiting_message(when, hold) -> str:
