@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Changed
+- **A failed workspace job says why in its status**
+  - `workspace_job_status` on a `failed` job now returns the server's
+    `failure` (its reason and exit code) and, when the job's result can be
+    read, `exit_code` and `stderr_tail`, the last 2 KiB of its standard
+    error. It also returns `next_step`, which says to fix the command and
+    submit it again under a new `submission_key`. When the result cannot be
+    read, the failure reason is returned alone.
 - **Large result files stay out of the conversation**
   - `download_file` in `auto` mode (the default) now returns a file inline
     only up to 48KB; a larger file comes back as the signed link. The link

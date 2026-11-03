@@ -8113,6 +8113,13 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     roots). Its `refusal` field holds the refusal code; it is null for every
     other status. A refused job is not final: fix the cause, then call
     workspace_run again with the same submission_key to retry it.
+
+    A `failed` job says why. `failure` holds its reason (for example
+    exited_nonzero, timed_out, session_failed_to_start) and exit code, and when
+    the job's result can be read, `exit_code` and `stderr_tail` (the last 2 KiB
+    of its standard error) come with it. Read the error, fix the command, then
+    call workspace_run again under a new submission_key: a failed key does not
+    run again.
     """
     _check_workspace_id(workspace_id)
     _check_submission_key(submission_key)
@@ -8124,7 +8131,40 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     result = {"job": body}
     if isinstance(body, dict) and body.get("status") == "awaiting_approval" and body.get("requestId"):
         result["approve_at"] = _approve_link(workspace_id, body["requestId"])
+    if isinstance(body, dict) and body.get("status") == "failed":
+        result["failure"] = body.get("failure")
+        result.update(_failed_job_error(workspace_id, submission_key))
+        result["next_step"] = _FAILED_JOB_NEXT_STEP
     return json.dumps(result, indent=2)
+
+
+_FAILED_JOB_NEXT_STEP = "Read the error, fix the command, then call workspace_run again under a NEW submission_key."
+_STDERR_TAIL_BYTES = 2048
+
+
+def _failed_job_error(workspace_id: str, submission_key: str) -> dict:
+    """
+    The exit code and stderr tail of a failed job, read once from its result.
+    Empty when the result cannot be read, so the status alone still answers.
+    """
+    try:
+        status, body = _workspace_request(
+            "GET", f"/api/v1/agent-workspace/{workspace_id}/jobs/{submission_key}/result", retry=True,
+        )
+    except ToolError:
+        return {}
+    if status != 200 or not isinstance(body, dict):
+        return {}
+    stderr = body.get("stderr") if isinstance(body.get("stderr"), dict) else {}
+    text = stderr.get("text") if isinstance(stderr.get("text"), str) else ""
+    raw = text.encode("utf-8")
+    cut = len(raw) > _STDERR_TAIL_BYTES
+    if cut:
+        text = raw[-_STDERR_TAIL_BYTES:].decode("utf-8", errors="ignore")
+    return {
+        "exit_code": body.get("exitCode"),
+        "stderr_tail": {"text": text, "truncated": cut or bool(stderr.get("truncated"))},
+    }
 
 
 _JOB_RESULT_NEXT_STEPS = {
@@ -8155,6 +8195,9 @@ def get_job_result(workspace_id: str, submission_key: str):
     and a provenance block with `[prov: ...]`, copied as returned. A file that
     is missing, too large or malformed is listed in `unavailable`; then say so
     and abstain on what it would have held. A failed job produced no numbers.
+    workspace_job_status already returns a failed job's exit code and the end
+    of its standard error, so call this for a failed job only to read its
+    stdout and a longer stderr.
     """
     _check_workspace_id(workspace_id)
     _check_submission_key(submission_key)
