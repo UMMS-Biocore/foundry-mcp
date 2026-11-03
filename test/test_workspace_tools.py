@@ -1062,3 +1062,68 @@ class TestGetJobResult:
         doc = tools["get_job_result"].description
         for name in ("outputs/<submission_key>/", "figure.png", "values.csv", "provenance.json", "script.py", "job://"):
             assert name in doc
+
+
+def _failed_job(failure):
+    return {"requestId": 7, "submissionKey": "plot-1", "status": "failed", "failure": failure}
+
+
+class TestFailedJobStatus:
+    def test_a_failed_job_carries_its_failure_exit_code_and_stderr_tail(self, via_client, http):
+        failure = {"reason": "exited_nonzero", "exitCode": 2}
+        stderr = "Traceback (most recent call last):\nNameError: name 'pd' is not defined\n"
+        http.side_effect = [
+            _response(200, _failed_job(failure)),
+            _response(200, _result_body(status="failed", exitCode=2, stderr={"text": stderr, "truncated": False})),
+        ]
+        out = json.loads(server.workspace_job_status(WS, "plot-1"))
+        assert [c.args for c in http.call_args_list] == [
+            ("GET", f"{HOST}/api/v1/agent-workspace/{WS}/jobs/plot-1"),
+            ("GET", f"{HOST}/api/v1/agent-workspace/{WS}/jobs/plot-1/result"),
+        ]
+        assert out["failure"] == failure
+        assert out["exit_code"] == 2
+        assert out["stderr_tail"] == {"text": stderr, "truncated": False}
+        assert "NEW submission_key" in out["next_step"] and "workspace_run" in out["next_step"]
+
+    def test_a_long_stderr_is_cut_to_its_last_2_kib(self, via_client, http):
+        stderr = "x" * 5000 + "é\nNameError: name 'pd' is not defined\n"
+        http.side_effect = [
+            _response(200, _failed_job({"reason": "exited_nonzero", "exitCode": 1})),
+            _response(200, _result_body(status="failed", exitCode=1, stderr={"text": stderr, "truncated": False})),
+        ]
+        tail = json.loads(server.workspace_job_status(WS, "plot-1"))["stderr_tail"]
+        assert len(tail["text"].encode("utf-8")) <= 2048
+        assert tail["text"].endswith("NameError: name 'pd' is not defined\n")
+        assert tail["truncated"] is True
+
+    def test_a_job_with_no_readable_result_gives_the_reason_alone(self, via_client, http):
+        failure = {"reason": "session_failed_to_start", "exitCode": None}
+        http.side_effect = [
+            _response(200, _failed_job(failure)),
+            _response(409, {"reason": "result_not_supported", "message": "This job has no result to read here."}),
+        ]
+        out = json.loads(server.workspace_job_status(WS, "plot-1"))
+        assert out["failure"] == failure
+        assert "exit_code" not in out and "stderr_tail" not in out
+        assert "NEW submission_key" in out["next_step"]
+
+    def test_a_result_read_that_gets_no_answer_still_returns_the_status(self, via_client, http):
+        http.side_effect = [
+            _response(200, _failed_job({"reason": "job_failed", "exitCode": None})),
+        ] + [requests.ConnectionError("down")] * 10
+        out = json.loads(server.workspace_job_status(WS, "plot-1"))
+        assert out["failure"]["reason"] == "job_failed"
+        assert "stderr_tail" not in out
+
+    def test_a_job_that_did_not_fail_reads_only_its_status(self, via_client, http):
+        http.return_value = _response(200, {"requestId": 7, "submissionKey": "plot-1", "status": "completed"})
+        out = json.loads(server.workspace_job_status(WS, "plot-1"))
+        assert http.call_count == 1
+        assert not {"failure", "exit_code", "stderr_tail", "next_step"} & set(out)
+
+    def test_both_docstrings_say_a_failed_job_carries_its_error(self):
+        status_doc = " ".join(server.workspace_job_status.__doc__.split())
+        assert "failure" in status_doc and "stderr_tail" in status_doc and "new submission_key" in status_doc
+        result_doc = " ".join(server.get_job_result.__doc__.split())
+        assert "workspace_job_status" in result_doc
