@@ -7195,8 +7195,9 @@ def list_pipeline_menu_groups() -> str:
 # ============================================================================
 # Pipeline Building Tools
 #
-# Build a pipeline graph from existing processes with the SDK's PipelineBuilder,
-# which type checks every connection, and save it through the editor's own
+# Build a pipeline graph from existing processes and from other pipelines used
+# as modules with the SDK's PipelineBuilder, which type checks every
+# connection, and save it through the editor's own
 # endpoint (POST /api/pipeline/v1). create_pipeline_config and create_pipeline
 # take the same arguments: the config call is the preview, and the create call
 # rebuilds the graph from its arguments, so what is saved is what was checked.
@@ -7214,7 +7215,7 @@ def _pipelines(via_client):
     if pipelines is None:
         raise ToolError(json.dumps({
             "error": "This Foundry MCP server is running an SDK without pipeline building.",
-            "hint": "Upgrade viafoundry_sdk to 1.3.0 or later.",
+            "hint": "Upgrade viafoundry_sdk to 1.4.0 or later.",
         }))
     return pipelines
 
@@ -7253,65 +7254,53 @@ def _module_nodes(nodes):
     return found
 
 
-def _module_reader(via_client):
-    """Module pipeline id -> its port names, numbered as backend module-ports.ts numbers them.
+def _pipeline_reader(via_client):
+    """get_pipeline for PipelineBuilder, to read module pipelines."""
+    def get_pipeline(pipeline_id):
+        try:
+            return _pipelines(via_client).get_pipeline(pipeline_id)
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(json.dumps({
+                "error": f"Pipeline {pipeline_id} could not be read as a module: {e}",
+                "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
+            })) from e
+    return get_pipeline
 
-    One input per distinct inPro edge end in first appearance order, one output
-    per outPro edge in stored order. A port is named by the module's own
-    pipeline input or output node.
+
+def _builder(via_client, nodes=None, edges=None, pipeline_id=None, revision_ids=None):
+    """A PipelineBuilder that reads processes and module pipelines through this client."""
+    from viafoundry.pipelines import PipelineBuilder
+
+    return PipelineBuilder(_process_reader(via_client), nodes, edges, get_pipeline=_pipeline_reader(via_client),
+                           pipeline_id=pipeline_id, revision_ids=revision_ids)
+
+
+def _describe_connections(builder, labels):
+    """Each edge as {from, output, to, input}, plus process and module inputs nothing feeds.
+
+    A module port is named by the module pipeline's own input or output node.
     """
-    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE
-
-    read = {}
-
-    def module_ports(pipeline_id):
-        if pipeline_id not in read:
-            module = _pipelines(via_client).get_pipeline(pipeline_id)
-            if not module.get("id"):
-                raise ValueError(f"Module pipeline {pipeline_id} could not be read.")
-            inputs, outputs = {}, []
-            for edge in module["edges"]:
-                for end in edge.split("_"):
-                    owner, number = end.split("-")[1], end.split("-")[4]
-                    name = module["nodes"].get(f"g-{number}", {}).get("nodeName")
-                    if owner == INPUT_NODE:
-                        inputs.setdefault(end, name)
-                    elif owner == OUTPUT_NODE:
-                        outputs.append(name)
-            read[pipeline_id] = {"inputs": list(inputs.values()), "outputs": outputs}
-        return read[pipeline_id]
-    return module_ports
-
-
-def _edge_ends(edge):
-    """(producing end, consuming end) of an edge, module ends (pi, po) included."""
-    from viafoundry.pipelines import parse_handle
-
-    first, second = (parse_handle(h) for h in edge.split("_"))
-    return (first, second) if first["side"].endswith("o") else (second, first)
-
-
-def _describe_connections(builder, labels, module_ports=None):
-    """Each edge as {from, output, to, input}, plus process and module inputs nothing feeds."""
-    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE
+    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE, parse_edge
 
     modules = _module_nodes(builder.nodes)
 
     def port(handle, side):
         if handle["side"] in ("pi", "po"):
-            return module_ports(modules[handle["node"]])[side][handle["slot"]]
+            return builder.module_ports(modules[handle["node"]])[side][handle["slot"]]["name"]
         if handle["param"] in (INPUT_NODE, OUTPUT_NODE):
             return None
         return builder.process(handle["param"])[side][handle["slot"]].get("name")
 
     def inputs(key, node):
         if key in modules:
-            return module_ports(modules[key])["inputs"]
+            return [p["name"] for p in builder.module_ports(modules[key])["inputs"]]
         return [inp.get("name") for inp in builder.process(node["param"])["inputs"]]
 
     connections, fed = [], set()
     for edge in builder.edges:
-        source, target = _edge_ends(edge)
+        source, target = parse_edge(edge)
         fed.add((target["node"], target["slot"]))
         connections.append({
             "from": labels.get(source["node"], source["node"]),
@@ -7330,19 +7319,64 @@ def _describe_connections(builder, labels, module_ports=None):
     return connections, unconnected
 
 
-def _build_pipeline(via_client, processes, connections, inputs, outputs):
-    """Assemble and type check a graph. Returns (builder, {g-N: caller's key})."""
-    from viafoundry.pipelines import PipelineBuilder, PipelineGraphError
+def _graph_arguments(nodes, edges):
+    """A saved graph as the processes, modules, inputs, outputs and connections the
+    create and update tools take, each node keyed by its node key and each port by slot."""
+    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE, module_id, parse_edge
+
+    graph = {"processes": [], "modules": [], "inputs": [], "outputs": [], "connections": []}
+    for key, node in nodes.items():
+        param = str(node.get("param"))
+        spec = {"key": key, "name": node.get("nodeName"), "x": node.get("xCoordinate"), "y": node.get("yCoordinate")}
+        if param == INPUT_NODE:
+            graph["inputs"].append(spec)
+        elif param == OUTPUT_NODE:
+            publish = (node.get("nodeSettings") or {}).get("pubWeb")
+            graph["outputs"].append(dict(spec, publish=publish) if publish else spec)
+        elif module_id(param) is not None:
+            graph["modules"].append(dict(spec, pipeline_id=module_id(param)))
+        else:
+            graph["processes"].append(dict(spec, process_id=int(param) if param.isdigit() else param))
+    for edge in edges:
+        source, target = parse_edge(edge)
+        connection = {"from": source["node"]}
+        if source["param"] != INPUT_NODE:
+            connection["output"] = source["slot"]
+        connection["to"] = target["node"]
+        if target["param"] != OUTPUT_NODE:
+            connection["input"] = target["slot"]
+        graph["connections"].append(connection)
+    return graph
+
+
+def _whole_number(value):
+    """A positive whole number given as a number or digits, else None."""
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _build_pipeline(via_client, processes, connections, inputs, outputs, modules=None,
+                    pipeline_id=None, revision_ids=None):
+    """Assemble and type check a graph. Returns (builder, {g-N: caller's key}).
+
+    pipeline_id and revision_ids name the pipeline being saved, so a module that
+    holds it is refused.
+    """
+    from viafoundry.pipelines import PipelineGraphError
 
     _pipelines(via_client)
-    builder = PipelineBuilder(_process_reader(via_client))
+    builder = _builder(via_client, pipeline_id=pipeline_id, revision_ids=revision_ids)
     keys, labels = {}, {}
 
     def refuse(detail):
         raise ToolError(json.dumps({
             "error": "The pipeline graph was refused.",
             "detail": detail,
-            "hint": "Nothing was saved. Use get_process_details for a process's inputs and outputs.",
+            "hint": "Nothing was saved. Use get_process_details for a process's inputs and outputs, "
+                    "and get_pipeline_ports for a module's.",
         }))
 
     def add(kind, spec, make):
@@ -7355,19 +7389,24 @@ def _build_pipeline(via_client, processes, connections, inputs, outputs):
 
     def node(key):
         if key not in keys:
-            refuse(f"A connection names {key!r}, which is not the key of any process, input or output.")
+            refuse(f"A connection names {key!r}, which is not the key of any process, module, input or output.")
         return keys[key]
 
-    if not processes:
-        refuse("A pipeline needs at least one process.")
+    if not processes and not modules:
+        refuse("A pipeline needs at least one process or module.")
     try:
-        for spec in processes:
-            process_id = spec.get("process_id") if isinstance(spec, dict) else None
-            if isinstance(process_id, str) and process_id.isdigit():
-                process_id = int(process_id)
-            if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
-                refuse(f"Every process needs a \"process_id\", a positive whole number; got {process_id!r}.")
+        for spec in processes or []:
+            given = spec.get("process_id") if isinstance(spec, dict) else None
+            process_id = _whole_number(given)
+            if process_id is None:
+                refuse(f"Every process needs a \"process_id\", a positive whole number; got {given!r}.")
             add("process", spec, lambda s: builder.add_process(process_id, s.get("x"), s.get("y"), s.get("name")))
+        for spec in modules or []:
+            given = spec.get("pipeline_id") if isinstance(spec, dict) else None
+            module_id = _whole_number(given)
+            if module_id is None:
+                refuse(f"Every module needs a \"pipeline_id\", a positive whole number; got {given!r}.")
+            add("module", spec, lambda s: builder.add_module(module_id, s.get("x"), s.get("y"), s.get("name")))
         for spec in inputs or []:
             add("input", spec, lambda s: builder.add_input(s.get("name") or s["key"], s.get("x"), s.get("y")))
         for spec in outputs or []:
@@ -7392,16 +7431,23 @@ def _with_doc(text):
 _PIPELINE_GRAPH_HELP = """
     processes: list of {"key", "process_id", "name"?, "x"?, "y"?}. `key` is any
       label you choose; connections refer to nodes by it.
-    inputs: list of {"key", "name"?}, the pipeline inputs. `name` is the field
-      label on the run page (defaults to the key).
-    outputs: list of {"key", "name"?, "publish"?}, the pipeline outputs.
-      `publish` (html, rdata, ...) shows the output as a report of that type.
+    modules: list of {"key", "pipeline_id", "name"?, "x"?, "y"?}, other
+      pipelines used as nodes. `name` defaults to the module pipeline's name.
+      get_pipeline_ports(pipeline_id) lists a module's inputs and outputs. A
+      module may not hold the pipeline being saved, and modules nest at most
+      five deep.
+    inputs: list of {"key", "name"?, "x"?, "y"?}, the pipeline inputs. `name`
+      is the field label on the run page (defaults to the key).
+    outputs: list of {"key", "name"?, "publish"?, "x"?, "y"?}, the pipeline
+      outputs. `publish` (html, rdata, ...) shows the output as a report of
+      that type.
     connections: list of {"from", "to", "output"?, "input"?}. Edges run from a
-      process or pipeline input to a process or pipeline output. `output` and
-      `input` pick the process's port by 0-based slot, sname, name or parameter
-      id; leave one out when the process has only one. Ends must match on file
-      type, and a value (qualifier val) connects only to a value. One pipeline
-      input may feed several process inputs of the same type.
+      process, module or pipeline input to a process, module or pipeline
+      output. `output` and `input` pick a process's port by 0-based slot,
+      sname, name or parameter id, and a module's port by 0-based slot or name;
+      leave one out when there is only one. Ends must match on file type, and a
+      value (qualifier val) connects only to a value. One pipeline input may
+      feed several inputs of the same type.
     pipeline_group_id: a pipeline menu group from list_pipeline_menu_groups,
       not a process menu group.
 """
@@ -7413,16 +7459,20 @@ def get_pipeline(pipeline_id: int) -> str:
     Read one pipeline: its fields, its graph (nodes and edges as the editor saves
     them) and `connections`, each edge spelled out as process and port names
     with 0-based port slots (slot 1 on a pipeline input or output).
-    `unconnected_inputs` lists process inputs nothing feeds. Writes nothing.
+    `unconnected_inputs` lists process and module inputs nothing feeds.
+    Writes nothing.
 
     A node's `param` is a process id, "inPro" (pipeline input), "outPro"
     (pipeline output) or "p<pipeline id>", another pipeline used as a module.
     `modules` lists those nodes. A module's ports are named by that pipeline's
     own input and output nodes, with 0-based slots in the module's port order.
     Process ids and pipeline ids are separate id spaces.
-    """
-    from viafoundry.pipelines import PipelineBuilder
 
+    `graph` is the same graph as the processes, modules, inputs, outputs and
+    connections arguments that update_pipeline and create_pipeline take, keyed
+    by node key (g-N) with every port picked by slot. Change it and pass it
+    back to save an edited graph.
+    """
     try:
         via_client = get_client()
         pipeline = _pipelines(via_client).get_pipeline(pipeline_id)
@@ -7437,18 +7487,56 @@ def get_pipeline(pipeline_id: int) -> str:
             "error": f"No pipeline {pipeline_id} could be read.",
             "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
         }))
-    builder = PipelineBuilder(_process_reader(via_client), pipeline["nodes"], pipeline["edges"])
+    builder = _builder(via_client, pipeline["nodes"], pipeline["edges"])
     labels = {key: f"{key} {node.get('nodeName')}" for key, node in pipeline["nodes"].items()}
     modules = _module_nodes(pipeline["nodes"])
     if modules:
         pipeline["modules"] = [{"node": key, "pipeline_id": module_id} for key, module_id in modules.items()]
     try:
-        pipeline["connections"], pipeline["unconnected_inputs"] = _describe_connections(
-            builder, labels, _module_reader(via_client))
+        pipeline["connections"], pipeline["unconnected_inputs"] = _describe_connections(builder, labels)
     except Exception as e:
         logger.warning(f"Could not name the connections of pipeline {pipeline_id}: {e}")
         pipeline["connections_error"] = "Could not read every process and module in this pipeline to name its ports."
+    try:
+        pipeline["graph"] = _graph_arguments(pipeline["nodes"], pipeline["edges"])
+    except Exception as e:
+        logger.warning(f"Could not turn the graph of pipeline {pipeline_id} into tool arguments: {e}")
     return json.dumps(serialize_response(pipeline), indent=2)
+
+
+@mcp.tool()
+def get_pipeline_ports(pipeline_id: int) -> str:
+    """
+    List a pipeline's inputs and outputs as a module: the ports another
+    pipeline connects to when it uses this one as a module node. Writes
+    nothing.
+
+    Each port has its 0-based `slot`, its `name` (the pipeline's own input or
+    output node), and the `process_id`, `parameter_id`, `file_type` and
+    `qualifier` of the process inside the pipeline that consumes or produces
+    it. A connection to or from a module picks a port by slot or name, and the
+    ends must match on file type. Check the ports before adding a pipeline as
+    a module with create_pipeline_config.
+    """
+    from viafoundry.pipelines import PipelineGraphError
+
+    via_client = get_client()
+    _pipelines(via_client)
+    builder = _builder(via_client)
+    try:
+        ports = builder.module_ports(pipeline_id)
+        name = builder.pipeline(pipeline_id).get("name")
+    except PipelineGraphError as e:
+        raise ToolError(json.dumps({
+            "error": str(e),
+            "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
+        })) from e
+    return json.dumps({
+        "pipeline_id": pipeline_id,
+        "name": name,
+        "inputs": ports["inputs"],
+        "outputs": ports["outputs"],
+    }, indent=2)
 
 
 _CREATE_PIPELINE_CONFIG_DOC = """
@@ -7464,6 +7552,10 @@ _CREATE_PIPELINE_CONFIG_DOC = """
       inputs=[{"key": "label", "name": "inputParam"}],
       outputs=[{"key": "report", "name": "outputParam"}],
       connections=[{"from": "label", "to": "check"}, {"from": "check", "to": "report"}]
+    The same graph with pipeline 1777 as a module: processes=[],
+      modules=[{"key": "smoke", "pipeline_id": 1777}], the same inputs and
+      outputs, connections=[{"from": "label", "to": "smoke", "input": "inputParam"},
+      {"from": "smoke", "to": "report", "output": "outputParam"}]
 
     Show the user `connections` and `unconnected_inputs`, then call
     create_pipeline with the same arguments and confirm_create=true.
@@ -7481,8 +7573,9 @@ def create_pipeline_config(
     outputs: list = None,
     summary: str = "",
     description: str = "",
+    modules: list = None,
 ) -> str:
-    builder, labels = _build_pipeline(get_client(), processes, connections, inputs, outputs)
+    builder, labels = _build_pipeline(get_client(), processes, connections, inputs, outputs, modules)
     described, unconnected = _describe_connections(builder, labels)
     return json.dumps({
         "name": name,
@@ -7526,6 +7619,7 @@ def create_pipeline(
     outputs: list = None,
     summary: str = "",
     description: str = "",
+    modules: list = None,
 ) -> str:
     if confirm_create is not True:
         raise ToolError(json.dumps({
@@ -7533,7 +7627,7 @@ def create_pipeline(
                      "result, and create only after they agree."
         }))
     via_client = get_client()
-    builder, _ = _build_pipeline(via_client, processes, connections, inputs, outputs)
+    builder, _ = _build_pipeline(via_client, processes, connections, inputs, outputs, modules)
     try:
         logger.info(f"Creating pipeline {name!r} with {len(builder.nodes)} nodes")
         created = _pipelines(via_client).create_pipeline(
@@ -7609,14 +7703,16 @@ _UPDATE_PIPELINE_DOC = """
     new graph first, show the user the old and new connections, and set
     `confirm_update` to true only after they agree.
 
-    Refuses a pipeline that is public or shared with a group, pinned, that
-    the signed in account cannot edit, or that uses another pipeline as a
-    module (the graph arguments cannot carry a module node yet). To change one of those, create_pipeline
-    makes a new private pipeline instead.
+    Refuses a pipeline that is public or shared with a group, pinned, or that
+    the signed in account cannot edit. To change one of those, create_pipeline
+    makes a new private pipeline instead. Also refuses a module that is, or
+    holds, this pipeline or any revision of it.
 
-    The graph replaces the old one entirely: pass every process, input, output
-    and connection the pipeline should have. `name`, `summary` and
-    `description` change only when given; every other field is kept.
+    The graph replaces the old one entirely: pass every process, module,
+    input, output and connection the pipeline should have. get_pipeline's
+    `graph` holds the current graph in exactly these arguments; edit it and
+    pass it back. `name`, `summary` and `description` change only when given;
+    every other field is kept.
 """ + _PIPELINE_GRAPH_HELP + """
     Returns the saved edges, the connections spelled out, and
     `previous_edges`, the graph before the save.
@@ -7640,16 +7736,19 @@ def _refuse_shared_pipeline(pipeline, pipeline_id):
         }))
 
 
-def _refuse_module_pipeline(pipeline, pipeline_id):
-    """Refuse a save over a pipeline holding a module: the graph arguments cannot carry one yet."""
-    modules = sorted(set(_module_nodes(pipeline["nodes"]).values()))
-    if modules:
+def _revision_ids(via_client, pipeline_id):
+    """Every revision's pipeline id, read as list_pipeline_revisions reads them, refusing when unreadable."""
+    try:
+        response = via_client.call(method="GET", endpoint=f"/api/pipeline/v1/{pipeline_id}/revisions")
+    except Exception as e:
+        logger.error(f"Error listing revisions of pipeline {pipeline_id} before a save: {e}")
         raise ToolError(json.dumps({
-            "error": f"Pipeline {pipeline_id} was not saved: it uses pipeline "
-                     f"{', '.join(map(str, modules))} as a module, and update_pipeline cannot "
-                     "rebuild a module node, so the save would drop it.",
-            "hint": "Change this pipeline in the pipeline editor.",
-        }))
+            "error": f"Pipeline {pipeline_id} was not saved: its revisions could not be read, "
+                     "so a module that holds one of them could not be ruled out.",
+            "detail": str(e),
+        })) from e
+    rows = response.get("data") if isinstance(response, dict) else None
+    return [row["id"] for row in rows or [] if isinstance(row, dict) and row.get("id")]
 
 
 @mcp.tool()
@@ -7664,6 +7763,7 @@ def update_pipeline(
     name: str = None,
     summary: str = None,
     description: str = None,
+    modules: list = None,
 ) -> str:
     if confirm_update is not True:
         raise ToolError(json.dumps({
@@ -7683,9 +7783,10 @@ def update_pipeline(
             "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
         }))
     _refuse_shared_pipeline(current, pipeline_id)
-    _refuse_module_pipeline(current, pipeline_id)
+    revision_ids = _revision_ids(via_client, pipeline_id) if modules else None
 
-    builder, labels = _build_pipeline(via_client, processes, connections, inputs, outputs)
+    builder, labels = _build_pipeline(via_client, processes, connections, inputs, outputs, modules,
+                                      pipeline_id=pipeline_id, revision_ids=revision_ids)
     changes = {"nodes": builder.nodes, "edges": builder.edges}
     changes.update(remove_none({"name": name, "summary": summary, "description": description}))
     try:

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+- **Build pipelines that use another pipeline as a module**
+  - `create_pipeline_config`, `create_pipeline` and `update_pipeline` take
+    `modules`, each `{"key", "pipeline_id", "name"?, "x"?, "y"?}`. A
+    connection names a module node by its key and picks a module port by
+    0-based slot or name with `output` and `input`, type checked like a
+    process port.
+  - `get_pipeline_ports(pipeline_id)` lists a pipeline's inputs and outputs
+    as a module, each with its slot, name, file type and qualifier, so a
+    pipeline can be checked before it is used as a module. It writes
+    nothing.
+  - `get_pipeline` returns `graph`, its graph as the processes, modules,
+    inputs, outputs and connections arguments the save tools take, so an
+    edited copy can be passed straight back to `update_pipeline`.
+  - A module that is, or holds, the pipeline being saved or any revision of
+    it is refused, and modules nest at most five deep. Requires
+    `viafoundry_sdk` 1.4.0.
+
 ### Changed
 - **Pipelines that use another pipeline as a module**
   - `get_pipeline` now reads a pipeline holding a module node (`param`
@@ -9,9 +27,9 @@
     those nodes in `modules`, names each module port by the module
     pipeline's own input or output node, and reports module inputs nothing
     feeds in `unconnected_inputs`.
-  - `update_pipeline` now refuses to save over a pipeline that uses a
-    module. The graph arguments cannot carry a module node yet, so the save
-    used to drop it without a word.
+  - `update_pipeline` now saves a pipeline that uses a module. Pass every
+    module along with the rest of the graph; `get_pipeline`'s `graph` holds
+    them all.
 - **A failed workspace job's next step fits why it failed**
   - `next_step` on a `failed` job now depends on its failure reason. A
     command that never ran (its session failed to start, its workspace was
