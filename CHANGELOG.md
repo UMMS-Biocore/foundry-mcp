@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Changed
+- **Pipelines that use another pipeline as a module**
+  - `get_pipeline` now reads a pipeline holding a module node (`param`
+    `p<pipeline id>`) instead of returning `connections_error`. It lists
+    those nodes in `modules`, names each module port by the module
+    pipeline's own input or output node, and reports module inputs nothing
+    feeds in `unconnected_inputs`.
+  - `update_pipeline` now refuses to save over a pipeline that uses a
+    module. The graph arguments cannot carry a module node yet, so the save
+    used to drop it without a word.
 - **A failed workspace job's next step fits why it failed**
   - `next_step` on a `failed` job now depends on its failure reason. A
     command that never ran (its session failed to start, its workspace was

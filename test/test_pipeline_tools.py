@@ -80,8 +80,11 @@ GRAPH_1545 = dict(
 )
 
 
-def _client(processes=PROCESSES, details=None, created=None, revisions=None):
-    """A client whose `call` answers the process, details, revisions and save endpoints."""
+def _client(processes=PROCESSES, details=None, created=None, revisions=None, modules=None):
+    """A client whose `call` answers the process, details, revisions and save endpoints.
+
+    `modules` maps a pipeline id to its details, for pipelines used as modules.
+    """
     client = MagicMock()
 
     def call(*args, **kwargs):
@@ -93,7 +96,8 @@ def _client(processes=PROCESSES, details=None, created=None, revisions=None):
                 raise RuntimeError("404 Not Found")
             return processes[pid]
         if method == "GET" and endpoint.endswith("/details"):
-            return details
+            pipeline_id = int(endpoint.split("/")[-2])
+            return (modules or {}).get(pipeline_id, details)
         if method == "GET" and endpoint.endswith("/revisions"):
             if isinstance(revisions, Exception):
                 raise revisions
@@ -295,6 +299,70 @@ class TestGet:
     def test_an_unreadable_process_still_returns_the_graph(self):
         out = _run(server.get_pipeline, _client(processes={}, details=DETAILS_1777), pipeline_id=1777)
         assert out["edges"] and "connections_error" in out and "connections" not in out
+
+
+# Pipeline 1800 uses pipeline 1777 as a module on g-1, written the way the
+# editor and backend module-ports.ts number module ports: pi/po, the inner
+# process id, the port's order in the module, the inner parameter id, g-N.
+DETAILS_1800 = {
+    "updateAllowed": True,
+    "pipeline": {"main_pipeline_1800": dict(
+        DETAILS_1777["pipeline"]["main_pipeline_1777"], id=1800, name="Uses a module",
+        nodes=json.dumps({"g-1": [300, 400, "p1777", "GPU smoke module", {}],
+                          "g-2": [80, 450, "inPro", "label", {}],
+                          "g-3": [700, 450, "outPro", "report", {}],
+                          "g-4": [700, 600, "outPro", "unused", {}]}),
+        edges=json.dumps({"edges": ["o-inPro-1-252-2_pi-3017-0-252-1", "i-outPro-1-201-3_po-3017-0-201-1"]}),
+    )},
+}
+
+# A module whose input is fed by nothing: 1777's graph saved without its inPro edge.
+DETAILS_1800_UNFED = {
+    "updateAllowed": True,
+    "pipeline": {"main_pipeline_1800": dict(
+        DETAILS_1800["pipeline"]["main_pipeline_1800"],
+        edges=json.dumps({"edges": ["po-3017-0-201-1_i-outPro-1-201-3"]}),
+    )},
+}
+
+
+class TestGetModules:
+    def test_names_a_module_s_ports_by_the_module_s_input_and_output_nodes(self):
+        client = _client(details=DETAILS_1800, modules={1777: DETAILS_1777})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert "connections_error" not in out
+        assert out["connections"] == [
+            {"from": "g-2 label", "output": None, "output_slot": 1,
+             "to": "g-1 GPU smoke module", "input": "inputParam", "input_slot": 0},
+            {"from": "g-1 GPU smoke module", "output": "outputParam", "output_slot": 0,
+             "to": "g-3 report", "input": None, "input_slot": 1},
+        ]
+        assert out["unconnected_inputs"] == []
+        assert out["modules"] == [{"node": "g-1", "pipeline_id": 1777}]
+
+    def test_an_end_written_module_side_first_still_reads_in_dataflow_order(self):
+        client = _client(details=DETAILS_1800_UNFED, modules={1777: DETAILS_1777})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert out["connections"] == [
+            {"from": "g-1 GPU smoke module", "output": "outputParam", "output_slot": 0,
+             "to": "g-3 report", "input": None, "input_slot": 1},
+        ]
+        assert out["unconnected_inputs"] == [{"process": "g-1 GPU smoke module", "input": "inputParam", "slot": 0}]
+
+    def test_an_unreadable_module_still_returns_the_graph(self):
+        client = _client(details=DETAILS_1800, modules={1777: {}})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert out["edges"] and "connections_error" in out and "connections" not in out
+
+
+class TestUpdateModules:
+    def test_a_pipeline_holding_a_module_is_refused_rather_than_dropping_it(self):
+        details = json.loads(json.dumps(DETAILS_1800))
+        client = _client(details=details, created={"id": 1800})
+        with pytest.raises(ToolError, match="module") as refused:
+            _run(server.update_pipeline, client, pipeline_id=1800, confirm_update=True, **GRAPH_1777)
+        assert "1777" in str(refused.value)
+        assert _posts(client) == []
 
 
 # Pipeline 1545's revision list as the server returned it on 2026-10-19.

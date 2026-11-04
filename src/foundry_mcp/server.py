@@ -7240,18 +7240,78 @@ def _process_reader(via_client):
     return get_process
 
 
-def _describe_connections(builder, labels):
-    """Each edge as {from, output, to, input}, plus process inputs nothing feeds."""
-    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE, parse_edge
+_MODULE_PARAM = re.compile(r"^p(\d+)$")
+
+
+def _module_nodes(nodes):
+    """{node key: pipeline id} for each node that runs another pipeline as a module."""
+    found = {}
+    for key, node in nodes.items():
+        match = _MODULE_PARAM.match(str(node.get("param")))
+        if match:
+            found[key] = int(match.group(1))
+    return found
+
+
+def _module_reader(via_client):
+    """Module pipeline id -> its port names, numbered as backend module-ports.ts numbers them.
+
+    One input per distinct inPro edge end in first appearance order, one output
+    per outPro edge in stored order. A port is named by the module's own
+    pipeline input or output node.
+    """
+    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE
+
+    read = {}
+
+    def module_ports(pipeline_id):
+        if pipeline_id not in read:
+            module = _pipelines(via_client).get_pipeline(pipeline_id)
+            if not module.get("id"):
+                raise ValueError(f"Module pipeline {pipeline_id} could not be read.")
+            inputs, outputs = {}, []
+            for edge in module["edges"]:
+                for end in edge.split("_"):
+                    owner, number = end.split("-")[1], end.split("-")[4]
+                    name = module["nodes"].get(f"g-{number}", {}).get("nodeName")
+                    if owner == INPUT_NODE:
+                        inputs.setdefault(end, name)
+                    elif owner == OUTPUT_NODE:
+                        outputs.append(name)
+            read[pipeline_id] = {"inputs": list(inputs.values()), "outputs": outputs}
+        return read[pipeline_id]
+    return module_ports
+
+
+def _edge_ends(edge):
+    """(producing end, consuming end) of an edge, module ends (pi, po) included."""
+    from viafoundry.pipelines import parse_handle
+
+    first, second = (parse_handle(h) for h in edge.split("_"))
+    return (first, second) if first["side"].endswith("o") else (second, first)
+
+
+def _describe_connections(builder, labels, module_ports=None):
+    """Each edge as {from, output, to, input}, plus process and module inputs nothing feeds."""
+    from viafoundry.pipelines import INPUT_NODE, OUTPUT_NODE
+
+    modules = _module_nodes(builder.nodes)
 
     def port(handle, side):
+        if handle["side"] in ("pi", "po"):
+            return module_ports(modules[handle["node"]])[side][handle["slot"]]
         if handle["param"] in (INPUT_NODE, OUTPUT_NODE):
             return None
         return builder.process(handle["param"])[side][handle["slot"]].get("name")
 
+    def inputs(key, node):
+        if key in modules:
+            return module_ports(modules[key])["inputs"]
+        return [inp.get("name") for inp in builder.process(node["param"])["inputs"]]
+
     connections, fed = [], set()
     for edge in builder.edges:
-        source, target = parse_edge(edge)
+        source, target = _edge_ends(edge)
         fed.add((target["node"], target["slot"]))
         connections.append({
             "from": labels.get(source["node"], source["node"]),
@@ -7262,9 +7322,9 @@ def _describe_connections(builder, labels):
             "input_slot": target["slot"],
         })
     unconnected = [
-        {"process": labels.get(key, key), "input": inp.get("name"), "slot": slot}
+        {"process": labels.get(key, key), "input": name, "slot": slot}
         for key, node in builder.nodes.items() if node["param"] not in (INPUT_NODE, OUTPUT_NODE)
-        for slot, inp in enumerate(builder.process(node["param"])["inputs"])
+        for slot, name in enumerate(inputs(key, node))
         if (key, slot) not in fed
     ]
     return connections, unconnected
@@ -7355,8 +7415,11 @@ def get_pipeline(pipeline_id: int) -> str:
     with 0-based port slots (slot 1 on a pipeline input or output).
     `unconnected_inputs` lists process inputs nothing feeds. Writes nothing.
 
-    A node's `param` is a process id, "inPro" (pipeline input) or "outPro"
-    (pipeline output). Process ids and pipeline ids are separate id spaces.
+    A node's `param` is a process id, "inPro" (pipeline input), "outPro"
+    (pipeline output) or "p<pipeline id>", another pipeline used as a module.
+    `modules` lists those nodes. A module's ports are named by that pipeline's
+    own input and output nodes, with 0-based slots in the module's port order.
+    Process ids and pipeline ids are separate id spaces.
     """
     from viafoundry.pipelines import PipelineBuilder
 
@@ -7376,11 +7439,15 @@ def get_pipeline(pipeline_id: int) -> str:
         }))
     builder = PipelineBuilder(_process_reader(via_client), pipeline["nodes"], pipeline["edges"])
     labels = {key: f"{key} {node.get('nodeName')}" for key, node in pipeline["nodes"].items()}
+    modules = _module_nodes(pipeline["nodes"])
+    if modules:
+        pipeline["modules"] = [{"node": key, "pipeline_id": module_id} for key, module_id in modules.items()]
     try:
-        pipeline["connections"], pipeline["unconnected_inputs"] = _describe_connections(builder, labels)
+        pipeline["connections"], pipeline["unconnected_inputs"] = _describe_connections(
+            builder, labels, _module_reader(via_client))
     except Exception as e:
         logger.warning(f"Could not name the connections of pipeline {pipeline_id}: {e}")
-        pipeline["connections_error"] = "Could not read every process in this pipeline to name its ports."
+        pipeline["connections_error"] = "Could not read every process and module in this pipeline to name its ports."
     return json.dumps(serialize_response(pipeline), indent=2)
 
 
@@ -7542,8 +7609,9 @@ _UPDATE_PIPELINE_DOC = """
     new graph first, show the user the old and new connections, and set
     `confirm_update` to true only after they agree.
 
-    Refuses a pipeline that is public or shared with a group, pinned, or that
-    the signed in account cannot edit. To change one of those, create_pipeline
+    Refuses a pipeline that is public or shared with a group, pinned, that
+    the signed in account cannot edit, or that uses another pipeline as a
+    module (the graph arguments cannot carry a module node yet). To change one of those, create_pipeline
     makes a new private pipeline instead.
 
     The graph replaces the old one entirely: pass every process, input, output
@@ -7569,6 +7637,18 @@ def _refuse_shared_pipeline(pipeline, pipeline_id):
             "error": f"Pipeline {pipeline_id} was not saved: {', and '.join(reasons)}.",
             "hint": "A save edits in place under every run that uses it. Use create_pipeline "
                     "for a new private pipeline, or make this one private in the pipeline editor first.",
+        }))
+
+
+def _refuse_module_pipeline(pipeline, pipeline_id):
+    """Refuse a save over a pipeline holding a module: the graph arguments cannot carry one yet."""
+    modules = sorted(set(_module_nodes(pipeline["nodes"]).values()))
+    if modules:
+        raise ToolError(json.dumps({
+            "error": f"Pipeline {pipeline_id} was not saved: it uses pipeline "
+                     f"{', '.join(map(str, modules))} as a module, and update_pipeline cannot "
+                     "rebuild a module node, so the save would drop it.",
+            "hint": "Change this pipeline in the pipeline editor.",
         }))
 
 
@@ -7603,6 +7683,7 @@ def update_pipeline(
             "hint": "Process ids and pipeline ids are separate id spaces; use list_pipelines for pipeline ids.",
         }))
     _refuse_shared_pipeline(current, pipeline_id)
+    _refuse_module_pipeline(current, pipeline_id)
 
     builder, labels = _build_pipeline(via_client, processes, connections, inputs, outputs)
     changes = {"nodes": builder.nodes, "edges": builder.edges}
