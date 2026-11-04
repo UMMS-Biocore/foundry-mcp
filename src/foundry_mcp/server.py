@@ -8153,6 +8153,11 @@ _FAILED_JOB_NEXT_STEPS = {
         "under a NEW submission_key only once they say the cause is cleared."
     ),
     "cancelled": _NEVER_RAN + "It was cancelled. Call workspace_run again under a NEW submission_key only if it is still wanted.",
+    "cancelled_while_running": (
+        "It was cancelled while it ran, so its exit code is the cancel's and there is nothing in the command "
+        "to fix. It may have partly run: check what it wrote under outputs/<submission_key>/, then call "
+        "workspace_run again under a NEW submission_key only if it is still wanted."
+    ),
     "ended_without_result": (
         "Its session ended before the command saved a result, so it may have partly run. Check what it wrote "
         "under outputs/<submission_key>/ before you call workspace_run again under a NEW submission_key."
