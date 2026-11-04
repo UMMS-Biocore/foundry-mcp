@@ -1132,6 +1132,15 @@ class TestFailedJobStatus:
         step = json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
         assert "partly run" in step and "fix the command" not in step and "NEW submission_key" in step
 
+    def test_a_job_cancelled_while_running_is_not_sent_to_fix_its_command(self, via_client, http):
+        http.side_effect = [
+            _response(200, _failed_job({"reason": "cancelled_while_running", "exitCode": 143})),
+            _response(200, _result_body(status="failed", exitCode=143, stderr={"text": "", "truncated": False})),
+        ]
+        step = json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
+        assert "cancelled" in step and "partly run" in step and "fix the command" not in step
+        assert "outputs/<submission_key>/" in step and "NEW submission_key" in step
+
     def test_a_timed_out_job_is_told_about_wall_minutes(self, via_client, http):
         http.side_effect = [
             _response(200, _failed_job({"reason": "timed_out", "exitCode": 137})),
