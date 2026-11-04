@@ -7,6 +7,13 @@
   - The tool description now says that some run environments run jobs on
     the agent host instead of a scheduler, and that the server decides
     where a job runs. The tool's inputs and answers are unchanged.
+- **A failed workspace job's next step fits why it failed**
+  - `next_step` on a `failed` job now depends on its failure reason. A
+    command that never ran (its session failed to start, its workspace was
+    destroyed, the server refused to start it, or it was cancelled) is no
+    longer told to fix the command. A command whose session ended before it
+    saved a result is told it may have partly run, and a timed out one is
+    told to raise `wall_minutes`. Any other reason keeps the general step.
 - **A failed workspace job says why in its status**
   - `workspace_job_status` on a `failed` job now returns the server's
     `failure` (its reason and exit code) and, when the job's result can be

@@ -8118,9 +8118,10 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     A `failed` job says why. `failure` holds its reason (for example
     exited_nonzero, timed_out, session_failed_to_start) and exit code, and when
     the job's result can be read, `exit_code` and `stderr_tail` (the last 2 KiB
-    of its standard error) come with it. Read the error, fix the command, then
-    call workspace_run again under a new submission_key: a failed key does not
-    run again.
+    of its standard error) come with it. `next_step` says what to do for that
+    reason: a command that never ran has nothing to fix, and one that exited
+    with an error does. Either way, call workspace_run again under a new
+    submission_key: a failed key does not run again.
     """
     _check_workspace_id(workspace_id)
     _check_submission_key(submission_key)
@@ -8135,11 +8136,39 @@ def workspace_job_status(workspace_id: str, submission_key: str) -> str:
     if isinstance(body, dict) and body.get("status") == "failed":
         result["failure"] = body.get("failure")
         result.update(_failed_job_error(workspace_id, submission_key))
-        result["next_step"] = _FAILED_JOB_NEXT_STEP
+        result["next_step"] = _failed_job_next_step(body.get("failure"))
     return json.dumps(result, indent=2)
 
 
 _FAILED_JOB_NEXT_STEP = "Read the error, fix the command, then call workspace_run again under a NEW submission_key."
+_NEVER_RAN = "This command never ran, so there is nothing in it to fix. "
+# The step for each failure reason that is not the command's own fault. Any other reason gets
+# _FAILED_JOB_NEXT_STEP.
+_FAILED_JOB_NEXT_STEPS = {
+    "session_failed_to_start": _NEVER_RAN + "Its session failed to start. Call workspace_run again under a NEW submission_key.",
+    "workspace_destroyed": _NEVER_RAN + (
+        "Its workspace was destroyed. Make a new one with workspace_create, then call workspace_run there under a NEW submission_key."
+    ),
+    "grant_refused": _NEVER_RAN + (
+        "The server refused to start it when it left the queue. Tell the user, and call workspace_run again "
+        "under a NEW submission_key only once they say the cause is cleared."
+    ),
+    "cancelled": _NEVER_RAN + "It was cancelled. Call workspace_run again under a NEW submission_key only if it is still wanted.",
+    "ended_without_result": (
+        "Its session ended before the command saved a result, so it may have partly run. Check what it wrote "
+        "under outputs/<submission_key>/ before you call workspace_run again under a NEW submission_key."
+    ),
+    "timed_out": (
+        "It ran past its wall time and was stopped. Raise wall_minutes or make the command faster, then call "
+        "workspace_run again under a NEW submission_key."
+    ),
+}
+
+
+def _failed_job_next_step(failure) -> str:
+    """What to do about a failed job, by its failure reason."""
+    reason = failure.get("reason") if isinstance(failure, dict) else None
+    return _FAILED_JOB_NEXT_STEPS.get(reason, _FAILED_JOB_NEXT_STEP)
 _STDERR_TAIL_BYTES = 2048
 
 
