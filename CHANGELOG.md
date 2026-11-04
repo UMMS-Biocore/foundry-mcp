@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Changed
+- **`workspace_run` says a job may run on the agent host**
+  - The tool description now says that some run environments run jobs on
+    the agent host instead of a scheduler, and that the server decides
+    where a job runs. The tool's inputs and answers are unchanged.
 - **A failed workspace job says why in its status**
   - `workspace_job_status` on a `failed` job now returns the server's
     `failure` (its reason and exit code) and, when the job's result can be
