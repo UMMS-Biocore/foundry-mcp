@@ -1108,6 +1108,47 @@ class TestFailedJobStatus:
         assert "exit_code" not in out and "stderr_tail" not in out
         assert "NEW submission_key" in out["next_step"]
 
+    @pytest.mark.parametrize("reason", ["session_failed_to_start", "workspace_destroyed", "grant_refused", "cancelled"])
+    def test_a_job_that_never_ran_is_not_sent_to_fix_its_command(self, via_client, http, reason):
+        http.side_effect = [
+            _response(200, _failed_job({"reason": reason, "exitCode": None})),
+            _response(409, {"reason": "result_not_supported", "message": "This job has no result to read here."}),
+        ]
+        step = json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
+        assert "never ran" in step and "fix the command" not in step
+
+    def test_a_destroyed_workspace_points_at_a_new_one(self, via_client, http):
+        http.side_effect = [
+            _response(200, _failed_job({"reason": "workspace_destroyed", "exitCode": None})),
+            _response(409, {"reason": "result_not_supported", "message": "This job has no result to read here."}),
+        ]
+        assert "workspace_create" in json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
+
+    def test_a_job_whose_session_ended_may_have_partly_run(self, via_client, http):
+        http.side_effect = [
+            _response(200, _failed_job({"reason": "ended_without_result", "exitCode": None})),
+            _response(409, {"reason": "result_not_supported", "message": "This job has no result to read here."}),
+        ]
+        step = json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
+        assert "partly run" in step and "fix the command" not in step and "NEW submission_key" in step
+
+    def test_a_timed_out_job_is_told_about_wall_minutes(self, via_client, http):
+        http.side_effect = [
+            _response(200, _failed_job({"reason": "timed_out", "exitCode": 137})),
+            _response(200, _result_body(status="failed", exitCode=137, stderr={"text": "", "truncated": False})),
+        ]
+        step = json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
+        assert "wall_minutes" in step and "NEW submission_key" in step
+
+    @pytest.mark.parametrize("failure", [{"reason": "unknown", "exitCode": None}, None, "garbled"])
+    def test_an_unknown_or_missing_reason_gets_the_general_step(self, via_client, http, failure):
+        http.side_effect = [
+            _response(200, _failed_job(failure)),
+            _response(409, {"reason": "result_not_supported", "message": "This job has no result to read here."}),
+        ]
+        step = json.loads(server.workspace_job_status(WS, "plot-1"))["next_step"]
+        assert "fix the command" in step and "NEW submission_key" in step
+
     def test_a_result_read_that_gets_no_answer_still_returns_the_status(self, via_client, http):
         http.side_effect = [
             _response(200, _failed_job({"reason": "job_failed", "exitCode": None})),
