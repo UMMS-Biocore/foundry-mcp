@@ -80,8 +80,11 @@ GRAPH_1545 = dict(
 )
 
 
-def _client(processes=PROCESSES, details=None, created=None, revisions=None):
-    """A client whose `call` answers the process, details, revisions and save endpoints."""
+def _client(processes=PROCESSES, details=None, created=None, revisions=None, modules=None):
+    """A client whose `call` answers the process, details, revisions and save endpoints.
+
+    `modules` maps a pipeline id to its details, for pipelines used as modules.
+    """
     client = MagicMock()
 
     def call(*args, **kwargs):
@@ -93,7 +96,8 @@ def _client(processes=PROCESSES, details=None, created=None, revisions=None):
                 raise RuntimeError("404 Not Found")
             return processes[pid]
         if method == "GET" and endpoint.endswith("/details"):
-            return details
+            pipeline_id = int(endpoint.split("/")[-2])
+            return (modules or {}).get(pipeline_id, details)
         if method == "GET" and endpoint.endswith("/revisions"):
             if isinstance(revisions, Exception):
                 raise revisions
@@ -136,10 +140,11 @@ def _tools():
     ("create_pipeline", ["name", "pipeline_group_id", "processes", "connections", "confirm_create"]),
     ("list_pipeline_revisions", ["pipeline_id"]),
     ("update_pipeline", ["pipeline_id", "processes", "connections", "confirm_update"]),
+    ("get_pipeline_ports", ["pipeline_id"]),
 ])
 def test_tool_is_registered_with_its_arguments(name, required):
     tool = _tools()[name]
-    assert "connections" in tool.description or name in ("get_pipeline", "list_pipeline_revisions")
+    assert "connections" in tool.description or name in ("get_pipeline", "list_pipeline_revisions", "get_pipeline_ports")
     assert tool.description.strip()
     assert set(required) <= set(tool.inputSchema.get("required", []))
 
@@ -220,7 +225,7 @@ class TestConfig:
     def test_an_sdk_without_pipelines_is_refused(self):
         client = _client()
         client.pipelines = None
-        with pytest.raises(ToolError, match="1.3.0"):
+        with pytest.raises(ToolError, match="1.4.0"):
             _run(server.create_pipeline_config, client, name="x", pipeline_group_id=1, **GRAPH_1777)
 
 
@@ -295,6 +300,195 @@ class TestGet:
     def test_an_unreadable_process_still_returns_the_graph(self):
         out = _run(server.get_pipeline, _client(processes={}, details=DETAILS_1777), pipeline_id=1777)
         assert out["edges"] and "connections_error" in out and "connections" not in out
+
+
+# Pipeline 1800 uses pipeline 1777 as a module on g-1, written the way the
+# editor and backend module-ports.ts number module ports: pi/po, the inner
+# process id, the port's order in the module, the inner parameter id, g-N.
+DETAILS_1800 = {
+    "updateAllowed": True,
+    "pipeline": {"main_pipeline_1800": dict(
+        DETAILS_1777["pipeline"]["main_pipeline_1777"], id=1800, name="Uses a module",
+        nodes=json.dumps({"g-1": [300, 400, "p1777", "GPU smoke module", {}],
+                          "g-2": [80, 450, "inPro", "label", {}],
+                          "g-3": [700, 450, "outPro", "report", {}],
+                          "g-4": [700, 600, "outPro", "unused", {}]}),
+        edges=json.dumps({"edges": ["o-inPro-1-252-2_pi-3017-0-252-1", "i-outPro-1-201-3_po-3017-0-201-1"]}),
+    )},
+}
+
+# A module whose input is fed by nothing: 1777's graph saved without its inPro edge.
+DETAILS_1800_UNFED = {
+    "updateAllowed": True,
+    "pipeline": {"main_pipeline_1800": dict(
+        DETAILS_1800["pipeline"]["main_pipeline_1800"],
+        edges=json.dumps({"edges": ["po-3017-0-201-1_i-outPro-1-201-3"]}),
+    )},
+}
+
+
+class TestGetModules:
+    def test_names_a_module_s_ports_by_the_module_s_input_and_output_nodes(self):
+        client = _client(details=DETAILS_1800, modules={1777: DETAILS_1777})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert "connections_error" not in out
+        assert out["connections"] == [
+            {"from": "g-2 label", "output": None, "output_slot": 1,
+             "to": "g-1 GPU smoke module", "input": "inputParam", "input_slot": 0},
+            {"from": "g-1 GPU smoke module", "output": "outputParam", "output_slot": 0,
+             "to": "g-3 report", "input": None, "input_slot": 1},
+        ]
+        assert out["unconnected_inputs"] == []
+        assert out["modules"] == [{"node": "g-1", "pipeline_id": 1777}]
+
+    def test_an_end_written_module_side_first_still_reads_in_dataflow_order(self):
+        client = _client(details=DETAILS_1800_UNFED, modules={1777: DETAILS_1777})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert out["connections"] == [
+            {"from": "g-1 GPU smoke module", "output": "outputParam", "output_slot": 0,
+             "to": "g-3 report", "input": None, "input_slot": 1},
+        ]
+        assert out["unconnected_inputs"] == [{"process": "g-1 GPU smoke module", "input": "inputParam", "slot": 0}]
+
+    def test_an_unreadable_module_still_returns_the_graph(self):
+        client = _client(details=DETAILS_1800, modules={1777: {}})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert out["edges"] and "connections_error" in out and "connections" not in out
+
+
+    def test_returns_its_graph_as_the_arguments_a_save_takes(self):
+        client = _client(details=DETAILS_1800, modules={1777: DETAILS_1777})
+        out = _run(server.get_pipeline, client, pipeline_id=1800)
+        assert out["graph"] == {
+            "processes": [],
+            "modules": [{"key": "g-1", "pipeline_id": 1777, "name": "GPU smoke module", "x": 300, "y": 400}],
+            "inputs": [{"key": "g-2", "name": "label", "x": 80, "y": 450}],
+            "outputs": [{"key": "g-3", "name": "report", "x": 700, "y": 450},
+                        {"key": "g-4", "name": "unused", "x": 700, "y": 600}],
+            "connections": [{"from": "g-2", "to": "g-1", "input": 0}, {"from": "g-1", "output": 0, "to": "g-3"}],
+        }
+
+
+def _pipeline_details(pipeline_id, name, nodes, edges, **fields):
+    """Details as GET /api/pipeline/v1/{id}/details returns them, on 1777's saved fields."""
+    saved = dict(DETAILS_1777["pipeline"]["main_pipeline_1777"], id=pipeline_id, name=name,
+                 nodes=json.dumps(nodes), edges=json.dumps({"edges": edges}), **fields)
+    return {"updateAllowed": True, "pipeline": {f"main_pipeline_{pipeline_id}": saved}}
+
+
+PARAMS_1545 = {"g-0": "2356", "g-3": "outPro", "g-4": "outPro", "g-5": "2357", "g-7": "inPro", "g-9": "inPro"}
+DETAILS_1545 = _pipeline_details(
+    1545, "Xenium", {n: [0, 0, PARAMS_1545[n], name, {}] for n, name in NAMES_1545.items()}, EDGES_1545)
+
+# 1800's graph as tool arguments: 1777 as a module between a pipeline input and output.
+GRAPH_1800 = dict(
+    processes=[],
+    modules=[{"key": "smoke", "pipeline_id": 1777, "name": "GPU smoke module"}],
+    inputs=[{"key": "label"}],
+    outputs=[{"key": "report"}],
+    connections=[{"from": "label", "to": "smoke", "input": "inputParam"},
+                 {"from": "smoke", "to": "report", "output": 0}],
+)
+
+
+class TestPorts:
+    def test_lists_a_pipeline_s_ports_as_a_module(self):
+        client = _client(details=DETAILS_1545, processes=PROCESSES)
+        out = _run(server.get_pipeline_ports, client, pipeline_id=1545)
+        assert out["pipeline_id"] == 1545 and out["name"] == "Xenium"
+        assert out["inputs"] == [
+            {"slot": 0, "name": "samplesheet", "process_id": 2357, "parameter_id": 639,
+             "file_type": "samplesheet", "qualifier": "set"},
+            {"slot": 1, "name": "metadatasheet", "process_id": 2356, "parameter_id": 638,
+             "file_type": "tsv", "qualifier": "set"},
+        ]
+        assert [(p["slot"], p["name"], p["file_type"]) for p in out["outputs"]] == \
+            [(0, "HTML_Report", "html"), (1, "Analysis_Results_RDS", "RDS")]
+        assert _posts(client) == []
+
+    @pytest.mark.parametrize("details", [{}, None, {"pipeline": {}}])
+    def test_an_id_with_no_pipeline_is_refused(self, details):
+        with pytest.raises(ToolError, match="could not be read"):
+            _run(server.get_pipeline_ports, _client(details=details), pipeline_id=3017)
+
+
+class TestConfigModules:
+    def test_rebuilds_1800_exactly(self):
+        client = _client(modules={1777: DETAILS_1777})
+        out = _run(server.create_pipeline_config, client, name="x", pipeline_group_id=1, **GRAPH_1800)
+        assert out["edges"] == ["o-inPro-1-252-2_pi-3017-0-252-1", "i-outPro-1-201-3_po-3017-0-201-1"]
+        assert out["nodes"]["g-1"]["param"] == "p1777" and out["nodes"]["g-1"]["nodeName"] == "GPU smoke module"
+        assert out["connections"] == [
+            {"from": "label", "output": None, "output_slot": 1, "to": "smoke", "input": "inputParam", "input_slot": 0},
+            {"from": "smoke", "output": "outputParam", "output_slot": 0, "to": "report", "input": None, "input_slot": 1},
+        ]
+        assert _posts(client) == []
+
+    def test_a_module_feeds_a_process_and_reports_its_unfed_inputs(self):
+        graph = dict(
+            processes=[{"key": "analysis", "process_id": 2356}],
+            modules=[{"key": "xenium", "pipeline_id": 1545}],
+            connections=[{"from": "xenium", "to": "analysis", "output": "HTML_Report", "input": "inputDir"}],
+        )
+        with pytest.raises(ToolError, match="'xenium' output HTML_Report"):
+            _run(server.create_pipeline_config, _client(modules={1545: DETAILS_1545}), name="x", pipeline_group_id=1, **graph)
+        graph["connections"] = []
+        out = _run(server.create_pipeline_config, _client(modules={1545: DETAILS_1545}), name="x", pipeline_group_id=1, **graph)
+        assert {"process": "xenium", "input": "metadatasheet", "slot": 1} in out["unconnected_inputs"]
+
+    @pytest.mark.parametrize("modules,match", [
+        ([{"key": "smoke", "pipeline_id": "abc"}], "positive whole number"),
+        ([{"pipeline_id": 1777}], "needs a"),
+        ([{"key": "smoke", "pipeline_id": 4242}], "could not be read"),
+    ])
+    def test_a_malformed_module_is_refused(self, modules, match):
+        graph = dict(GRAPH_1800, modules=modules, connections=[])
+        with pytest.raises(ToolError, match=match):
+            _run(server.create_pipeline_config, _client(modules={1777: DETAILS_1777, 4242: {}}),
+                 name="x", pipeline_group_id=1, **graph)
+
+    def test_an_unknown_module_port_is_refused_by_the_callers_key(self):
+        graph = dict(GRAPH_1800, connections=[{"from": "label", "to": "smoke", "input": "nope"}])
+        with pytest.raises(ToolError) as refused:
+            _run(server.create_pipeline_config, _client(modules={1777: DETAILS_1777}), name="x", pipeline_group_id=1, **graph)
+        assert "'smoke' has no input matching 'nope'" in json.loads(str(refused.value))["detail"]
+
+    def test_create_saves_the_module_edges(self):
+        client = _client(modules={1777: DETAILS_1777}, created={"id": 1801})
+        _run(server.create_pipeline, client, name="x", pipeline_group_id=1, confirm_create=True, **GRAPH_1800)
+        (post,) = _posts(client)
+        assert post.kwargs["data"]["edges"] == ["o-inPro-1-252-2_pi-3017-0-252-1", "i-outPro-1-201-3_po-3017-0-201-1"]
+
+
+class TestUpdateModules:
+    def test_a_pipeline_holding_a_module_round_trips_through_get_pipeline(self):
+        client = _client(details=DETAILS_1800, modules={1777: DETAILS_1777}, created={"id": 1800})
+        graph = _run(server.get_pipeline, client, pipeline_id=1800)["graph"]
+        out = _run(server.update_pipeline, client, pipeline_id=1800, confirm_update=True, **graph)
+        (post,) = _posts(client)
+        saved = DETAILS_1800["pipeline"]["main_pipeline_1800"]
+        assert post.kwargs["data"]["edges"] == json.loads(saved["edges"])["edges"] == out["edges"]
+        assert {k: (n["param"], n["nodeName"], n["xCoordinate"]) for k, n in post.kwargs["data"]["nodes"].items()} == \
+            {k: (n[2], n[3], n[0]) for k, n in json.loads(saved["nodes"]).items()}
+
+    @pytest.mark.parametrize("module_id,modules,revisions", [
+        (1777, {}, None),
+        (1790, {}, {"total": 2, "data": [{"id": 1790}, {"id": 1777}]}),
+        (1800, {1800: DETAILS_1800}, None),
+    ])
+    def test_a_module_that_is_or_holds_this_pipeline_or_a_revision_is_refused(self, module_id, modules, revisions):
+        client = _client(details=DETAILS_1777, modules=modules, revisions=revisions, created={"id": 1777})
+        graph = dict(GRAPH_1800, modules=[{"key": "smoke", "pipeline_id": module_id}], connections=[])
+        with pytest.raises(ToolError, match="cannot hold itself"):
+            _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True, **graph)
+        assert _posts(client) == []
+
+    def test_unreadable_revisions_refuse_a_save_with_a_module(self):
+        client = _client(details=DETAILS_1777, modules={1800: DETAILS_1800}, revisions=RuntimeError("500"))
+        with pytest.raises(ToolError, match="revisions"):
+            _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True,
+                 **dict(GRAPH_1800, modules=[{"key": "smoke", "pipeline_id": 1800}], connections=[]))
+        assert _posts(client) == []
 
 
 # Pipeline 1545's revision list as the server returned it on 2026-10-19.
