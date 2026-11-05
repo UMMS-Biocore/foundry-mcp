@@ -558,6 +558,10 @@ class TestWorkspaceRun:
         for status in ("submitted", "awaiting_approval", "review_stale", "uncertain"):
             assert status in doc
 
+    def test_the_docstring_says_some_environments_run_jobs_on_the_agent_host(self):
+        doc = " ".join(server.workspace_run.__doc__.split())
+        assert "run jobs on the agent host" in doc
+
 
 class TestWorkspaceJobStatus:
     def test_reads_the_job_by_its_key(self, via_client, http):

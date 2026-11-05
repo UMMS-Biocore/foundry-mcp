@@ -8062,7 +8062,8 @@ def workspace_run(
 ) -> str:
     """
     Run a command in a container in one of your workspaces, as a job on the
-    workspace's run environment.
+    workspace's run environment. Some run environments run jobs on the agent
+    host instead of a scheduler; the server decides that, not this call.
 
     This LAUNCHES cluster compute (it consumes cluster time). Always confirm with
     the user before calling, and when you declare a chain, confirm the compute of
