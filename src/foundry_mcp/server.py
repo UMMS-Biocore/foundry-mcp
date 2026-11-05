@@ -7548,12 +7548,13 @@ _CREATE_PIPELINE_CONFIG_DOC = """
     cannot fill unless they are optional). A refused connection raises an error
     naming the node by your key.
 """ + _PIPELINE_GRAPH_HELP + """
-    Example (pipeline 1777): processes=[{"key": "check", "process_id": 3017}],
+    Example (ids are placeholders): processes=[{"key": "check", "process_id": 3017}],
       inputs=[{"key": "label", "name": "inputParam"}],
       outputs=[{"key": "report", "name": "outputParam"}],
       connections=[{"from": "label", "to": "check"}, {"from": "check", "to": "report"}]
-    The same graph with pipeline 1777 as a module: processes=[],
-      modules=[{"key": "smoke", "pipeline_id": 1777}], the same inputs and
+    The same graph with a saved pipeline as a module (one that list_pipelines
+    returns; the pipeline behind a standalone process run is refused): processes=[],
+      modules=[{"key": "smoke", "pipeline_id": 1234}], the same inputs and
       outputs, connections=[{"from": "label", "to": "smoke", "input": "inputParam"},
       {"from": "smoke", "to": "report", "output": "outputParam"}]
 
