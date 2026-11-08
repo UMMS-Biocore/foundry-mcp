@@ -21,6 +21,12 @@
     `viafoundry_sdk` 1.4.0.
 
 ### Changed
+- **An administrator can update another user's process**
+  - `update_process` no longer refuses an administrator on ownership. The
+    server already authorizes an admin to update any process and keeps its
+    owner, so the tool now does the same and reports the owner as
+    `updated_as_admin_for_owner_id`. Every port guard still applies. Any
+    other user is refused as before.
 - **Pipelines that use another pipeline as a module**
   - `get_pipeline` now reads a pipeline holding a module node (`param`
     `p<pipeline id>`) instead of returning `connections_error`. It lists
