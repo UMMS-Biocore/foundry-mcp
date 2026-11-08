@@ -5678,9 +5678,11 @@ def update_process(process_id: str, process_data: dict) -> str:
 
     WARNING: This modifies a persistent resource on the Foundry Connect server.
     Changes affect all users who reference this process and cannot be undone
-    automatically. The tool performs an ownership check before updating —
-    if the process is owned by a different user, the update will be rejected.
-    Use duplicate_process to create your own copy instead.
+    automatically. The tool performs an ownership check before updating:
+    a process owned by a different user is refused, unless you are an
+    administrator, whom the server already lets update any process. An admin
+    update keeps the owner and reports it as updated_as_admin_for_owner_id.
+    Otherwise use duplicate_process to create your own copy instead.
     """
     try:
         via_client = get_client()
@@ -5706,10 +5708,12 @@ def update_process(process_id: str, process_data: dict) -> str:
 
         # Resolve current user identity
         current_user_id = None
+        current_user_is_admin = False
         try:
             user_info = via_client.call(method="GET", endpoint="/api/v1/auth/user")
             if isinstance(user_info, dict):
                 current_user_id = user_info.get("id")
+                current_user_is_admin = user_info.get("userRole") == "admin"
         except Exception as e:
             logger.error(f"Failed to resolve current user identity: {e}")
             return json.dumps({
@@ -5718,8 +5722,14 @@ def update_process(process_id: str, process_data: dict) -> str:
                 "hint": "Ensure your Foundry Connect authentication is configured correctly."
             }, indent=2)
 
-        # Enforce ownership
-        if process_owner_id is not None and int(current_user_id) != int(process_owner_id):
+        # Enforce ownership. An admin passes: the server already authorizes an
+        # admin to update any process, and keeps its owner. The port guards
+        # below apply to an admin exactly as to the owner.
+        updated_as_admin_for = None
+        if process_owner_id is not None and int(current_user_id) != int(process_owner_id) and current_user_is_admin:
+            updated_as_admin_for = int(process_owner_id)
+            logger.warning(f"Admin user {current_user_id} updating process {process_id} owned by user {process_owner_id}")
+        elif process_owner_id is not None and int(current_user_id) != int(process_owner_id):
             logger.warning(f"Ownership mismatch: current user {current_user_id} != process owner {process_owner_id}")
             return json.dumps({
                 "error": "Ownership check failed",
@@ -5766,6 +5776,8 @@ def update_process(process_id: str, process_data: dict) -> str:
             result = serialize_response(updated)
             if isinstance(result, dict):
                 result["port_changes"] = port_changes
+                if updated_as_admin_for is not None:
+                    result["updated_as_admin_for_owner_id"] = updated_as_admin_for
             return json.dumps(result, indent=2)
         except Exception as e:
             error_details = {

@@ -139,12 +139,13 @@ class TestBuildUpdateBody:
         assert summary["outputParameters"]["removed"] == ["bam"]
 
 
-def _client(stored=STORED):
+def _client(stored=STORED, user=None):
     client = MagicMock()
+    user = user or {"id": 1}
 
     def call(method, endpoint, **kwargs):
         if endpoint == "/api/v1/auth/user":
-            return {"id": 1}
+            return dict(user)
         if endpoint == f"/api/v1/process/{stored['id']}":
             return json.loads(json.dumps(stored))
         raise AssertionError(f"unexpected call {method} {endpoint}")
@@ -201,4 +202,28 @@ class TestUpdateProcessTool:
         with patch.object(server, "get_client", return_value=client):
             result = json.loads(server.update_process("5", dict(BASE)))
         assert result["error"] == "Ownership check failed"
+        client.process.update_process.assert_not_called()
+
+    def test_a_user_role_does_not_pass_the_ownership_check(self):
+        client = _client({**STORED, "owner_id": 2}, user={"id": 1, "userRole": "user"})
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.update_process("5", dict(BASE)))
+        assert result["error"] == "Ownership check failed"
+        client.process.update_process.assert_not_called()
+
+    def test_an_admin_updates_another_users_process_keeping_its_ports(self):
+        client = _client({**STORED, "owner_id": 2}, user={"id": 1, "userRole": "admin"})
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.update_process("5", dict(BASE)))
+        assert "error" not in result
+        sent = _sent_body(client)
+        assert [p["id"] for p in sent["inputParameters"]] == [11, 12]
+        assert [p["id"] for p in sent["outputParameters"]] == [21]
+        assert result["updated_as_admin_for_owner_id"] == 2
+
+    def test_an_admin_is_still_refused_an_empty_port_side(self):
+        client = _client({**STORED, "owner_id": 2}, user={"id": 1, "userRole": "admin"})
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.update_process("5", {**BASE, "inputParameters": []}))
+        assert "error" in result
         client.process.update_process.assert_not_called()
