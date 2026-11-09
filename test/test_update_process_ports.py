@@ -211,6 +211,20 @@ class TestUpdateProcessTool:
         assert result["error"] == "Ownership check failed"
         client.process.update_process.assert_not_called()
 
+    def test_a_guest_role_does_not_pass_the_ownership_check(self):
+        client = _client({**STORED, "owner_id": 2}, user={"id": 1, "userRole": "guest"})
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.update_process("5", dict(BASE)))
+        assert result["error"] == "Ownership check failed"
+        client.process.update_process.assert_not_called()
+
+    def test_a_wrong_case_admin_role_does_not_pass_the_ownership_check(self):
+        client = _client({**STORED, "owner_id": 2}, user={"id": 1, "userRole": "Admin"})
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.update_process("5", dict(BASE)))
+        assert result["error"] == "Ownership check failed"
+        client.process.update_process.assert_not_called()
+
     def test_an_admin_updates_another_users_process_keeping_its_ports(self):
         client = _client({**STORED, "owner_id": 2}, user={"id": 1, "userRole": "admin"})
         with patch.object(server, "get_client", return_value=client):
