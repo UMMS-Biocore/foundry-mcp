@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- **Update and delete metadata fields**
+  - `update_metadata_field(field_id, update_data)` changes only the given
+    settings of a field, such as its label or enum. Keys outside the
+    server's field update schema (for example `active`, `collectionID` or
+    `perms`) and an empty update are refused before anything is sent.
+    The tool reads the field first and sends back the current value of the
+    boolean flags (`required`, `unique`, `hidden`, `deprecated` and the
+    rest) that the server resets to false when an update leaves them out,
+    so changing an enum no longer makes a required field optional.
+    `ontology` is passed through untouched.
+  - `delete_metadata_field(field_id, confirm_delete)` deletes a field
+    definition only when `confirm_delete` is `True`. Records keep the
+    values they already store under that field.
 - **Build pipelines that use another pipeline as a module**
   - `create_pipeline_config`, `create_pipeline` and `update_pipeline` take
     `modules`, each `{"key", "pipeline_id", "name"?, "x"?, "y"?}`. A
