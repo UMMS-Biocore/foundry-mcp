@@ -121,7 +121,7 @@ class TestUpdateMetadataField:
         assert "error" in out
         client.metadata.update_field.assert_not_called()
 
-    @pytest.mark.parametrize("field_id", ["", "   ", None])
+    @pytest.mark.parametrize("field_id", ["", "   ", None, "../run/123", "6977762ac783bd6d7ed0db01/../../run/1", "6977762ac783bd6d7ed0db0", "zz77762ac783bd6d7ed0db01"])
     def test_rejects_a_missing_field_id(self, field_id):
         client = _client()
         with patch.object(server, "get_client", return_value=client):
@@ -147,6 +147,14 @@ class TestUpdateMetadataField:
             out = json.loads(server.update_metadata_field(FIELD_ID, {"label": "X"}))
 
         assert "not found" in out["error"]
+        client.metadata.update_field.assert_not_called()
+
+    def test_writes_nothing_when_the_read_returns_another_field(self):
+        client = _client({"_id": "aaaaaaaaaaaaaaaaaaaaaaaa", "required": True})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.update_metadata_field(FIELD_ID, {"label": "X"}))
+
+        assert "error" in out
         client.metadata.update_field.assert_not_called()
 
     def test_refuses_when_a_current_flag_cannot_be_sent_back(self):
@@ -194,7 +202,7 @@ class TestDeleteMetadataField:
         assert "error" in out
         client.metadata.delete_field.assert_not_called()
 
-    @pytest.mark.parametrize("field_id", ["", "   ", None])
+    @pytest.mark.parametrize("field_id", ["", "   ", None, "../run/123", "6977762ac783bd6d7ed0db01/../../run/1", "6977762ac783bd6d7ed0db0", "zz77762ac783bd6d7ed0db01"])
     def test_rejects_a_missing_field_id(self, field_id):
         client = _client()
         with patch.object(server, "get_client", return_value=client):

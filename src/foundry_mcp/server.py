@@ -6426,9 +6426,16 @@ FIELD_FLAGS_RESET_WHEN_OMITTED = (
 )
 
 
+# A field id is a Mongo ObjectId. It is placed in the request path, so
+# anything else (such as "../run/123") could aim the request at another route.
+_FIELD_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{24}$")
+
+
 def _field_id_problem(field_id):
     if not isinstance(field_id, str) or not field_id.strip():
         return "field_id is required"
+    if not _FIELD_ID_PATTERN.match(field_id):
+        return "field_id must be a 24 character hex field id as get_field_details or search_metadata_fields returned it"
     return None
 
 
@@ -6517,7 +6524,7 @@ def update_metadata_field(field_id: str, update_data: dict) -> str:
         current = serialize_response(via_client.metadata.get_field(field_id))
         if isinstance(current, dict) and isinstance(current.get("data"), dict):
             current = current["data"]
-        if not isinstance(current, dict):
+        if not isinstance(current, dict) or str(current.get("_id", "")).lower() != field_id.lower():
             return json.dumps({"error": f"Could not read field {field_id} before updating it"})
 
         flags, problem = _flags_to_keep(current, update_data)
