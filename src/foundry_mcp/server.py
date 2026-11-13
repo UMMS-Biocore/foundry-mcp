@@ -6406,6 +6406,182 @@ def create_metadata_field(field_data: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
+# Keys the server's field update schema accepts, less `perms` (an update
+# here never changes who can see or edit a field). `active`, `collectionID`
+# and `_id` are not accepted by the server either.
+FIELD_UPDATE_KEYS = (
+    "name", "label", "type", "description", "unit", "namingPattern",
+    "barcode", "barcode_prefix", "unique", "hidden", "deprecated", "required",
+    "checkvalid", "ontology", "order", "default", "ref", "enum", "min", "max",
+    "lowercase", "uppercase", "trim", "header", "identifier", "descriptive",
+    "grouped", "minlength", "maxlength", "various",
+)
+
+# Flags the server's update schema defaults to false when they are left out
+# of the request, so a partial update would reset them. The tool sends each
+# one back with the field's current value unless the caller changes it.
+FIELD_FLAGS_RESET_WHEN_OMITTED = (
+    "unique", "hidden", "deprecated", "required", "lowercase", "uppercase",
+    "trim", "header", "identifier", "descriptive",
+)
+
+
+# A field id is a Mongo ObjectId. It is placed in the request path, so
+# anything else (such as "../run/123") could aim the request at another route.
+_FIELD_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{24}$")
+
+
+def _field_id_problem(field_id):
+    if not isinstance(field_id, str) or not field_id.strip():
+        return "field_id is required"
+    if not _FIELD_ID_PATTERN.match(field_id):
+        return "field_id must be a 24 character hex field id as get_field_details or search_metadata_fields returned it"
+    return None
+
+
+def _field_update_problem(field_id, update_data):
+    """Return why a field update cannot be sent, or None when it is valid."""
+    problem = _field_id_problem(field_id)
+    if problem:
+        return problem
+    if not isinstance(update_data, dict) or not update_data:
+        return "update_data must be a non-empty object"
+    unknown = [key for key in update_data if key not in FIELD_UPDATE_KEYS]
+    if unknown:
+        return (
+            f"update_data contains keys that cannot be updated: {', '.join(unknown)}. "
+            f"Allowed keys: {', '.join(FIELD_UPDATE_KEYS)}"
+        )
+    return None
+
+
+def _flags_to_keep(current, update_data):
+    """Current values of the reset-prone flags the caller did not give.
+
+    Returns (flags, problem). A flag absent on the field is left out, since
+    the server's default of false matches an absent flag. A flag holding a
+    value the update schema refuses cannot be kept, so it is a problem.
+    """
+    flags = {}
+    for key in FIELD_FLAGS_RESET_WHEN_OMITTED:
+        if key in update_data or key not in current:
+            continue
+        value = current[key]
+        if value is not None and not isinstance(value, bool):
+            return None, (
+                f"the field's current '{key}' is {json.dumps(value)}, which an update cannot send back, "
+                f"and leaving it out would reset it to false. Include '{key}' in update_data "
+                f"with the value it should have"
+            )
+        flags[key] = value
+    return flags, None
+
+
+@mcp.tool()
+def update_metadata_field(field_id: str, update_data: dict) -> str:
+    """
+    Update an existing metadata field definition.
+    Only the keys in update_data change; every other setting keeps its value.
+
+    WARNING: This modifies a persistent field definition on the Foundry
+    Connect server and cannot be undone automatically. Every record in the
+    collection is validated against it, so a narrower enum or a new required
+    flag affects existing records. First call get_field_details, show the user
+    the field as it is now next to the new values, and get confirmation
+    before calling this tool.
+
+    The tool reads the field before writing and sends the current value of
+    the flags unique, hidden, deprecated, required, lowercase, uppercase,
+    trim, header, identifier and descriptive along with the change, because
+    the server resets any of them left out of an update to false. Values in
+    update_data are sent as given (ontology is passed through untouched).
+
+    Args:
+        field_id: The field's _id (from get_field_details or
+            search_metadata_fields).
+        update_data: Dict of settings to change. Allowed keys: name, label,
+            type, description, unit, namingPattern, barcode, barcode_prefix,
+            unique, hidden, deprecated, required, checkvalid, ontology, order,
+            default, ref, enum, min, max, lowercase, uppercase, trim, header,
+            identifier, descriptive, grouped, minlength, maxlength, various.
+            Any other key (for example active, collectionID or perms) is
+            refused and nothing is written.
+
+    Returns:
+        The updated field, or {"error": ...}.
+
+    Example:
+        update_metadata_field(
+            field_id="6977762ac783bd6d7ed0db01",
+            update_data={"label": "Organ", "enum": ["liver", "heart", "lung"]}
+        )
+    """
+    problem = _field_update_problem(field_id, update_data)
+    if problem:
+        return json.dumps({"error": problem})
+    try:
+        via_client = get_client()
+        current = serialize_response(via_client.metadata.get_field(field_id))
+        if isinstance(current, dict) and isinstance(current.get("data"), dict):
+            current = current["data"]
+        if not isinstance(current, dict) or str(current.get("_id", "")).lower() != field_id.lower():
+            return json.dumps({"error": f"Could not read field {field_id} before updating it"})
+
+        flags, problem = _flags_to_keep(current, update_data)
+        if problem:
+            return json.dumps({"error": problem})
+
+        payload = {**flags, **update_data}
+        logger.info(f"Updating metadata field '{field_id}': {payload}")
+        field = via_client.metadata.update_field(field_id, payload)
+        return json.dumps(serialize_response(field), indent=2)
+    except Exception as e:
+        logger.error(f"Error updating metadata field: {e}")
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def delete_metadata_field(field_id: str, confirm_delete: bool = False) -> str:
+    """
+    Delete a metadata field definition.
+
+    WARNING: This removes a field definition from the Foundry Connect server
+    and cannot be undone automatically. First call get_field_details, show
+    the user the field (name, label, type and collection), and get explicit
+    confirmation. Only then call this tool with confirm_delete=True.
+
+    Records in the collection keep the values they already store under this
+    field; the field just stops being part of the collection's definition,
+    so those values are no longer validated or shown as a column.
+
+    Args:
+        field_id: The field's _id.
+        confirm_delete: Must be True. Any other value refuses the call and
+            nothing is deleted.
+
+    Returns:
+        The server's deletion confirmation, or {"error": ...}.
+
+    Example:
+        delete_metadata_field(field_id="6977762ac783bd6d7ed0db01", confirm_delete=True)
+    """
+    problem = _field_id_problem(field_id)
+    if problem:
+        return json.dumps({"error": problem})
+    if confirm_delete is not True:
+        return json.dumps({
+            "error": "confirm_delete must be True. Show the user the field and get confirmation before deleting it"
+        })
+    try:
+        via_client = get_client()
+        logger.info(f"Deleting metadata field '{field_id}'")
+        result = via_client.metadata.delete_field(field_id)
+        return json.dumps(serialize_response(result), indent=2)
+    except Exception as e:
+        logger.error(f"Error deleting metadata field: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ============================================================================
 # Metadata Records Tools
 # ============================================================================

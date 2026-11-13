@@ -224,15 +224,17 @@ Create and explore data visualizations and dashboards.
 
 ---
 
-### 📋 Metadata Field Management (3 tools)
+### 📋 Metadata Field Management (5 tools)
 
-Define and explore metadata field schemas.
+Define, explore and change metadata field schemas.
 
-| Tool                     | What It Does                         |
-| ------------------------ | ------------------------------------ |
-| `search_metadata_fields` | Search metadata field definitions    |
-| `get_field_details`      | Get detailed field information       |
-| `create_metadata_field`  | Create new metadata field definition |
+| Tool                     | What It Does                                            |
+| ------------------------ | ------------------------------------------------------- |
+| `search_metadata_fields` | Search metadata field definitions                       |
+| `get_field_details`      | Get detailed field information                          |
+| `create_metadata_field`  | Create new metadata field definition                    |
+| `update_metadata_field`  | Change some settings of a field and keep the rest       |
+| `delete_metadata_field`  | Delete a field definition (needs `confirm_delete=True`) |
 
 ---
 
