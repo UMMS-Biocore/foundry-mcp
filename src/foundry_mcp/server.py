@@ -4445,6 +4445,10 @@ def make_sample_sheet(
 # Values that mean "nothing here" once they reach the pipeline.
 _PREFLIGHT_PLACEHOLDERS = ("", "NO_FILE", "NA", "None", "null")
 
+# The placeholder update_run tells agents to send for an input the run does
+# not use. Pre-flight reports it as a note rather than a missing value.
+_PREFLIGHT_NOT_USED = "NA"
+
 # Statuses that mean the run has never shipped its upload tarball to the
 # cluster, so a path under its own foundryUploads/ legitimately does not exist
 # yet. Failing there would cry wolf on every freshly duplicated run.
@@ -4706,7 +4710,10 @@ def preflight_run(run_id: str) -> str:
     Verifies the sample dataset has files, that every sample-sheet path really
     exists on the compute environment, that the sheet's sample names match the
     dataset, that each group has replicates, and that no required input is
-    empty. Call this between update_run and initiate_run — every problem it
+    empty. An input set to "NA" (what update_run asks for on an input the run
+    does not use) is listed as a warning, not a failure, unless the pipeline
+    requires it and gives it no default. Call this between update_run and
+    initiate_run — every problem it
     finds is one that would otherwise surface as a failed or silently-skipped
     job after the queue time has already been spent.
 
@@ -4753,17 +4760,34 @@ def preflight_run(run_id: str) -> str:
             checks.append(layout_check)
 
         # Empty / placeholder values, and required inputs never saved at all.
+        # "NA" is what update_run asks for on an input the run does not use, so
+        # it is a deliberate choice, not a blank, unless the pipeline needs a
+        # value there (required with no default).
+        definitions = _preflight_definitions(via_client, run_id)
+        needs_value = {d["name"] for d in definitions or []
+                       if d["required"] and d["default"] in (None, "")}
+        not_used = [i["name"] for i in inputs
+                    if isinstance(i["value"], str)
+                    and i["value"].strip() == _PREFLIGHT_NOT_USED]
+        required_na = [n for n in not_used if n in needs_value]
+        not_used = [n for n in not_used if n not in needs_value]
         blanks = [i["name"] for i in inputs
                   if isinstance(i["value"], str)
-                  and i["value"].strip() in _PREFLIGHT_PLACEHOLDERS]
-        definitions = _preflight_definitions(via_client, run_id)
+                  and i["value"].strip() in _PREFLIGHT_PLACEHOLDERS
+                  and i["value"].strip() != _PREFLIGHT_NOT_USED]
         filled = _filled_input_names(details.get("inputs"))
         unset = [d["name"] for d in definitions or []
-                 if d["required"] and d["default"] in (None, "")
-                 and d["name"] not in filled and d["name"] not in blanks]
+                 if d["name"] in needs_value
+                 and d["name"] not in filled and d["name"] not in blanks
+                 and d["name"] not in required_na]
         problems = []
         if blanks:
             problems.append(f"{len(blanks)} input(s) have no value: {', '.join(blanks)}.")
+        if required_na:
+            problems.append(
+                f"{len(required_na)} required input(s) with no default are set to "
+                f"'{_PREFLIGHT_NOT_USED}' (not used), but the pipeline needs a value: "
+                f"{', '.join(required_na)}.")
         if unset:
             problems.append(f"{len(unset)} required input(s) are not set: {', '.join(unset)}.")
         checks.append(
@@ -4774,6 +4798,15 @@ def preflight_run(run_id: str) -> str:
             ) if problems else
             _preflight_check("empty_inputs", "pass", "All inputs have values.")
         )
+        if not_used:
+            checks.append(_preflight_check(
+                "unused_inputs", "warn",
+                f"{len(not_used)} input(s) are set to '{_PREFLIGHT_NOT_USED}' (not used by "
+                f"this run): {', '.join(not_used)}.",
+                "Confirm with the user that the run does not need them. To use one, "
+                "set its real value with update_run.",
+                inputs=not_used,
+            ))
 
         # A pipeline may take its data from one of several optional inputs
         # (reads or bam_files), so none is required, yet one must be set.

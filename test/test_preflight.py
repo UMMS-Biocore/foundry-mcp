@@ -434,3 +434,75 @@ class TestPreflightLayoutProcessOptions:
     def test_mate_and_option_both_wrong_are_both_named(self):
         check = self._run("pair", {"248_36": {"single_or_paired_end_reads": "pair"}})
         assert "mate" in check["detail"] and "single_or_paired_end_reads" in check["detail"]
+
+
+class TestPreflightNotUsedInputs:
+    """update_run refuses an empty value and tells agents to send "NA" for an
+    input the run does not use. Preflight must accept that, not fail on it."""
+
+    @staticmethod
+    def _check(parsed, check_id):
+        return next((c for c in parsed["data"]["checks"] if c["id"] == check_id), None)
+
+    def test_na_on_an_optional_input_passes_with_a_note(self):
+        inputs = DEFAULT_INPUTS + [_inp("bed", "NA")]
+        parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
+        assert self._check(parsed, "empty_inputs")["status"] == "pass"
+        note = self._check(parsed, "unused_inputs")
+        assert note["status"] == "warn"
+        assert "bed" in note["detail"]
+        assert note["fix"]
+        assert parsed["data"]["ok"] is True
+
+    def test_na_is_matched_after_trimming(self):
+        inputs = DEFAULT_INPUTS + [_inp("bed", " NA ")]
+        parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
+        assert self._check(parsed, "empty_inputs")["status"] == "pass"
+        assert "bed" in self._check(parsed, "unused_inputs")["detail"]
+
+    def test_no_na_input_means_no_note(self):
+        parsed, _ = _preflight(files=ALL_GOOD)
+        assert self._check(parsed, "unused_inputs") is None
+
+    def test_real_blanks_still_fail_and_na_is_not_named_as_blank(self):
+        inputs = DEFAULT_INPUTS + [_inp("mate", ""), _inp("bed", "NA")]
+        parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
+        check = self._check(parsed, "empty_inputs")
+        assert check["status"] == "fail"
+        assert "mate" in check["detail"]
+        assert "bed" not in check["detail"]
+        assert "bed" in self._check(parsed, "unused_inputs")["detail"]
+
+    def test_other_placeholders_still_fail(self):
+        for placeholder in ("NO_FILE", "None", "null"):
+            inputs = DEFAULT_INPUTS + [_inp("bed", placeholder)]
+            parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
+            check = self._check(parsed, "empty_inputs")
+            assert check["status"] == "fail", placeholder
+            assert "bed" in check["detail"]
+
+    def test_na_on_a_required_input_without_a_default_fails_by_name(self):
+        inputs = [_inp("mate", "NA"), _inp("genome_build", "hg38"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        check = self._check(parsed, "empty_inputs")
+        assert check["status"] == "fail"
+        assert "mate" in check["detail"] and "NA" in check["detail"]
+        assert "not set" not in check["detail"]  # named once, as NA, not also as unset
+        assert parsed["data"]["ok"] is False
+
+    def test_na_on_a_required_input_with_a_default_is_only_noted(self):
+        inputs = [_inp("mate", "pair"), _inp("genome_build", "hg38"), _inp("run_STAR", "NA"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        assert self._check(parsed, "empty_inputs")["status"] == "pass"
+        assert "run_STAR" in self._check(parsed, "unused_inputs")["detail"]
+        assert parsed["data"]["ok"] is True
+
+    def test_na_on_an_optional_data_input_does_not_count_as_data(self):
+        inputs = [_inp("mate", "single"), _inp("genome_build", "hg38"), _inp("bam_files", "NA"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        assert self._check(parsed, "empty_inputs")["status"] == "pass"
+        assert self._check(parsed, "data_inputs")["detail"] == "Data input set: reads."
+        assert "bam_files" in self._check(parsed, "unused_inputs")["detail"]
