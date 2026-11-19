@@ -1784,7 +1784,7 @@ def _summarize_run_details(details):
 
 
 @mcp.tool()
-def get_run_details(run_id: str, verbose: bool = False) -> str:
+def get_run_details(run_id: str, verbose: bool = False, fields: list = None) -> str:
     """
     Show a run's configuration. By default returns a compact, plain-language
     summary (pipeline, samples, key settings, count of process-option groups).
@@ -1792,12 +1792,36 @@ def get_run_details(run_id: str, verbose: bool = False) -> str:
     needed to build an update_run body — do this before duplicate_run/update_run.
     For a fresh run of a pipeline, create_run returns the same form directly.
     get_run shows a run's status; this shows the settings that produced it.
+
+    The full object of a large pipeline can be tens of KB, so pass `fields`
+    to get only some of its top level keys (fields implies verbose). The
+    result is {run_id, <each requested key>}; requested keys the run does
+    not have are listed under missing_fields, with available_fields beside
+    them. Common keys: inputs (saved input values), processOptions (per
+    process settings), advancedSettings (scheduler resources and run
+    options), runEnvironment (selectedId and availableList), launchDirectory,
+    mainPipeline, project, name, permission, groupId, runUUID.
     """
     try:
         via_client = get_client()
         details = via_client.call(
             method="GET", endpoint=f"/api/v1/run/{run_id}/details"
         )
+        if isinstance(fields, str):
+            fields = [fields]
+        if fields:
+            details = details if isinstance(details, dict) else {}
+            picked = {"run_id": run_id}
+            missing = []
+            for key in fields:
+                if key in details:
+                    picked[key] = details[key]
+                elif key not in missing:
+                    missing.append(key)
+            if missing:
+                picked["missing_fields"] = missing
+                picked["available_fields"] = sorted(details)
+            return json.dumps(picked, indent=2)
         if verbose:
             return json.dumps(details, indent=2)
 
@@ -1814,7 +1838,8 @@ def get_run_details(run_id: str, verbose: bool = False) -> str:
             data=summary_data,
             next_steps=[
                 f"To edit or re-launch, call get_run_details(run_id='{run_id}', "
-                f"verbose=True) for the full editable config, then update_run.",
+                f"verbose=True) for the full editable config (or fields=['inputs', "
+                f"'processOptions'] for just those keys), then update_run.",
                 "Launching a run uses HPC compute — confirm with the user "
                 "before initiate_run.",
             ],
@@ -1916,6 +1941,30 @@ def _input_definitions(parameter_list):
     return [d for d in definitions if d["required"]] + [d for d in definitions if not d["required"]]
 
 
+# A type longer than this is dropped from a compact definition.
+_COMPACT_TYPE_MAX = 16
+
+
+def _compact_input_definitions(definitions):
+    """
+    The few keys a client needs to ask for each input: name, section (external
+    pipelines only, it says where the value is saved), required, default, and
+    type when short. Order (required first) is kept.
+    """
+    compact = []
+    for d in definitions:
+        item = {"name": d["name"]}
+        if "section" in d:
+            item["section"] = d["section"]
+        item["required"] = d["required"]
+        item["default"] = d["default"]
+        kind = d.get("type")
+        if isinstance(kind, str) and len(kind) <= _COMPACT_TYPE_MAX:
+            item["type"] = kind
+        compact.append(item)
+    return compact
+
+
 def _run_form(details, run_name):
     """Everything a user fills before launching a freshly created run."""
     env_block = details.get("runEnvironment") or {}
@@ -1933,11 +1982,19 @@ def _run_form(details, run_name):
     }
 
 
-def _run_form_envelope(run_id, details, run_name, verb, via_client):
+def _run_form_envelope(run_id, details, run_name, verb, via_client, full_definitions=False):
     form = _run_form(details, run_name)
     try:
         parameter_list = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
-        form["input_definitions"] = _input_definitions(parameter_list)
+        definitions = _input_definitions(parameter_list)
+        if full_definitions:
+            form["input_definitions"] = definitions
+        else:
+            form["input_definitions"] = _compact_input_definitions(definitions)
+            form["input_definitions_note"] = (
+                "Compact list: name, required, default and type only. For descriptions and "
+                f"dropdown options call list_run_environments(run_id='{run_id}', full_definitions=True)."
+            )
     except Exception as e:
         # The rest of the form still helps; say plainly what is missing.
         form["input_definitions"] = None
@@ -1970,14 +2027,17 @@ def _run_form_envelope(run_id, details, run_name, verb, via_client):
 
 
 @mcp.tool()
-def create_run(pipeline_id: int, project_id: int, name: str) -> str:
+def create_run(pipeline_id: int, project_id: int, name: str, full_definitions: bool = False) -> str:
     """
     Create a new, unlaunched run of a pipeline in one of your projects and
-    return its form: the pipeline's input definitions (name, type, required,
-    default), process options, the run environments you can
+    return its form: the pipeline's input definitions (name, required,
+    default, type), process options, the run environments you can
     launch on, and a proposed execution directory per environment. This
     writes; confirm the pipeline, project and run name with the user first.
-    Nothing is launched.
+    Nothing is launched. input_definitions is compact by default; pass
+    full_definitions=True to add each input's description and dropdown
+    options (or call list_run_environments(run_id, full_definitions=True)
+    later, which does not create another run).
     """
     try:
         via_client = get_client()
@@ -1990,22 +2050,29 @@ def create_run(pipeline_id: int, project_id: int, name: str) -> str:
         if not run_id:
             raise RuntimeError(f"The server did not return the new run's id: {created}")
         details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
-        return json.dumps(_run_form_envelope(run_id, details, name, "Created", via_client), indent=2)
+        return json.dumps(
+            _run_form_envelope(run_id, details, name, "Created", via_client, full_definitions), indent=2
+        )
     except Exception as e:
         logger.error(f"Error creating run of pipeline {pipeline_id}: {e}")
         return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
-def list_run_environments(run_id: str) -> str:
+def list_run_environments(run_id: str, full_definitions: bool = False) -> str:
     """
     Show the run environments you can launch this run on, with the proposed
     execution directory for each, plus the run's current form.
+    input_definitions is compact (name, required, default, type) by default;
+    full_definitions=True adds each input's description and dropdown options.
     """
     try:
         via_client = get_client()
         details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
-        return json.dumps(_run_form_envelope(run_id, details, details.get("name", ""), "Read", via_client), indent=2)
+        return json.dumps(
+            _run_form_envelope(run_id, details, details.get("name", ""), "Read", via_client, full_definitions),
+            indent=2,
+        )
     except Exception as e:
         logger.error(f"Error listing run environments for run {run_id}: {e}")
         return json.dumps({"error": str(e)})

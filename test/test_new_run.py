@@ -425,3 +425,60 @@ class TestUpdateRunReply:
         client = _patched_client({"ok": True})
         with patch.object(server, "get_client", return_value=client):
             assert json.loads(server.update_run("41", permission=3)) == {"ok": True}
+
+
+class TestCompactDefinitions:
+    def test_create_run_defaults_to_compact_definitions(self):
+        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
+        defs = out["data"]["input_definitions"]
+        assert [d["name"] for d in defs] == ["reads", "genome", "min_len"]
+        assert defs[0] == {"name": "reads", "required": True, "default": None, "type": "file"}
+        assert defs[1] == {"name": "genome", "required": True, "default": "hg38", "type": "val"}
+        for d in defs:
+            assert "description" not in d and "options" not in d
+        note = out["data"]["input_definitions_note"]
+        assert "list_run_environments(run_id='41', full_definitions=True)" in note
+
+    def test_create_run_full_definitions_returns_the_full_list(self):
+        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1", full_definitions=True))
+        assert out["data"]["input_definitions"] == server._input_definitions(PARAMS)
+        assert "input_definitions_note" not in out["data"]
+
+    def test_list_run_environments_compact_and_full(self):
+        client = _patched_client(side_effect=[DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            compact = json.loads(server.list_run_environments("41"))
+        assert "options" not in compact["data"]["input_definitions"][1]
+        client = _patched_client(side_effect=[DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            full = json.loads(server.list_run_environments("41", full_definitions=True))
+        assert full["data"]["input_definitions"][1]["options"] == ["hg38", "mm10"]
+
+    def test_compact_keeps_the_section_of_an_external_pipeline(self):
+        params = {"pipelineType": "nfcore", "inputs": {"io": {"schema": [
+            {"varName": "params.io.input", "type": "input", "singleFile": True, "desc": "Samplesheet"},
+        ], "inputNodes": []}}}
+        assert server._compact_input_definitions(server._input_definitions(params)) == [
+            {"name": "input", "section": "io", "required": True, "default": None, "type": "singleFile"},
+        ]
+
+    def test_compact_drops_a_long_type(self):
+        defs = [{"name": "x", "type": "t" * 40, "required": False, "default": "1", "description": "d", "options": None}]
+        assert server._compact_input_definitions(defs) == [{"name": "x", "required": False, "default": "1"}]
+
+    def test_the_rest_of_the_form_is_unchanged(self):
+        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            compact = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
+        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            full = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1", full_definitions=True))
+        for key in ("input_definitions", "input_definitions_note"):
+            compact["data"].pop(key, None)
+            full["data"].pop(key, None)
+        assert compact["data"] == full["data"]
+        assert compact["next_steps"] == full["next_steps"]
