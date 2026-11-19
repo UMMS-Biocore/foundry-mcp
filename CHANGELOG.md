@@ -305,6 +305,12 @@
   leaves it empty with no pipeline default, and it names that input. When
   the definitions cannot be read, only a genome build the run saved is
   judged.
+- An empty dataset or collection id in a run input is now always null. The
+  server reports an unset `vmetaCollectionId` or `collectionId` as `""` on
+  some runs and `null` on a duplicated one, so a copy did not compare equal
+  to its source. `get_run_details(verbose=True)`, the run form from
+  `create_run` and `list_run_environments`, and the inputs `update_run` sends now turn `""` into
+  `null`. Ids that are set are left untouched.
 - `create_dataset_from_accessions` timed out over a connector on a list of
   about 20 runs or GEO samples, because it asked ENA (and NCBI, for a GSM)
   once per accession. Runs and experiments now go to the ENA portal search

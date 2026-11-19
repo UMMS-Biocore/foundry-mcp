@@ -1935,6 +1935,8 @@ def get_run_details(run_id: str, verbose: bool = False, fields: list = None) -> 
                 picked["available_fields"] = sorted(details)
             return json.dumps(picked, indent=2)
         if verbose:
+            if isinstance(details, dict) and "inputs" in details:
+                details = {**details, "inputs": _null_empty_dataset_ids(details["inputs"])}
             return json.dumps(details, indent=2)
 
         summary_data = _summarize_run_details(details)
@@ -2084,7 +2086,7 @@ def _run_form(details, run_name):
     return {
         # As the server returns them (a list for Foundry pipelines, a dict for
         # external ones), so ids and collection fields round-trip into update_run.
-        "inputs": details.get("inputs") or [],
+        "inputs": _null_empty_dataset_ids(details.get("inputs") or []),
         "process_options": details.get("processOptions") or {},
         "run_environments": [_compact_run_environment(e) for e in envs],
         "selected_run_environment_id": env_block.get("selectedId"),
@@ -2237,7 +2239,29 @@ def _normalize_run_inputs(inputs):
     if not isinstance(inputs, list):
         return inputs
     return [{**inp, "type": _saved_input_type(inp)} if isinstance(inp, dict) else inp
-            for inp in inputs]
+            for inp in _null_empty_dataset_ids(inputs)]
+
+
+_DATASET_ID_FIELDS = ("vmetaCollectionId", "collectionId")
+
+
+def _null_empty_dataset_ids(inputs):
+    """Return run inputs with an empty dataset or collection id as null.
+
+    The server stores an unset id as "" on some inputs and null on others (a
+    duplicated run gets null), so the same run compared or copied would differ.
+    Only "" becomes null; every other value is kept. Takes either input shape:
+    the Foundry list of input dicts or the external pipeline dict."""
+    def fix(inp):
+        if not isinstance(inp, dict) or not any(inp.get(f) == "" for f in _DATASET_ID_FIELDS):
+            return inp
+        return {**inp, **{f: None for f in _DATASET_ID_FIELDS if inp.get(f) == ""}}
+
+    if isinstance(inputs, list):
+        return [fix(inp) for inp in inputs]
+    if isinstance(inputs, dict):
+        return {name: fix(val) for name, val in inputs.items()}
+    return inputs
 
 
 def _saved_fields(data):
