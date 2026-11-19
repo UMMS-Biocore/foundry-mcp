@@ -1577,6 +1577,100 @@ def _pick_diagnostic_log(logs):
     return stub if stub else (None, None)
 
 
+# get_run_log lists at most this many failed tasks, each with at most this many
+# lines of its error output. A run with dozens of failed shards would otherwise
+# bury the log tail under repeats of the same error.
+_RUN_LOG_MAX_FAILED_TASKS = 5
+_RUN_LOG_ERR_TAIL_LINES = 20
+
+_NF_TASK_ERROR_MARKER = "Error executing process > '"
+
+
+def _indented_section(block, header):
+    """The indented lines under `header` (a line such as "Command error:") in
+    a Nextflow error block, dedented, or None when the header is absent."""
+    lines = block.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == header)
+    except StopIteration:
+        return None
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line[:1].isspace():
+            break
+        body.append(line[2:] if line.startswith("  ") else line.strip())
+    return "\n".join(body).strip("\n")
+
+
+def _failed_task_err_tail(logs, task_name):
+    """(err_tail, work_dir) for one failed task, read from the error block
+    Nextflow writes into its own log ("Command error:" holds the tail of the
+    task's .command.err). The logs endpoint returns no task work directory, so
+    this is the only place the task's error reaches the API. Uses the latest
+    block for the task, so a retried task shows its last attempt. Returns
+    (None, None) when no log holds a block for the task."""
+    marker = f"{_NF_TASK_ERROR_MARKER}{task_name}'"
+    found = None
+    for entry in logs:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or ""
+        if name == _TRACE_FILE or name.endswith(_NON_LOG_SUFFIXES):
+            continue
+        content = entry.get("content") or ""
+        at = content.rfind(marker)
+        if at < 0:
+            continue
+        block = content[at + len(marker):]
+        end = block.find(_NF_TASK_ERROR_MARKER)
+        if end >= 0:
+            block = block[:end]
+        err = _indented_section(block, "Command error:")
+        if err is None:
+            continue
+        found = (tail_text(err, max_lines=_RUN_LOG_ERR_TAIL_LINES),
+                 _indented_section(block, "Work dir:") or None)
+        if name in ("log.txt", ".nextflow.log"):
+            break
+    return found if found else (None, None)
+
+
+def _failed_tasks_report(logs):
+    """The failed tasks of a run from its trace, each with the tail of its
+    error output, or None when there is no trace or no failed task."""
+    trace = next((entry for entry in logs if isinstance(entry, dict)
+                  and entry.get("name") == _TRACE_FILE), None)
+    if not trace:
+        return None
+    progress = _parse_trace(trace.get("content"),
+                            max_listed=_RUN_LOG_MAX_FAILED_TASKS)
+    if not progress or not progress["failed_tasks"]:
+        return None
+    tasks = []
+    for task in progress["failed_tasks"]:
+        entry = dict(task)
+        try:
+            err_tail, work_dir = _failed_task_err_tail(logs, task["name"])
+        except Exception as e:
+            entry["command_err_unavailable"] = (
+                f"Could not read this task's error output: {e}")
+        else:
+            if work_dir:
+                entry["work_dir"] = work_dir
+            if err_tail is not None:
+                entry["command_err_tail"] = err_tail
+            else:
+                entry["command_err_unavailable"] = (
+                    "This task's error block was not found in the run's "
+                    "Nextflow logs; read .command.err in its work directory.")
+        tasks.append(entry)
+    return {
+        "failed_tasks": tasks,
+        "failed_tasks_total": progress["failed"],
+        "failed_tasks_omitted": progress["failed"] - len(tasks),
+    }
+
+
 @mcp.tool()
 def get_run_log(run_id: str, attempt_id: int = None) -> str:
     """
@@ -1585,6 +1679,11 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
     "why did it fail / what happened". Returns a plain-language summary plus the
     tail of the most relevant log (.command.err / Nextflow). Pair with get_run
     (status) and get_run_details (the settings that produced it).
+
+    When the run's trace shows failed tasks, the reply starts with them:
+    data.failed_tasks names each one (at most 5) with the last lines of its
+    error output and its work directory, so the failing step is visible even
+    when the log tail is the launcher script.
     """
     try:
         via_client = get_client()
@@ -1638,13 +1737,26 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
             )
             return json.dumps(result, indent=2)
 
+        summary = (
+            f"Showing the tail of '{name}' for run {run_id} (the most "
+            f"relevant log). Read the last lines for the error or the "
+            f"completion message."
+        )
+        data = {}
+        failed = _failed_tasks_report(logs)
+        if failed:
+            names = ", ".join(t["name"] for t in failed["failed_tasks"])
+            label = "Failed task" if failed["failed_tasks_total"] == 1 else "Failed tasks"
+            more = (f" (and {failed['failed_tasks_omitted']} more not shown)"
+                    if failed["failed_tasks_omitted"] else "")
+            summary = (f"{label}: {names}{more}. Their error output is in "
+                       f"data.failed_tasks. " + summary)
+            data.update(failed)
+
         result = envelope(
-            summary=(
-                f"Showing the tail of '{name}' for run {run_id} (the most "
-                f"relevant log). Read the last lines for the error or the "
-                f"completion message."
-            ),
+            summary=summary,
             data={
+                **data,
                 "log_name": name,
                 "log_tail": tail_text(content),
                 "available_logs": [
@@ -3333,11 +3445,13 @@ def _fetch_run_status(via_client, run_id, strict: bool = False):
     return None
 
 
-def _parse_trace(text):
+def _parse_trace(text, max_listed: int = _WATCH_MAX_LISTED):
     """Parse a Nextflow trace.txt into per-task progress.
 
     The status endpoint only returns a flat label, so this is the only source
     of "which step is it on". Returns None when there is no usable trace.
+    `max_listed` caps the running_now and failed_tasks lists; the counts
+    always cover every task.
     """
     lines = [l for l in (text or "").splitlines() if l.strip()]
     if len(lines) < 2:
@@ -3377,8 +3491,8 @@ def _parse_trace(text):
         "failed": failed,
         "running": running,
         "percent_complete": round((done / total) * 100) if total else 0,
-        "running_now": running_now[:_WATCH_MAX_LISTED],
-        "failed_tasks": failed_tasks[:_WATCH_MAX_LISTED],
+        "running_now": running_now[:max_listed],
+        "failed_tasks": failed_tasks[:max_listed],
     }
 
 
