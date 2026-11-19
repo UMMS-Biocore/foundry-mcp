@@ -251,3 +251,38 @@ class TestCleanupDelay:
     def test_the_saved_reply_names_it(self):
         out, _ = _update(cleanup_delay_hours=12)
         assert out["data"]["saved"]["deleteIntermediateDelay"] == 12
+
+
+class TestCleanupEnabled:
+    """cleanup_enabled=False keeps every intermediate file: the cleanup task
+    only picks runs whose deleteIntermediateCheck is true."""
+
+    def test_false_switches_cleanup_off_and_sends_no_delay(self):
+        out, client = _update(cleanup_enabled=False)
+        body = _saved_body(client)
+        assert body["deleteIntermediateCheck"] is False
+        assert "deleteIntermediateDelay" not in body
+        assert out["data"]["saved"]["deleteIntermediateCheck"] is False
+
+    def test_true_switches_cleanup_on_and_keeps_the_saved_delay(self):
+        _, client = _update(cleanup_enabled=True)
+        body = _saved_body(client)
+        assert body["deleteIntermediateCheck"] is True
+        assert "deleteIntermediateDelay" not in body
+
+    def test_true_with_hours_sends_both(self):
+        _, client = _update(cleanup_enabled=True, cleanup_delay_hours=6)
+        body = _saved_body(client)
+        assert body["deleteIntermediateCheck"] is True
+        assert body["deleteIntermediateDelay"] == 6
+
+    def test_false_with_hours_is_refused_without_calling(self):
+        out, client = _update(cleanup_enabled=False, cleanup_delay_hours=6)
+        assert "cleanup_enabled" in out["error"]
+        client.call.assert_not_called()
+
+    @pytest.mark.parametrize("value", [0, 1, "false", None.__class__])
+    def test_non_booleans_are_refused_without_calling(self, value):
+        out, client = _update(cleanup_enabled=value)
+        assert "cleanup_enabled" in out["error"]
+        client.call.assert_not_called()

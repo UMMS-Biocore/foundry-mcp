@@ -2232,6 +2232,7 @@ def update_run(
     exec_settings: dict = None,
     singularity_options: str = None,
     cleanup_delay_hours: int = None,
+    cleanup_enabled: bool = None,
 ) -> str:
     """
     Save a run before launch (PATCH /save). Send only what changes. On a
@@ -2276,10 +2277,23 @@ def update_run(
     Results in the publish directory are kept. Must be a whole number of at
     least 1.
 
+    cleanup_enabled=False switches that cleanup off, so every intermediate
+    file stays until someone deletes it. Use it when a later step reads
+    files that live only in the run's work folder (for example final tables
+    when no publish directory is set), and remember the space stays used.
+    cleanup_enabled=True switches it back on with the saved delay, or with
+    cleanup_delay_hours when given. False together with cleanup_delay_hours
+    is refused.
+
     This mutates the run; confirm with the user before calling.
     """
     try:
         _validate_update_run(inputs, process_options, permission, group_id, launch_directory)
+        if cleanup_enabled is not None:
+            if not isinstance(cleanup_enabled, bool):
+                raise ValueError("cleanup_enabled must be true or false")
+            if cleanup_enabled is False and cleanup_delay_hours is not None:
+                raise ValueError("cleanup_enabled=False switches cleanup off; leave out cleanup_delay_hours")
         if cleanup_delay_hours is not None:
             # 0 would switch cleanup off: the cleanup task skips a run whose delay is 0.
             if isinstance(cleanup_delay_hours, bool) or not isinstance(cleanup_delay_hours, int) \
@@ -2312,6 +2326,8 @@ def update_run(
         }
         data.update({key: value for key, value in optional.items() if value is not None})
         data.update(exec_body)
+        if cleanup_enabled is not None:
+            data["deleteIntermediateCheck"] = cleanup_enabled
         if cleanup_delay_hours is not None:
             data["deleteIntermediateCheck"] = True
             data["deleteIntermediateDelay"] = cleanup_delay_hours

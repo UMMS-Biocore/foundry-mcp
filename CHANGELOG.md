@@ -32,6 +32,12 @@
   - A module that is, or holds, the pipeline being saved or any revision of
     it is refused, and modules nest at most five deep. Requires
     `viafoundry_sdk` 1.4.0.
+- **Switch a run's intermediate file cleanup off**
+  - `update_run` takes `cleanup_enabled`. `False` keeps every intermediate
+    file of the run, so results that live only in its work folder are not
+    deleted after the run ends. `True` switches cleanup back on with the
+    saved delay, or with `cleanup_delay_hours` when given. `False` together
+    with `cleanup_delay_hours` is refused before anything is sent.
 
 ### Changed
 - **An administrator can update another user's process**
