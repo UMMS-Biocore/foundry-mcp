@@ -181,11 +181,13 @@ class TestPreflightRun:
         assert check["status"] == "fail"
         assert "mate" in check["detail"] and "bed" in check["detail"]
 
-    def test_flags_a_missing_genome_build(self):
+    def test_a_pipeline_without_a_genome_build_input_gets_no_genome_warning(self):
+        """No definitions name a genome build and the run saves none, so the
+        warning would never apply."""
         inputs = [i for i in DEFAULT_INPUTS if i["name"] != "genome_build"]
         parsed, _ = _preflight(details=_details(inputs), files=ALL_GOOD)
-        check = next(c for c in parsed["data"]["checks"] if c["id"] == "genome")
-        assert check["status"] == "warn"
+        assert not any(c["id"] == "genome" and c["status"] != "pass"
+                       for c in parsed["data"]["checks"])
 
     def test_every_check_reports_a_fix_when_it_is_not_passing(self):
         parsed, _ = _preflight(files={})
@@ -334,6 +336,100 @@ class TestPreflightAgainstDefinitions:
             parsed = json.loads(server.preflight_run("12194"))
         assert "error" not in parsed
         assert not any(c["id"] == "data_inputs" for c in parsed["data"]["checks"])
+
+
+NO_GENOME_PARAMS = {"pipelineType": "via", "inputs": {
+    "pipe": {
+        "schema": [],
+        "inputNodes": [
+            {"varName": "params.reads", "qualifier": "set"},
+            {"varName": "params.mate", "qualifier": "val"},
+        ],
+    },
+    "processes": {},
+}}
+
+
+class TestPreflightGenomeBuild:
+    """Warn about a missing genome build only when the pipeline takes one."""
+
+    @staticmethod
+    def _genome(parsed):
+        return next((c for c in parsed["data"]["checks"] if c["id"] == "genome"), None)
+
+    @staticmethod
+    def _unreadable(details):
+        client = _client(details=details, files=ALL_GOOD)
+        base = client.call.side_effect
+
+        def _call(**kwargs):
+            if kwargs.get("endpoint", "").endswith("/parameter-list"):
+                raise RuntimeError("boom")
+            return base(**kwargs)
+
+        client.call.side_effect = _call
+        with patch.object(server, "get_client", return_value=client):
+            return json.loads(server.preflight_run("12194"))
+
+    def test_pipeline_without_a_genome_build_input_gets_no_warning(self):
+        inputs = [_inp("mate", "pair"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(NO_GENOME_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        check = self._genome(parsed)
+        assert check is None or check["status"] == "pass"
+
+    def test_defined_genome_build_left_unset_warns_by_name(self):
+        inputs = [_inp("mate", "pair"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        check = self._genome(parsed)
+        assert check["status"] == "warn"
+        assert "genome_build" in check["detail"]
+        assert check["fix"]
+
+    def test_defined_genome_build_left_empty_warns(self):
+        inputs = [_inp("mate", "pair"), _inp("genome_build", ""),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        assert self._genome(parsed)["status"] == "warn"
+
+    def test_defined_genome_build_with_a_value_passes(self):
+        inputs = [_inp("mate", "pair"), _inp("genome_build", "hg38"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(inputs=inputs), files=ALL_GOOD)
+        check = self._genome(parsed)
+        assert check["status"] == "pass"
+        assert "hg38" in check["detail"]
+
+    def test_defined_genome_build_with_a_default_passes_when_unset(self):
+        params = json.loads(json.dumps(RNASEQ_PARAMS))
+        params["inputs"]["pipe"]["inputNodes"][3]["defaultVal"] = "mm10"
+        inputs = [_inp("mate", "pair"),
+                  _inp("reads", "set1", "vmetaCollection", vmetaCollectionId="69743e8d41a0a599bb36f6a8")]
+        parsed = _preflight_with(params, details=_details(inputs=inputs), files=ALL_GOOD)
+        check = self._genome(parsed)
+        assert check["status"] == "pass"
+        assert "mm10" in check["detail"]
+
+    def test_external_pipeline_section_value_counts(self):
+        params = {"pipelineType": "nfcore", "inputs": {"main": {"schema": [
+            {"varName": "params.input", "type": "input", "file": True},
+            {"varName": "params.genome_build", "type": "input"},
+        ]}}}
+        details = _details(inputs={"main": {"input": "/d/sheet.csv", "genome_build": "GRCh38"}})
+        parsed = _preflight_with(params, details=details, files=ALL_GOOD)
+        assert self._genome(parsed)["status"] == "pass"
+
+    def test_unreadable_definitions_do_not_warn_when_no_build_is_saved(self):
+        inputs = [i for i in DEFAULT_INPUTS if i["name"] != "genome_build"]
+        parsed = self._unreadable(_details(inputs))
+        check = self._genome(parsed)
+        assert check is None or check["status"] == "pass"
+
+    def test_unreadable_definitions_still_judge_a_saved_build(self):
+        assert self._genome(self._unreadable(_details()))["status"] == "pass"
+        inputs = [i for i in DEFAULT_INPUTS if i["name"] != "genome_build"] + [_inp("genome_build", "")]
+        assert self._genome(self._unreadable(_details(inputs)))["status"] == "warn"
 
 
 class TestPreflightLayoutMatchesMate:

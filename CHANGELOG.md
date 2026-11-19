@@ -264,6 +264,12 @@
     intermediate files and sets how many hours after the run ends it happens.
 
 ### Fixed
+- `preflight_run` no longer warns "No genome build is set" on a pipeline
+  that takes no genome build. The warning now fires only when the
+  pipeline's input definitions name a genome build input and the run
+  leaves it empty with no pipeline default, and it names that input. When
+  the definitions cannot be read, only a genome build the run saved is
+  judged.
 - `create_dataset_from_accessions` timed out over a connector on a list of
   about 20 runs or GEO samples, because it asked ENA (and NCBI, for a GSM)
   once per accession. Runs and experiments now go to the ENA portal search
