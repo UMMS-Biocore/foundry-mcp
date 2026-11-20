@@ -1852,6 +1852,23 @@ def _default_execution_directory(env, run_name):
     return f"/home/{login}/foundry-connect-runs/{segment}"
 
 
+def _default_publish_directory(env, run_name):
+    """Proposed publish directory for a new run, or None when the user must choose.
+
+    Order: the environment's declared default publish directory (used as is, as the web
+    UI and the server's own save default do), then a `publish` folder inside the proposed
+    execution directory. The server keeps each run apart beneath it (report<id>), so a
+    shared declared execution directory is fine. Only a proposal: never saved unasked.
+    """
+    declared = (env.get("defPublishdir") or "").strip()
+    if declared:
+        return declared
+    execution = _default_execution_directory(env, run_name)
+    if not execution:
+        return None
+    return execution.rstrip("/") + "/publish"
+
+
 def _summarize_run_details(details):
     """Distill a run's full details blob into a compact, plain-language summary
     a bench scientist can read without wading through processOptions."""
@@ -2091,6 +2108,7 @@ def _run_form(details, run_name):
         "run_environments": [_compact_run_environment(e) for e in envs],
         "selected_run_environment_id": env_block.get("selectedId"),
         "proposed_execution_directory": {str(e.get("id")): _default_execution_directory(e, run_name) for e in envs},
+        "proposed_publish_directory": {str(e.get("id")): _default_publish_directory(e, run_name) for e in envs},
         "permission": details.get("permission"),
         "groupId": details.get("groupId"),
     }
@@ -2135,25 +2153,46 @@ def _run_form_envelope(run_id, details, run_name, verb, via_client, full_definit
                 "{section: {name: value}} holding every value, since it replaces the saved inputs whole."
             ),
             "update_run(run_id, inputs=..., run_environment_id=..., launch_directory=..., permission=...) after the user confirms.",
+            (
+                "Show the user proposed_publish_directory for the chosen environment: without a publish directory "
+                "the final results live only in the work folder, which cleanup removes after the run. Save it only "
+                "after the user confirms or gives another path, with update_run(run_id, publish_dir=...). Never "
+                "save it without asking (null means none could be proposed: ask for one)."
+            ),
             "preflight_run(run_id), then initiate_run(run_id) after the user confirms the launch.",
         ],
     )
 
 
 @mcp.tool()
-def create_run(pipeline_id: int, project_id: int, name: str, full_definitions: bool = False) -> str:
+def create_run(
+    pipeline_id: int, project_id: int, name: str, full_definitions: bool = False, publish_dir: str = None
+) -> str:
     """
     Create a new, unlaunched run of a pipeline in one of your projects and
     return its form: the pipeline's input definitions (name, required,
     default, type), process options, the run environments you can
-    launch on, and a proposed execution directory per environment. This
-    writes; confirm the pipeline, project and run name with the user first.
-    Nothing is launched. input_definitions is compact by default; pass
-    full_definitions=True to add each input's description and dropdown
-    options (or call list_run_environments(run_id, full_definitions=True)
-    later, which does not create another run).
+    launch on, and a proposed execution and publish directory per
+    environment. This writes; confirm the pipeline, project and run name
+    with the user first. Nothing is launched. input_definitions is compact
+    by default; pass full_definitions=True to add each input's description
+    and dropdown options (or call list_run_environments(run_id,
+    full_definitions=True) later, which does not create another run).
+
+    publish_dir (an absolute path on the run environment) is saved on the
+    new run right away, so its final results are kept outside the work
+    folder that cleanup removes. Pass it only after the user confirmed the
+    path; otherwise show them proposed_publish_directory and save it later
+    with update_run(publish_dir=...).
     """
     try:
+        if publish_dir is not None:
+            publish_dir = publish_dir.strip()
+            if not publish_dir.startswith("/"):
+                raise ValueError(
+                    "publish_dir must be an absolute path on the run environment, "
+                    "for example /home/<login>/foundry-connect-runs/<run>/publish."
+                )
         via_client = get_client()
         created = via_client.call(
             method="POST",
@@ -2164,9 +2203,30 @@ def create_run(pipeline_id: int, project_id: int, name: str, full_definitions: b
         if not run_id:
             raise RuntimeError(f"The server did not return the new run's id: {created}")
         details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
-        return json.dumps(
-            _run_form_envelope(run_id, details, name, "Created", via_client, full_definitions), indent=2
-        )
+        saved, save_error = None, None
+        if publish_dir is not None:
+            # The run exists now: a refused save is reported with its form, never as a failed create.
+            try:
+                permission, group_id = _permission_from_details(details or {}, run_id)
+                via_client.call(
+                    method="PATCH",
+                    endpoint=f"/api/v1/run/{run_id}/save",
+                    data={"permission": permission, "groupId": group_id, "publishDir": publish_dir},
+                )
+                saved = publish_dir
+            except Exception as e:
+                save_error = (
+                    f"Run {run_id} was created, but its publish directory was not saved: {e}. "
+                    f"Retry with update_run(run_id='{run_id}', publish_dir=...)."
+                )
+        result = _run_form_envelope(run_id, details, name, "Created", via_client, full_definitions)
+        if saved:
+            result["data"]["saved_publish_dir"] = saved
+            result["summary"] += f" Publish directory {saved} is saved."
+        if save_error:
+            result["data"]["publish_dir_error"] = save_error
+            result["summary"] += " The publish directory was not saved (see publish_dir_error)."
+        return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error creating run of pipeline {pipeline_id}: {e}")
         return json.dumps({"error": str(e)})
@@ -2377,6 +2437,11 @@ def _saved_permission(via_client, run_id, group_id):
     """The run's saved permission and group, for a save that leaves them out.
     The save endpoint requires a permission on every call."""
     details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details") or {}
+    return _permission_from_details(details, run_id, group_id)
+
+
+def _permission_from_details(details, run_id, group_id=None):
+    """The permission and group a save must carry, from a run's details already read."""
     permission = details.get("permission")
     if permission is None:
         raise ValueError(
