@@ -5549,6 +5549,225 @@ def preflight_run(run_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+# A value longer than this, or a list longer than _DIFF_LIST_MAX, is shortened
+# in a diff_run_defaults answer; get_run_details(fields=...) has it whole.
+_DIFF_STR_MAX = 120
+_DIFF_LIST_MAX = 5
+_ARRAY_ITEM_FIELD = re.compile(r"^(.*)_ind(\d+)$")
+
+
+def _form_field_defaults(parameter_list):
+    """{processOptions key: {field: default}} of the per process forms a
+    Foundry pipeline defines (the same forms _form_definitions lists), with
+    each field's default from its schema item. None when the parameter list is
+    unreadable or is not a Foundry pipeline's."""
+    inputs = (parameter_list or {}).get("inputs")
+    if not isinstance(inputs, dict) or not isinstance(inputs.get("pipe"), dict):
+        return None
+    blocks = [("pipe", inputs["pipe"])] + list((inputs.get("processes") or {}).items())
+    forms = {}
+    for key, block in blocks:
+        fields = {}
+        for item in (block or {}).get("schema") or []:
+            name = item.get("varName") if isinstance(item, dict) else None
+            if not name or name.startswith("params."):
+                continue
+            default = item.get("defaultVal")
+            fields[name] = item.get("defVal") if default is None else default
+        if fields:
+            forms[str(key)] = fields
+    return forms
+
+
+def _diff_norm(value):
+    """A value in a form comparable with its default: the run page saves
+    "true" for a checked box and "8" for a number the schema gives as 8."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, (list, tuple)):
+        return tuple(_diff_norm(v) for v in value)
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, default=str)
+    if value is None:
+        return None
+    return str(value).strip()
+
+
+def _diff_compact_value(value):
+    if isinstance(value, str) and len(value) > _DIFF_STR_MAX:
+        return value[:_DIFF_STR_MAX - 3] + "..."
+    if isinstance(value, (list, tuple)):
+        items = [_diff_compact_value(v) for v in value[:_DIFF_LIST_MAX]]
+        if len(value) > _DIFF_LIST_MAX:
+            items.append(f"(+{len(value) - _DIFF_LIST_MAX} more)")
+        return items
+    return value
+
+
+def _diff_field_default(defaults, field):
+    """(found, default) for a saved form field. An array item saved as
+    <name>_ind<i> takes item i of its field's default list."""
+    if field in defaults:
+        return True, defaults[field]
+    match = _ARRAY_ITEM_FIELD.match(field)
+    if match and match.group(1) in defaults:
+        default, index = defaults[match.group(1)], int(match.group(2))
+        if isinstance(default, (list, tuple)):
+            return True, default[index] if index < len(default) else None
+        return True, default
+    return False, None
+
+
+def _diff_saved_inputs(inputs):
+    """[(key, lookup, value)] of a run's saved inputs, from either shape: the
+    Foundry list of {name, value, ...}, or an external pipeline's
+    {section: {name: value}}. lookup is (section, name)."""
+    saved = []
+    if isinstance(inputs, dict):
+        for section, block in inputs.items():
+            if isinstance(block, dict) and "value" not in block:
+                for name, value in block.items():
+                    saved.append((f"inputs.{section}.{name}", (section, name), value))
+            else:
+                value = block.get("value") if isinstance(block, dict) else block
+                saved.append((f"inputs.{section}", (None, section), value))
+        return saved
+    for inp in inputs or []:
+        if not isinstance(inp, dict) or not inp.get("name"):
+            continue
+        value = inp.get("value")
+        if inp.get("type") == "vmetaCollection" and inp.get("vmetaCollectionId"):
+            value = inp["vmetaCollectionId"]
+        saved.append((f"inputs.{inp['name']}", (None, inp["name"]), value))
+    return saved
+
+
+def _diff_against_defaults(saved, lookup_default):
+    """Sort saved (key, lookup, value) entries into changed, empty where a
+    default exists, and keys without a definition. Returns (changed, empty,
+    unknown, compared)."""
+    changed, empty, unknown, compared = [], [], [], 0
+    for key, lookup, value in saved:
+        found, default = lookup_default(lookup)
+        if not found:
+            unknown.append(key)
+            continue
+        compared += 1
+        if not _form_value_filled(value):
+            if _form_value_filled(default):
+                empty.append({"key": key, "default": _diff_compact_value(default)})
+            continue
+        if _diff_norm(value) != _diff_norm(default):
+            changed.append({"key": key, "value": _diff_compact_value(value),
+                            "default": _diff_compact_value(default)})
+    return changed, empty, unknown, compared
+
+
+@mcp.tool()
+def diff_run_defaults(run_id: str) -> str:
+    """
+    Read back what a run changed: only the saved inputs and per process form
+    fields (processOptions) whose value differs from the pipeline default,
+    plus the ones left empty where the pipeline has a default. Use it after
+    update_run to confirm the edits in a few lines instead of reading every
+    entry with get_run_details(verbose=True). Reads only; changes nothing.
+
+    Returns data {run_id, changed: [{key, value, default}], empty_with_default:
+    [{key, default}], not_in_pipeline: [key], compared, unchanged}. A key is
+    `inputs.<name>` (`inputs.<section>.<name>` on an external pipeline) or
+    `processOptions.<form>.<field>`, matching what update_run takes. A field
+    the run has not saved runs with its default and is not listed. Long values
+    are shortened; get_run_details(run_id, fields=[...]) returns them whole.
+
+    Args:
+        run_id: The run to read.
+    """
+    try:
+        via_client = get_client()
+        details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details") or {}
+        try:
+            parameter_list = via_client.call(
+                method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
+        except Exception as e:
+            raise RuntimeError(f"Could not read the pipeline's defaults for run {run_id}: {e}") from e
+
+        input_defaults = {(d.get("section"), d["name"]): d["default"]
+                          for d in _input_definitions(parameter_list)}
+
+        def input_default(lookup):
+            if lookup in input_defaults:
+                return True, input_defaults[lookup]
+            return False, None
+
+        changed, empty, unknown, compared = _diff_against_defaults(
+            _diff_saved_inputs(details.get("inputs")), input_default)
+
+        data_extra = {}
+        form_defaults = _form_field_defaults(parameter_list)
+        if form_defaults is not None:
+            if details.get("pipelineReadable") is False:
+                data_extra["process_options_error"] = (
+                    f"Run {run_id}'s saved process options are not readable with this account, "
+                    "so only its inputs were compared.")
+            else:
+                options = details.get("processOptions")
+                saved = []
+                for form, fields in (options if isinstance(options, dict) else {}).items():
+                    if isinstance(fields, dict):
+                        saved.extend((f"processOptions.{form}.{field}", (str(form), field), value)
+                                      for field, value in fields.items())
+
+                def form_default(lookup):
+                    form, field = lookup
+                    if form not in form_defaults:
+                        return False, None
+                    return _diff_field_default(form_defaults[form], field)
+
+                more = _diff_against_defaults(saved, form_default)
+                changed += more[0]
+                empty += more[1]
+                unknown += more[2]
+                compared += more[3]
+
+        unchanged = compared - len(changed) - len(empty)
+        if changed:
+            summary = (f"Run {run_id}: {len(changed)} of {compared} saved values differ "
+                       "from the pipeline defaults")
+        else:
+            summary = (f"Run {run_id}: no value differs from the pipeline defaults "
+                       f"({compared} compared)")
+        if empty:
+            summary += f", {len(empty)} empty where a default exists"
+        if unknown:
+            summary += f", {len(unknown)} saved key(s) the pipeline does not define"
+        summary += "."
+
+        next_steps = [
+            "Values not listed match the pipeline default, or are not saved and run with it.",
+        ]
+        if empty:
+            next_steps.append(
+                "An empty value replaces the default with nothing. Confirm with the user, then "
+                "fill it or set it to the default with update_run.")
+        if unknown:
+            next_steps.append(
+                "not_in_pipeline keys are saved but no input or form field of the pipeline "
+                "reads them; check for a typo in the name.")
+        result = envelope(
+            summary=summary,
+            data={"run_id": run_id, "changed": changed, "empty_with_default": empty,
+                  "not_in_pipeline": unknown, "compared": compared, "unchanged": unchanged,
+                  **data_extra},
+            next_steps=next_steps,
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error comparing run {run_id} with its defaults: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # Recipes
 # ---------------------------------------------------------------------------
