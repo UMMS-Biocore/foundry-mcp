@@ -5713,17 +5713,103 @@ def plan_run(pipeline_id: int, run_id: str = "") -> str:
 # Process/Pipeline Management Tools
 # ============================================================================
 
+_PROCESS_LIST_DEFAULT_LIMIT = 50
+_PROCESS_LIST_MAX_LIMIT = 500
+
+
+def _compact_process(row: dict) -> dict:
+    """One short row per process. The list endpoint selects id, name and
+    summary only; a revision or owner is passed through only when a row
+    actually carries one, never invented."""
+    compact = {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "summary": _truncate_summary(_strip_html(row.get("summary"))),
+    }
+    revision = row.get("rev_id", row.get("revId"))
+    if revision is not None:
+        compact["revision"] = revision
+    if row.get("owner") is not None:
+        compact["owner"] = row.get("owner")
+    return compact
+
+
 @mcp.tool()
-def list_all_processes() -> str:
+def list_all_processes(search: str = None, limit: int = 50, offset: int = 0) -> str:
     """
-    List all processes/pipelines in Foundry Connect. Returns details including
-    process ID, name, summary, and owner information.
+    Search and page the processes you can read. Returns at most `limit` rows
+    (default 50, max 500), so a bare call no longer returns every process:
+    use `search` to narrow and `offset` to page.
+
+    Each process appears once. The server's list repeats a process once per
+    matching group membership; those repeats are dropped by process id. Each
+    process id is already one revision, so no revision choice is involved.
+    Rows are {id, name, summary}; the list endpoint does not return an owner.
+
+    Args:
+        search: Optional text matched, ignoring case, against process name and
+            summary.
+        limit: How many to return (1-500, default 50).
+        offset: How many matching processes to skip, for paging.
     """
     try:
         via_client = get_client()
-        logger.info("Listing all processes")
-        processes = via_client.process.list_processes()
-        result = serialize_response(processes)
+        logger.info(
+            f"Listing processes (search: '{search}', limit: {limit}, offset: {offset})"
+        )
+        limit = max(1, min(int(limit), _PROCESS_LIST_MAX_LIMIT))
+        offset = max(0, int(offset))
+        rows = serialize_response(via_client.process.list_processes()) or []
+
+        seen, unique = set(), []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("id") in seen:
+                continue
+            seen.add(row.get("id"))
+            unique.append(row)
+
+        needle = (search or "").strip().lower()
+        if needle:
+            unique = [
+                row for row in unique
+                if needle in str(row.get("name") or "").lower()
+                or needle in str(row.get("summary") or "").lower()
+            ]
+
+        total = len(unique)
+        page = [_compact_process(row) for row in unique[offset:offset + limit]]
+        scope = f" matching '{search.strip()}'" if needle else ""
+        next_steps = []
+        if needle and total == 0:
+            summary = (
+                f"No process matches '{search.strip()}'. Search covers name "
+                "and summary only."
+            )
+            next_steps.append("Try a shorter or different search term.")
+        else:
+            summary = (
+                f"Showing {len(page)} of {total} processes{scope} "
+                f"(offset {offset})."
+            )
+        if offset + len(page) < total:
+            search_arg = f"search={search.strip()!r}, " if needle else ""
+            next_steps.append(
+                f"Next page: list_all_processes({search_arg}limit={limit}, "
+                f"offset={offset + len(page)})."
+            )
+        next_steps.append(
+            "get_process_details(process_id) for one process's full definition."
+        )
+        result = envelope(
+            summary=summary,
+            data={
+                "processes": page,
+                "total": total,
+                "returned": len(page),
+                "offset": offset,
+            },
+            next_steps=next_steps,
+        )
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
         logger.error(f"Error listing all processes: {e}")

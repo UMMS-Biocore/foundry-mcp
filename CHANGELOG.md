@@ -61,6 +61,14 @@
     for that task. At most 5 tasks are listed and the reply says how many
     more were cut. The log tail follows unchanged, and a run with no trace
     or no failed task gets the same reply as before.
+- **`list_all_processes` searches and pages, and its default output changed**
+  - New `search` (case-insensitive, over name and summary), `limit` (default
+    50, max 500) and `offset`. A bare call now returns the first 50
+    processes instead of every one, so an install with thousands of
+    processes no longer floods the context.
+  - Each process appears once (the server repeated a process once per
+    matching group membership), as a compact `{id, name, summary}` row,
+    with `total`, `returned`, `offset` and a next page hint.
 - **An administrator can update another user's process**
   - `update_process` no longer refuses an administrator on ownership. The
     server already authorizes an admin to update any process and keeps its
