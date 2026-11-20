@@ -8467,6 +8467,10 @@ _CREATE_PIPELINE_DOC = """
     graph is rebuilt and type checked from these arguments, never taken from a
     preview. It always creates a new pipeline and never saves over one.
 """ + _PIPELINE_GRAPH_HELP + """
+    `script_pipe_header` is the pipeline header: Groovy placed before the
+    workflow, such as params defaults and includes. When copying a pipeline,
+    pass its get_pipeline `script_pipe_header`, or the copy has no header.
+
     Returns the new pipeline's id. Open it in the pipeline editor to publish it,
     or start a run with create_run(pipeline_id, project_id, name).
 """
@@ -8485,6 +8489,7 @@ def create_pipeline(
     summary: str = "",
     description: str = "",
     modules: list = None,
+    script_pipe_header: str = None,
 ) -> str:
     if confirm_create is not True:
         raise ToolError(json.dumps({
@@ -8502,6 +8507,7 @@ def create_pipeline(
             edges=builder.edges,
             summary=summary,
             description=description,
+            **remove_none({"scriptPipeHeader": script_pipe_header}),
         )
     except Exception as e:
         logger.error(f"Error creating pipeline: {e}")
@@ -8576,8 +8582,9 @@ _UPDATE_PIPELINE_DOC = """
     The graph replaces the old one entirely: pass every process, module,
     input, output and connection the pipeline should have. get_pipeline's
     `graph` holds the current graph in exactly these arguments; edit it and
-    pass it back. `name`, `summary` and `description` change only when given;
-    every other field is kept.
+    pass it back. `name`, `summary`, `description` and `script_pipe_header`
+    (the pipeline header, Groovy placed before the workflow) change only when
+    given; every other field, the saved header included, is kept.
 """ + _PIPELINE_GRAPH_HELP + """
     Returns the saved edges, the connections spelled out, and
     `previous_edges`, the graph before the save.
@@ -8629,6 +8636,7 @@ def update_pipeline(
     summary: str = None,
     description: str = None,
     modules: list = None,
+    script_pipe_header: str = None,
 ) -> str:
     if confirm_update is not True:
         raise ToolError(json.dumps({
@@ -8653,7 +8661,8 @@ def update_pipeline(
     builder, labels = _build_pipeline(via_client, processes, connections, inputs, outputs, modules,
                                       pipeline_id=pipeline_id, revision_ids=revision_ids)
     changes = {"nodes": builder.nodes, "edges": builder.edges}
-    changes.update(remove_none({"name": name, "summary": summary, "description": description}))
+    changes.update(remove_none({"name": name, "summary": summary, "description": description,
+                                "scriptPipeHeader": script_pipe_header}))
     try:
         logger.info(f"Saving a graph of {len(builder.nodes)} nodes over pipeline {pipeline_id}")
         pipelines.update_pipeline(pipeline_id, **changes)

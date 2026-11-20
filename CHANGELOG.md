@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Pipeline header on create and update**: `create_pipeline` and
+  `update_pipeline` take an optional `script_pipe_header` and save it as
+  the pipeline header, so a copied pipeline keeps its header config.
+  `update_pipeline` keeps the saved header when none is given.
 - **Publish directory for a new run**
   - `create_run` now proposes a publish directory per run environment
     (`proposed_publish_directory`: the environment's declared default, else a
