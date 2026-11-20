@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Publish directory for a new run**
+  - `create_run` now proposes a publish directory per run environment
+    (`proposed_publish_directory`: the environment's declared default, else a
+    `publish` folder inside the proposed execution directory) and its next
+    steps ask the agent to confirm it with the user before saving it with
+    `update_run(publish_dir=...)`. An optional `publish_dir` saves a confirmed
+    path on the new run right away, so final results are kept outside the
+    work folder that cleanup removes.
 - **Terminate a stale or hung run**
   - `terminate_run(run_id, confirm_terminate)` stops a run's scheduler jobs
     and marks it Terminated, only when `confirm_terminate` is `True`. A run

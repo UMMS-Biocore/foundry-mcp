@@ -192,6 +192,76 @@ class TestCreateRun:
             assert json.loads(server.create_run(3, 7, "r1")) == {"error": "No permission to read this project"}
 
 
+class TestDefaultPublishDirectory:
+    def test_declared_default_wins_as_is(self):
+        env = {**ENV, "defPublishdir": "/project/lab/results"}
+        assert server._default_publish_directory(env, "r1") == "/project/lab/results"
+
+    def test_publish_folder_under_the_proposed_execution_directory(self):
+        assert server._default_publish_directory(ENV, "r1") == "/home/jdoe/foundry-connect-runs/r1/publish"
+
+    def test_declared_execution_directory_gets_a_publish_folder(self):
+        env = {**ENV, "defWorkdir": "/project/lab/runs/"}
+        assert server._default_publish_directory(env, "r1") == "/project/lab/runs/publish"
+
+    def test_no_execution_directory_means_no_publish_proposal(self):
+        assert server._default_publish_directory({**ENV, "username": None}, "r1") is None
+
+
+class TestCreateRunPublishDirectory:
+    def test_form_proposes_a_publish_directory_per_environment(self):
+        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
+        assert out["data"]["proposed_publish_directory"] == {"550": "/home/jdoe/foundry-connect-runs/r1/publish"}
+        steps = " ".join(out["next_steps"])
+        assert "proposed_publish_directory" in steps and "update_run(" in steps and "publish_dir=" in steps
+        # A proposal only: nothing is saved without publish_dir.
+        assert not any(c.kwargs["method"] == "PATCH" for c in client.call.call_args_list)
+
+    def test_given_publish_dir_is_saved_with_the_runs_permission(self):
+        details = {**DETAILS, "permission": 15, "groupId": 7}
+        client = _patched_client(side_effect=[{"id": 41}, details, "", PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1", publish_dir="/data/results/r1"))
+        assert client.call.call_args_list[2].kwargs == {
+            "method": "PATCH", "endpoint": "/api/v1/run/41/save",
+            "data": {"permission": 15, "groupId": 7, "publishDir": "/data/results/r1"},
+        }
+        assert out["data"]["saved_publish_dir"] == "/data/results/r1"
+        assert "error" not in out
+
+    @pytest.mark.parametrize("bad", ["results/r1", "", "   "])
+    def test_relative_or_blank_publish_dir_is_refused_before_creating(self, bad):
+        client = _patched_client({"id": 41})
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1", publish_dir=bad))
+        assert "publish_dir" in out["error"]
+        client.call.assert_not_called()
+
+    def test_a_failed_save_still_returns_the_created_run(self):
+        def call(**kw):
+            if kw["method"] == "POST":
+                return {"id": 41}
+            if kw["method"] == "PATCH":
+                raise RuntimeError("save refused")
+            return DETAILS if kw["endpoint"].endswith("/details") else PARAMS
+        client = _patched_client(side_effect=call)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1", publish_dir="/data/results/r1"))
+        assert out["data"]["run_id"] == 41
+        assert "save refused" in out["data"]["publish_dir_error"]
+        assert "saved_publish_dir" not in out["data"]
+
+    def test_a_run_with_no_saved_permission_is_not_saved(self):
+        details = {**DETAILS, "permission": None}
+        client = _patched_client(side_effect=[{"id": 41}, details, PARAMS])
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1", publish_dir="/data/results/r1"))
+        assert "permission" in out["data"]["publish_dir_error"]
+        assert not any(c.kwargs["method"] == "PATCH" for c in client.call.call_args_list)
+
+
 class TestListRunEnvironments:
     def test_reads_the_runs_details(self):
         client = _patched_client(side_effect=[DETAILS, PARAMS])
