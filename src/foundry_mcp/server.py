@@ -5919,11 +5919,29 @@ _DIFF_LIST_MAX = 5
 _ARRAY_ITEM_FIELD = re.compile(r"^(.*)_ind(\d+)$")
 
 
+def _js_truthy(value):
+    return value is not None and value is not False and value != "" and not (
+        isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
+
+
+def _schema_item_default(item):
+    """A form field's default the way the Run page reads it: a set defVal
+    wins over defaultVal, and a field with neither keeps whichever is given."""
+    def_val, default_val = item.get("defVal"), item.get("defaultVal")
+    if _js_truthy(def_val):
+        return def_val
+    if _js_truthy(default_val):
+        return default_val
+    return def_val if def_val is not None else default_val
+
+
 def _form_field_defaults(parameter_list):
     """{processOptions key: {field: default}} of the per process forms a
     Foundry pipeline defines (the same forms _form_definitions lists), with
-    each field's default from its schema item. None when the parameter list is
-    unreadable or is not a Foundry pipeline's."""
+    each field's default from its schema item. Like the Run page, defVal wins
+    over defaultVal and the first field of a name wins when a form lists it
+    twice. None when the parameter list is unreadable or is not a Foundry
+    pipeline's."""
     inputs = (parameter_list or {}).get("inputs")
     if not isinstance(inputs, dict) or not isinstance(inputs.get("pipe"), dict):
         return None
@@ -5933,10 +5951,9 @@ def _form_field_defaults(parameter_list):
         fields = {}
         for item in (block or {}).get("schema") or []:
             name = item.get("varName") if isinstance(item, dict) else None
-            if not name or name.startswith("params."):
+            if not name or name.startswith("params.") or name in fields:
                 continue
-            default = item.get("defaultVal")
-            fields[name] = item.get("defVal") if default is None else default
+            fields[name] = _schema_item_default(item)
         if fields:
             forms[str(key)] = fields
     return forms

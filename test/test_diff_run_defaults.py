@@ -182,3 +182,33 @@ class TestDiffRunDefaults:
         parsed, _ = _diff(details)
         assert "process_options_error" in parsed["data"]
         assert all(not k.startswith("processOptions.") for k in _keys(parsed["data"]["changed"]))
+
+
+def _params_with(schema):
+    return {"inputs": {"pipe": {"schema": []},
+                       "processes": {"p1": {"schema": schema}}}}
+
+
+class TestFormFieldDefaultsMatchTheRunPage:
+    """The Run page reads a field's default from defVal before defaultVal,
+    and keeps the first field of a name when a form lists it twice."""
+
+    def test_defval_wins_over_defaultval(self):
+        forms = server._form_field_defaults(_params_with([
+            {"varName": "threads", "defVal": "4", "defaultVal": "8"},
+        ]))
+        assert forms == {"p1": {"threads": "4"}}
+
+    def test_defaultval_is_used_when_defval_is_missing_or_empty(self):
+        forms = server._form_field_defaults(_params_with([
+            {"varName": "threads", "defaultVal": "8"},
+            {"varName": "mode", "defVal": "", "defaultVal": "fast"},
+        ]))
+        assert forms == {"p1": {"threads": "8", "mode": "fast"}}
+
+    def test_first_field_of_a_name_wins(self):
+        forms = server._form_field_defaults(_params_with([
+            {"varName": "threads", "defVal": "4"},
+            {"varName": "threads", "defVal": "16"},
+        ]))
+        assert forms == {"p1": {"threads": "4"}}
