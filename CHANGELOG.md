@@ -353,6 +353,15 @@
     intermediate files and sets how many hours after the run ends it happens.
 
 ### Fixed
+- `get_run` and `watch_run` no longer report a finished run as still
+  running until the next periodic status check. Both now show when the
+  status was last checked, the Nextflow exit status and the first error
+  line (`status_check`, empty fields left out). When an active run already
+  has an exit status, or its last check is more than 30 minutes old (two of
+  the server's default 15 minute polls), they ask the server to sync the
+  run once and report the refreshed status with `status_refreshed`. They
+  never wait or retry; a failed sync is reported in `status_refresh_error`
+  and the earlier status is kept.
 - `preflight_run` no longer warns "No genome build is set" on a pipeline
   that takes no genome build. The warning now fires only when the
   pipeline's input definitions name a genome build input and the run
