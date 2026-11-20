@@ -286,3 +286,122 @@ class TestCleanupEnabled:
         out, client = _update(cleanup_enabled=value)
         assert "cleanup_enabled" in out["error"]
         client.call.assert_not_called()
+
+
+# processOptions as get_run_details(verbose=True) reports it: one dict per
+# process form, each a dict of fields; a spreadsheet field is a list column.
+SAVED_FORMS = {
+    "procA": {"threads": "4", "mode": "fast", "flag": "yes"},
+    "procB": {"sample": ["s1", "s2"], "group": ["g1", "g2"], "note": "keep"},
+    "procC": {"genome": "hg38"},
+}
+
+
+def _forms_details(process_options=SAVED_FORMS, **extra):
+    details = {"permission": 3, "groupId": None, "pipelineReadable": True}
+    if process_options is not None:
+        details["processOptions"] = json.loads(json.dumps(process_options))
+    details.update(extra)
+    return details
+
+
+def _get_calls(client):
+    return [c.kwargs for c in client.call.call_args_list if c.kwargs.get("method") == "GET"]
+
+
+class TestProcessOptionsMerge:
+    def test_one_field_of_one_form_keeps_every_other_field_and_form(self):
+        _, client = _update(details=_forms_details(), process_options={"procA": {"threads": "8"}})
+        assert _saved_body(client)["processOptions"] == {
+            "procA": {"threads": "8", "mode": "fast", "flag": "yes"},
+            "procB": SAVED_FORMS["procB"],
+            "procC": SAVED_FORMS["procC"],
+        }
+
+    def test_a_new_form_is_added_beside_the_saved_ones(self):
+        _, client = _update(details=_forms_details(), process_options={"procD": {"x": "1"}})
+        assert _saved_body(client)["processOptions"] == {**SAVED_FORMS, "procD": {"x": "1"}}
+
+    def test_the_reply_names_merged_and_kept_forms(self):
+        out, _ = _update(details=_forms_details(),
+                         process_options={"procA": {"threads": "8"}, "procD": {"x": "1"}})
+        report = out["data"]["process_options"]
+        assert report["mode"] == "merged"
+        assert report["merged_forms"] == ["procA", "procD"]
+        assert report["kept_forms"] == ["procB", "procC"]
+
+    def test_a_non_empty_save_reply_also_carries_the_report(self):
+        client = _client(_forms_details())
+        base = client.call.side_effect
+
+        def _call(**kwargs):
+            return {"ok": True} if kwargs.get("method") == "PATCH" else base(**kwargs)
+        client.call.side_effect = _call
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.update_run("41", permission=3, process_options={"procA": {"mode": "slow"}}))
+        assert out["ok"] is True
+        assert out["process_options"]["kept_forms"] == ["procB", "procC"]
+
+    def test_a_given_column_replaces_the_saved_column_whole(self):
+        _, client = _update(details=_forms_details(), process_options={"procB": {"group": ["x", "y"]}})
+        assert _saved_body(client)["processOptions"]["procB"] == {
+            "sample": ["s1", "s2"], "group": ["x", "y"], "note": "keep"}
+
+    def test_all_columns_resized_together_pass(self):
+        given = {"procB": {"sample": ["s1", "s2", "s3"], "group": ["g1", "g2", "g3"]}}
+        _, client = _update(details=_forms_details(), process_options=given)
+        assert _saved_body(client)["processOptions"]["procB"]["sample"] == ["s1", "s2", "s3"]
+
+    def test_one_column_resized_against_the_saved_columns_is_refused(self):
+        out, client = _update(details=_forms_details(),
+                              process_options={"procB": {"sample": ["s1", "s2", "s3"]}})
+        assert "procB" in out["error"] and "length" in out["error"]
+        assert "group" in out["error"]
+        assert not [c for c in client.call.call_args_list if c.kwargs.get("method") == "PATCH"]
+
+    def test_a_failed_read_refuses_instead_of_replacing(self):
+        client = MagicMock()
+        client.call.side_effect = RuntimeError("connection reset")
+        with patch.object(server, "get_client", return_value=client):
+            with pytest.raises(ToolError) as refused:
+                server.update_run("41", permission=3, process_options={"procA": {"threads": "8"}})
+        error = json.loads(str(refused.value))["error"]
+        assert "replace_process_options" in error
+        assert not [c for c in client.call.call_args_list if c.kwargs.get("method") == "PATCH"]
+
+    def test_an_unreadable_pipeline_refuses(self):
+        out, client = _update(details=_forms_details(process_options=None, pipelineReadable=False),
+                              process_options={"procA": {"threads": "8"}})
+        assert "replace_process_options" in out["error"]
+        assert not [c for c in client.call.call_args_list if c.kwargs.get("method") == "PATCH"]
+
+    def test_a_malformed_saved_set_refuses(self):
+        out, client = _update(details=_forms_details(process_options="not a dict"),
+                              process_options={"procA": {"threads": "8"}})
+        assert "replace_process_options" in out["error"]
+        assert not [c for c in client.call.call_args_list if c.kwargs.get("method") == "PATCH"]
+
+    def test_a_run_with_no_saved_forms_takes_the_given_ones(self):
+        out, client = _update(details=_forms_details(process_options=None),
+                              process_options={"procA": {"threads": "8"}})
+        assert _saved_body(client)["processOptions"] == {"procA": {"threads": "8"}}
+        assert out["data"]["process_options"]["kept_forms"] == []
+
+    def test_replace_sends_the_set_as_given_without_reading(self):
+        out, client = _update(details=_forms_details(), process_options={"procA": {"threads": "8"}},
+                              replace_process_options=True)
+        assert _saved_body(client)["processOptions"] == {"procA": {"threads": "8"}}
+        assert _get_calls(client) == []
+        assert out["data"]["process_options"]["mode"] == "replaced"
+
+    def test_details_are_read_once_when_permission_is_also_left_out(self):
+        client = _client(_forms_details())
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run("41", process_options={"procA": {"threads": "8"}})
+        assert len(_get_calls(client)) == 1
+        assert _saved_body(client)["permission"] == 3
+
+    def test_no_process_options_reads_nothing_for_them(self):
+        _, client = _update(details=_forms_details(), name="renamed")
+        assert _get_calls(client) == []
+        assert "processOptions" not in _saved_body(client)
