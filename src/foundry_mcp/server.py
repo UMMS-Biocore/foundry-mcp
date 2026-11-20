@@ -51,6 +51,7 @@ from .utils import serialize_response, MCP_TOKEN_PREFIX, remove_none, envelope, 
 from .log import get_logger, get_uvicorn_log_config, mask_token
 from .process_ports import PortMergeError, build_update_body
 from . import accessions as _accessions
+from . import hpc_apps as _hpc_apps
 
 
 # Get logger for this module
@@ -7581,6 +7582,79 @@ def discover_app_endpoints(search: str = None, as_json: bool = False) -> str:
     except Exception as e:
         logger.error(f"Error discovering app endpoints: {e}")
         return json.dumps({"error": str(e)})
+
+
+def _hpc_call(method: str, endpoint: str, **kwargs):
+    return request_json(get_client(), method, endpoint, **kwargs)
+
+
+@mcp.tool()
+def hpc_app_launch(
+    app: str = "marimo",
+    run_environment_id: int = 0,
+    data_roots: list = [],
+    cpus: int = 1,
+    memory_mb: int = 4096,
+    wall_minutes: int = 60,
+) -> str:
+    """
+    Launch an app (marimo by default) as a batch job on one of your cluster run
+    environments. Answers with the launch, the mount map (each data root at
+    /mnt/<name>) and the Foundry Connect link to the page where the person opens
+    it.
+
+    This LAUNCHES cluster compute (it consumes cluster time). Always confirm
+    the run environment, the data roots and the CPUs, memory and minutes with
+    the user before calling.
+
+    With run_environment_id 0 and exactly one usable run environment, that one
+    is used. With several, the answer has needs_choice and the list: ask the
+    user, then call again with the id. `data_roots` are names from that list;
+    each is mounted read only unless you pass {"name": ..., "mode": "rw"}.
+
+    A 403 with reason execution_not_granted means this connection may not run
+    apps: the user must reconnect Foundry Connect and tick the permission.
+    """
+    return _hpc_apps.launch(
+        _hpc_call, _web_base_url(), app, run_environment_id, data_roots, cpus, memory_mb, wall_minutes
+    )
+
+
+@mcp.tool()
+def hpc_app_list() -> str:
+    """
+    List your cluster app launches, newest first, with each one's state
+    (requested, queued, starting, running, stopping, ended) and mounts.
+
+    A 403 with reason execution_not_granted means the user must reconnect
+    Foundry Connect and tick the permission to run apps.
+    """
+    return _hpc_apps.list_launches(_hpc_call, _web_base_url())
+
+
+@mcp.tool()
+def hpc_app_status(launch_id: str) -> str:
+    """
+    Check one cluster app launch: its state, end reason when it ended, the
+    resources it asked for and its mount map.
+
+    A 403 with reason execution_not_granted means the user must reconnect
+    Foundry Connect and tick the permission to run apps.
+    """
+    return _hpc_apps.status_of(_hpc_call, _web_base_url(), launch_id)
+
+
+@mcp.tool()
+def hpc_app_stop(launch_id: str) -> str:
+    """
+    Stop one of your cluster app launches and free its cluster time. The launch
+    comes back as it stands: stopping, or ended when it already was. Confirm
+    with the user first, because unsaved work in the app is lost.
+
+    A 403 with reason execution_not_granted means the user must reconnect
+    Foundry Connect and tick the permission to run apps.
+    """
+    return _hpc_apps.stop(_hpc_call, _web_base_url(), launch_id)
 
 
 @mcp.tool()
