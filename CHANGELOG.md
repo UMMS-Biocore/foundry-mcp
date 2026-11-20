@@ -315,6 +315,11 @@
   quota, a mount outside the allowed data roots) reads `refused` with the
   refusal code, instead of `starting`. A resubmit with the same
   `submission_key` retries it.
+- `preflight_run` no longer fails an input set to `NA`, the value
+  `update_run` asks for on an input the run does not use. Such inputs are
+  listed in an `unused_inputs` warning so a person can confirm them. `NA`
+  still fails on an input the pipeline requires with no default, and blanks
+  and the other placeholders (`NO_FILE`, `None`, `null`) fail as before.
 
 ## [1.3.0] - 2026-09-30
 
