@@ -192,3 +192,65 @@ class TestInitiateRun:
             result = server.initiate_run("999", "bogus")
         assert "runType" in json.loads(result)["error"]
         client.call.assert_not_called()
+
+
+class TestEmptyDatasetIdIsNull:
+    """An empty dataset or collection id is null in every input the MCP
+    returns or sends, so a duplicated run compares equal to its source."""
+
+    FOUNDRY_INPUTS = [
+        {"id": 1, "name": "genome", "type": "input", "value": "hg38",
+         "collectionId": "", "vmetaCollectionId": ""},
+        {"id": 2, "name": "reads", "type": "vmetaCollection", "value": "NA",
+         "collectionId": None, "vmetaCollectionId": "abc123"},
+        {"id": 3, "name": "bams", "type": "collection", "value": "NA",
+         "collectionId": 9, "vmetaCollectionId": None},
+    ]
+
+    def _expected(self):
+        expected = [dict(i) for i in self.FOUNDRY_INPUTS]
+        expected[0]["collectionId"] = None
+        expected[0]["vmetaCollectionId"] = None
+        return expected
+
+    def test_get_run_details_verbose_returns_null(self):
+        details = {"id": 123, "inputs": [dict(i) for i in self.FOUNDRY_INPUTS], "processOptions": {}}
+        client = _patched_client(details)
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.get_run_details("123", verbose=True))
+        assert result["inputs"] == self._expected()
+
+    def test_get_run_details_verbose_external_dict_shape(self):
+        details = {"id": 1, "inputs": {
+            "input": {"value": "s.csv", "vmetaCollectionId": ""},
+            "outdir": "/out",
+            "params": {"genome": "GRCh38"},
+        }}
+        client = _patched_client(details)
+        with patch.object(server, "get_client", return_value=client):
+            result = json.loads(server.get_run_details("1", verbose=True))
+        assert result["inputs"] == {
+            "input": {"value": "s.csv", "vmetaCollectionId": None},
+            "outdir": "/out",
+            "params": {"genome": "GRCh38"},
+        }
+
+    def test_run_form_returns_null(self):
+        form = server._run_form({"inputs": [dict(i) for i in self.FOUNDRY_INPUTS]}, "r")
+        assert form["inputs"] == self._expected()
+
+    def test_update_run_sends_null(self):
+        client = _patched_client({"ok": True})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run(run_id="999", inputs=[dict(i) for i in self.FOUNDRY_INPUTS],
+                              permission=3, group_id=5)
+        sent = client.call.call_args.kwargs["data"]["inputs"]
+        assert sent == self._expected()
+
+    def test_update_run_leaves_inputs_without_ids_alone(self):
+        client = _patched_client({"ok": True})
+        with patch.object(server, "get_client", return_value=client):
+            server.update_run(run_id="999", inputs=[{"name": "genome", "value": "hg38"}],
+                              permission=3, group_id=5)
+        sent = client.call.call_args.kwargs["data"]["inputs"]
+        assert sent == [{"name": "genome", "value": "hg38", "type": "input"}]
