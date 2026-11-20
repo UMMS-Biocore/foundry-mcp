@@ -363,6 +363,10 @@
     intermediate files and sets how many hours after the run ends it happens.
 
 ### Fixed
+- Per process form defaults now match the Run page: a field's `defVal` wins
+  over `defaultVal`, and when a form lists a field twice the first one wins.
+  `create_run`'s default process forms, `diff_run_defaults` and `plan_run`'s
+  pipeline default fallback all read defaults this way.
 - `get_run` and `watch_run` no longer report a finished run as still
   running until the next periodic status check. Both now show when the
   status was last checked, the Nextflow exit status and the first error
