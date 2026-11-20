@@ -4841,6 +4841,55 @@ def _preflight_executor_resources(details, env):
     )
 
 
+def _saved_input_values(inputs):
+    """{name: value} of the saved inputs, from either run-input shape."""
+    values = {}
+    if isinstance(inputs, dict):
+        for key, val in inputs.items():
+            if isinstance(val, dict) and "value" not in val:
+                # External pipeline section: {name: value}.
+                values.update(val)
+            else:
+                values[key] = val.get("value") if isinstance(val, dict) else val
+        return values
+    for inp in inputs or []:
+        if isinstance(inp, dict) and inp.get("name"):
+            values[inp["name"]] = inp.get("value")
+    return values
+
+
+def _is_genome_build(name):
+    return "genome_build" in (name or "").lower()
+
+
+def _preflight_genome(definitions, inputs):
+    """Warn when the pipeline takes a genome build and the run leaves it empty.
+    The pipeline takes one when its input definitions name one, or, when they
+    cannot be read, when the run saved one. None when no genome build applies,
+    so a pipeline without one is not told to set it."""
+    saved = _saved_input_values(inputs)
+    if definitions:
+        wanted = [(d["name"], d.get("default")) for d in definitions if _is_genome_build(d["name"])]
+    else:
+        wanted = [(name, None) for name in saved if _is_genome_build(name)]
+    if not wanted:
+        return None
+    unset = []
+    for name, default in wanted:
+        value = saved.get(name)
+        if _filled(value) and str(value).strip():
+            return _preflight_check("genome", "pass", f"Genome build is '{value}'.", input=name)
+        if _filled(default) and str(default).strip():
+            return _preflight_check(
+                "genome", "pass", f"Genome build uses the pipeline default '{default}'.", input=name)
+        unset.append(name)
+    return _preflight_check(
+        "genome", "warn",
+        f"The pipeline takes a genome build but {', '.join(unset)} is not set on this run.",
+        "Set it with update_run(inputs=...).",
+        input=unset[0])
+
+
 @mcp.tool()
 def preflight_run(run_id: str) -> str:
     """
@@ -5000,18 +5049,9 @@ def preflight_run(run_id: str) -> str:
         if resources:
             checks.append(resources)
 
-        # Genome build.
-        build = next((i for i in inputs
-                      if "genome_build" in (i["name"] or "").lower()), None)
-        checks.append(
-            _preflight_check("genome", "pass",
-                             f"Genome build is '{build['value']}'.")
-            if build and str(build["value"]).strip()
-            else _preflight_check(
-                "genome", "warn", "No genome build is set on this run.",
-                "Confirm the pipeline does not need one, or set it with "
-                "update_run.")
-        )
+        genome = _preflight_genome(definitions, details.get("inputs"))
+        if genome:
+            checks.append(genome)
 
         # Design-file paths, read from the run's own compute environment.
         sheets = {}
