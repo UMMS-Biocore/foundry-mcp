@@ -47,7 +47,7 @@ def _client(files=None, apps=None):
     c.apps.list_apps.return_value = APPS if apps is None else apps
 
     def _call(**kwargs):
-        if "app/v1" in kwargs.get("endpoint", ""):
+        if kwargs.get("endpoint", "") == "/api/v1/app":
             return APPS if apps is None else apps
         return {}
 

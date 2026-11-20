@@ -30,7 +30,7 @@ def _client(upload_report=True, launch_dir=LAUNCH_DIR):
             return {"name": "R", "runUUID": UUID, "launchDirectory": launch_dir,
                     "runEnvironment": {"selectedId": 550}, "inputs": [],
                     "processOptions": {}}
-        if "configurations/v1/user" in endpoint:
+        if endpoint == "/api/v1/configurations/user":
             return {"UPLOAD_REPORT": upload_report}
         return {}
 

@@ -60,3 +60,10 @@ exclude = ["test*"]
 
 [tool.setuptools.package-data]
 foundry_mcp = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+# Some tests import `foundry_mcp` directly, others `src.foundry_mcp`. Putting
+# src on the path lets the suite run from a plain checkout, with or without an
+# installed package and without exporting PYTHONPATH by hand.
+pythonpath = ["src"]
