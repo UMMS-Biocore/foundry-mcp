@@ -135,3 +135,45 @@ class TestSummaryEnrichment:
         with patch.object(server, "get_client", return_value=client):
             parsed = json.loads(server.get_run_details("12219"))
         assert "#12219" in parsed["summary"]
+
+
+class TestGetRunDetailsFields:
+    def _details(self):
+        return {**_DETAILS, "advancedSettings": {"queue": "short"}, "runEnvironment": {"availableList": []}}
+
+    def test_verbose_with_fields_returns_only_those_keys_and_the_run_id(self):
+        client = _client(self._details())
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("123", verbose=True, fields=["inputs", "advancedSettings"]))
+        assert parsed == {
+            "run_id": "123",
+            "inputs": _DETAILS["inputs"],
+            "advancedSettings": {"queue": "short"},
+        }
+
+    def test_unknown_fields_are_reported_with_the_available_keys(self):
+        client = _client(self._details())
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("123", verbose=True, fields=["inputs", "nope"]))
+        assert parsed["inputs"] == _DETAILS["inputs"]
+        assert parsed["missing_fields"] == ["nope"]
+        assert "processOptions" in parsed["available_fields"]
+        assert "nope" not in parsed
+
+    def test_fields_alone_imply_verbose(self):
+        client = _client(self._details())
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("123", fields=["processOptions"]))
+        assert parsed == {"run_id": "123", "processOptions": _DETAILS["processOptions"]}
+
+    def test_without_fields_verbose_is_unchanged(self):
+        details = self._details()
+        client = _client(details)
+        with patch.object(server, "get_client", return_value=client):
+            parsed = json.loads(server.get_run_details("123", verbose=True))
+        assert parsed == details
+
+    def test_docstring_names_the_common_keys(self):
+        doc = server.get_run_details.__doc__
+        for key in ("inputs", "processOptions", "advancedSettings", "runEnvironment"):
+            assert key in doc

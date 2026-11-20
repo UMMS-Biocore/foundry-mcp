@@ -48,6 +48,12 @@
     with `cleanup_delay_hours` is refused before anything is sent.
 
 ### Changed
+- **`create_run` returns compact input definitions by default**
+  - Each input now carries only its name, required, default and type (and
+    section for external pipelines); pass `full_definitions=True` to
+    `create_run` or `list_run_environments` for descriptions and options.
+  - `get_run_details` takes `fields` to return only some top level keys of
+    the full run object instead of the whole of it.
 - **An administrator can update another user's process**
   - `update_process` no longer refuses an administrator on ownership. The
     server already authorizes an admin to update any process and keeps its
