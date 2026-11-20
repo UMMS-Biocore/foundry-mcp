@@ -2657,6 +2657,62 @@ def initiate_run(run_id: str, run_type: str = "newrun") -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def terminate_run(run_id: str, confirm_terminate: bool = False) -> str:
+    """
+    Terminate a run: stop its scheduler jobs and mark it Terminated.
+
+    WARNING: This kills the run's jobs on the cluster or cloud and cannot be
+    undone. Use it for a run that is stale or hung, or one the user wants
+    stopped, for example a run the platform still shows as running that
+    blocks a relaunch. First call get_run, show the user the run (name,
+    status and where it runs), and get explicit confirmation. Only then call
+    this tool with confirm_terminate=True.
+
+    The server marks the run Terminated only once the job is confirmed
+    stopped, or when there was no job to stop. When the kill is accepted but
+    the job is still stopping, or the run environment cannot confirm the
+    job is gone, the server refuses and leaves the run as it was; that
+    refusal comes back as {"error": ...} with the server's reason.
+
+    Args:
+        run_id: The run to terminate.
+        confirm_terminate: Must be True. Any other value refuses the call and
+            nothing is sent to the server.
+
+    Returns:
+        An envelope with summary, next_steps and data, or {"error": ...}.
+
+    Example:
+        terminate_run(run_id="12345", confirm_terminate=True)
+    """
+    if confirm_terminate is not True:
+        return json.dumps({
+            "error": "confirm_terminate must be True. Show the user the run and get "
+                     "confirmation before terminating it, because it stops the run's scheduler jobs"
+        })
+    run_id = str(run_id).strip()
+    if not run_id.isdigit():
+        return json.dumps({"error": f"run_id must be a numeric run id, got '{run_id}'"})
+    try:
+        via_client = get_client()
+        logger.info(f"Terminating run {run_id}")
+        via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/terminate")
+        return json.dumps(envelope(
+            f"Run {run_id} was terminated. Its scheduler jobs were stopped and the run is marked Terminated.",
+            data={"run_id": run_id, "status": "Terminated"},
+            next_steps=[
+                f"Call get_run(run_id=\"{run_id}\") to confirm the status reads Terminated.",
+                f"To run it again, start a new attempt with initiate_run(run_id=\"{run_id}\", run_type=\"newrun\").",
+                "Avoid run_type=\"resumerun\" after a kill: a resumed run can reuse stale task exit files "
+                "left by the killed jobs, so a new attempt is safer.",
+            ],
+        ), indent=2)
+    except Exception as e:
+        logger.error(f"Error terminating run {run_id}: {e}")
+        return json.dumps(_server_refusal(e) or {"error": str(e)})
+
+
 # ============================================================================
 # Pipeline Discovery Tools
 # ============================================================================

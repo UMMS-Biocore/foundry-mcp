@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Terminate a stale or hung run**
+  - `terminate_run(run_id, confirm_terminate)` stops a run's scheduler jobs
+    and marks it Terminated, only when `confirm_terminate` is `True`. A run
+    the platform still shows as running no longer blocks a relaunch until
+    a person steps in. When the server cannot confirm the job stopped, it
+    refuses and the tool returns its reason. After a kill, start a new
+    attempt rather than resuming, since a resumed run can reuse stale task
+    exit files.
 - **Update and delete metadata fields**
   - `update_metadata_field(field_id, update_data)` changes only the given
     settings of a field, such as its label or enum. Keys outside the
