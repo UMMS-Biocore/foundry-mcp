@@ -264,6 +264,19 @@ class TestCreate:
         assert body["permission"] == 3 and body["pipelineGroupId"] == 667 and body["summary"] == "s"
         assert body["edges"] == ["o-inPro-1-252-2_i-3017-0-252-1", "i-outPro-1-201-3_o-3017-0-201-1"]
 
+    def test_the_pipeline_header_is_sent(self):
+        client = _client(created={"id": 1779})
+        _run(server.create_pipeline, client, name="x", pipeline_group_id=1, confirm_create=True,
+             script_pipe_header="params.genome = 'hg38'", **GRAPH_1777)
+        (post,) = _posts(client)
+        assert post.kwargs["data"]["scriptPipeHeader"] == "params.genome = 'hg38'"
+
+    def test_without_a_header_the_header_is_empty(self):
+        client = _client(created={"id": 1779})
+        _run(server.create_pipeline, client, name="x", pipeline_group_id=1, confirm_create=True, **GRAPH_1777)
+        (post,) = _posts(client)
+        assert post.kwargs["data"]["scriptPipeHeader"] == ""
+
     def test_a_refused_graph_writes_nothing(self):
         client = _client()
         graph = dict(GRAPH_1545, connections=[{"from": "analysis", "to": "download"}])
@@ -569,6 +582,20 @@ class TestUpdate:
              name="Renamed", description="d", **GRAPH_1777)
         body = _posts(client)[0].kwargs["data"]
         assert (body["name"], body["summary"], body["description"]) == ("Renamed", "s", "d")
+
+    def test_the_saved_header_is_kept_when_none_is_given(self):
+        client = _client(details=_details(script_pipe_header="params.genome = 'hg38'"), created={"id": 1777})
+        _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True, **GRAPH_1777)
+        body = _posts(client)[0].kwargs["data"]
+        assert body["scriptPipeHeader"] == "params.genome = 'hg38'"
+
+    @pytest.mark.parametrize("header", ["params.genome = 'mm10'", ""])
+    def test_a_given_header_replaces_the_saved_one(self, header):
+        client = _client(details=_details(script_pipe_header="params.genome = 'hg38'"), created={"id": 1777})
+        _run(server.update_pipeline, client, pipeline_id=1777, confirm_update=True,
+             script_pipe_header=header, **GRAPH_1777)
+        body = _posts(client)[0].kwargs["data"]
+        assert body["scriptPipeHeader"] == header
 
     @pytest.mark.parametrize("fields,details_extra,match", [
         ({"perms": 63}, {}, "not private"),
