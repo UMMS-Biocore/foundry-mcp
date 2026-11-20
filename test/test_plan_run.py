@@ -169,12 +169,9 @@ class TestPlanRun:
         assert "/api/v1/run/list" not in endpoints
         assert "/api/v1/run/12193/details" in endpoints
 
-    def test_no_example_run_is_reported_honestly(self):
-        parsed, _ = _plan(example_run=False)
-        assert "error" not in parsed
-        assert parsed["data"]["decisions"] == []
-        assert "no successful run" in parsed["summary"].lower()
-        assert "list_runs" in " ".join(parsed["next_steps"])
+    def test_example_run_plan_names_its_source(self):
+        parsed, _ = _plan()
+        assert parsed["data"]["source"] == "example_run"
 
     def test_handles_the_dict_shaped_inputs_of_external_pipelines(self):
         """nf-core/Nextflow pipelines return inputs as {name: {...}}, not a
@@ -189,3 +186,116 @@ class TestPlanRun:
         with patch.object(server, "get_client", return_value=client):
             result = server.plan_run(1405)
         assert json.loads(result) == {"error": "boom"}
+
+
+# A pipeline's own definitions, as GET /run/{id}/parameter-list returns them.
+PARAMETER_LIST = {
+    "pipelineType": "via",
+    "pipelineReadable": True,
+    "inputs": {
+        "pipe": {
+            "schema": [
+                {"varName": "params.mate", "defaultVal": "single",
+                 "opt": "single,pair"},
+                {"varName": "params.run_STAR", "defaultVal": "yes"},
+                {"varName": "params.run_Trimmer", "defaultVal": "no"},
+                {"varName": "pipeline_cpu", "defaultVal": 4},
+            ],
+            "inputNodes": [
+                {"varName": "params.reads", "file": True},
+                {"varName": "params.genome",
+                 "defaultVal": "/share/data/genome.fa"},
+            ],
+        },
+        "processes": {
+            "12": {"schema": [{"varName": "min_quality", "defaultVal": 20}]},
+            "13": {"schema": [{"varName": "params.gtf_type",
+                               "defaultVal": "ncbi", "optional": True}]},
+        },
+    },
+}
+
+
+def _defaults_client(any_run=True, parameter_list=PARAMETER_LIST):
+    """No Completed run; maybe a run in another state to read definitions."""
+    c = MagicMock()
+
+    def _call(**kwargs):
+        endpoint = kwargs.get("endpoint")
+        if endpoint == "/api/v1/run/list":
+            flt = kwargs["params"]["filter"]
+            if "status" in flt or not any_run:
+                return {"total": 0, "data": []}
+            return {"total": 1, "data": [{"id": 12500, "name": "draft",
+                                          "status": "Error"}]}
+        if endpoint == "/api/v1/run/12500/parameter-list":
+            return parameter_list
+        raise AssertionError(f"unexpected call {endpoint}")
+
+    c.call.side_effect = _call
+    return c
+
+
+def _plan_defaults(**kwargs):
+    client = _defaults_client(**kwargs)
+    with patch.object(server, "get_client", return_value=client):
+        return json.loads(server.plan_run(1405)), client
+
+
+class TestPlanRunFallsBackToDefaults:
+    def test_builds_decisions_from_the_pipeline_defaults(self):
+        parsed, _ = _plan_defaults()
+        assert "error" not in parsed
+        decisions = {d.get("input"): d for d in parsed["data"]["decisions"]}
+        assert decisions["mate"]["current"] == "single"
+        assert decisions["mate"]["allowed"] == ["single", "pair"]
+        assert decisions["reads"]["kind"] == "samples"
+        assert decisions["reads"]["current"] is None
+        assert decisions["reads"]["required"] is True
+        assert decisions["gtf_type"]["required"] is False
+
+    def test_says_plainly_it_came_from_defaults_not_an_example_run(self):
+        parsed, _ = _plan_defaults()
+        data = parsed["data"]
+        assert data["source"] == "pipeline_defaults"
+        assert data["based_on_run"] is None
+        summary = parsed["summary"].lower()
+        assert "default" in summary
+        assert "not" in summary and "example run" in summary
+
+    def test_never_offers_to_duplicate_the_run_it_read_definitions_from(self):
+        """The run was not a successful one; copying its values is not the
+        same as starting from the pipeline defaults."""
+        parsed, _ = _plan_defaults()
+        joined = " ".join(parsed["next_steps"])
+        assert "duplicate_run" not in joined
+        for step in ("create_run", "update_run", "preflight_run",
+                     "initiate_run"):
+            assert step in joined
+
+    def test_reference_paths_steps_and_process_forms_are_handled_as_usual(self):
+        parsed, _ = _plan_defaults()
+        data = parsed["data"]
+        shown = {d.get("input") for d in data["decisions"]}
+        assert "genome" not in shown
+        assert data["hidden_reference_paths"] == 1
+        steps = [d for d in data["decisions"] if d["kind"] == "steps"]
+        assert len(steps) == 1 and steps[0]["enabled"] == ["STAR"]
+        # pipe form (pipeline_cpu) and process 12's form, from the I09 helper
+        assert data["process_option_groups"] == 2
+
+    def test_no_run_at_all_is_reported_honestly(self):
+        parsed, _ = _plan_defaults(any_run=False)
+        assert "error" not in parsed
+        assert parsed["data"]["decisions"] == []
+        assert parsed["data"]["source"] is None
+        assert "no successful run" in parsed["summary"].lower()
+        joined = " ".join(parsed["next_steps"])
+        assert "create_run" in joined and "input_definitions" in joined
+
+    def test_unreadable_definitions_fall_back_to_the_honest_empty_plan(self):
+        unreadable = {"pipelineType": "via", "inputs": {},
+                      "pipelineReadable": False}
+        parsed, _ = _plan_defaults(parameter_list=unreadable)
+        assert parsed["data"]["decisions"] == []
+        assert parsed["data"]["source"] is None
