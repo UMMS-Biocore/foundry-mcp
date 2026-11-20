@@ -68,8 +68,14 @@ def _refused(body, status: int, fallback_reason: str, fallback_message: str):
 
 
 def _outcome_unknown(body, status: int, message: str):
-    """Raise outcome_unknown when a write got a gateway answer instead of the backend's."""
-    if status in _GATEWAY_STATUSES or (status >= 500 and not isinstance(body, dict)):
+    """Raise outcome_unknown when a write got a gateway answer instead of the backend's.
+
+    A 5xx counts as the backend's refusal only when it carries a typed reason. A
+    generic error handler body such as {"error": "Internal Server Error"} may follow
+    a launch row that was already written, so it stays unknown.
+    """
+    typed = isinstance(body, dict) and bool(body.get("reason"))
+    if status in _GATEWAY_STATUSES or (status >= 500 and not typed):
         _fail(
             f"Foundry Connect did not answer (HTTP {status}). {message}",
             "outcome_unknown",

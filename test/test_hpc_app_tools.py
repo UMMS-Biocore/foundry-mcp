@@ -200,6 +200,25 @@ def test_launch_server_error_with_a_reason_is_still_refused(via_client, http):
     assert json.loads(str(e.value))["reason"] == "submit_failed"
 
 
+def test_launch_generic_server_error_body_is_unknown_not_refused(via_client, http):
+    http.side_effect = [_response(200, ONE_ENV), _response(500, {"error": "Internal Server Error"})]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_launch()
+    body = json.loads(str(e.value))
+    assert body["reason"] == "outcome_unknown"
+    assert "hpc_app_list" in body["error"]
+    assert [c[0] for c in _calls(http)].count("POST") == 1
+
+
+def test_stop_generic_server_error_body_is_unknown_not_refused(via_client, http):
+    http.side_effect = [_response(500, {"error": "Internal Server Error"})]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_stop(LAUNCH)
+    body = json.loads(str(e.value))
+    assert body["reason"] == "outcome_unknown" and "hpc_app_status" in body["error"]
+    assert len(http.call_args_list) == 1
+
+
 def test_launch_rejects_a_bad_number_before_any_request(via_client, http):
     with pytest.raises(ToolError):
         server.hpc_app_launch(cpus=0)
