@@ -166,7 +166,7 @@ Organize processes into logical groups.
 
 ---
 
-### 🚀 App Management & Launch (3 tools)
+### 🚀 App Management & Launch (7 tools)
 
 Discover and launch applications in Foundry Connect.
 
@@ -175,6 +175,10 @@ Discover and launch applications in Foundry Connect.
 | `list_apps`              | List all available applications with names, IDs, and details |
 | `launch_app`             | Launch/run an application with specified parameters          |
 | `discover_app_endpoints` | Discover available API endpoints (advanced/debugging)        |
+| `hpc_app_launch`         | Launch an app (marimo by default) as a job on a cluster run environment, with chosen data roots mounted |
+| `hpc_app_list`           | List your cluster app launches and their states              |
+| `hpc_app_status`         | Check one cluster app launch: state, end reason and mounts   |
+| `hpc_app_stop`           | Stop a cluster app launch, after the user confirms           |
 
 ---
 

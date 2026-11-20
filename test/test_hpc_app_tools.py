@@ -136,13 +136,34 @@ def test_launch_with_no_environment(via_client, http):
     assert json.loads(str(e.value))["reason"] == "no_run_environment"
 
 
-def test_launch_names_the_reconnect_step_on_execution_not_granted(via_client, http):
-    http.side_effect = [_response(403, {"error": "execution_not_granted", "message": "x"})]
+NOT_GRANTED = {"error": "execution_not_granted", "message": "x"}
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        lambda: server.hpc_app_launch(),
+        lambda: server.hpc_app_list(),
+        lambda: server.hpc_app_status(LAUNCH),
+        lambda: server.hpc_app_stop(LAUNCH),
+    ],
+    ids=["launch", "list", "status", "stop"],
+)
+def test_every_tool_names_the_reconnect_step_on_execution_not_granted(via_client, http, tool):
+    http.side_effect = [_response(403, NOT_GRANTED)]
     with pytest.raises(ToolError) as e:
-        server.hpc_app_launch()
+        tool()
     body = json.loads(str(e.value))
     assert body["reason"] == "execution_not_granted"
     assert "Reconnect" in body["error"] and "tick" in body["error"]
+
+
+def test_launch_names_the_reconnect_step_when_the_post_is_refused(via_client, http):
+    http.side_effect = [_response(200, ONE_ENV), _response(403, NOT_GRANTED)]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_launch()
+    assert json.loads(str(e.value))["reason"] == "execution_not_granted"
+    assert [c[0] for c in _calls(http)].count("POST") == 1
 
 
 def test_launch_keeps_the_servers_refusal_reason_and_detail(via_client, http):
@@ -159,6 +180,24 @@ def test_launch_is_not_retried_and_says_to_check_the_list(via_client, http):
         server.hpc_app_launch()
     assert "hpc_app_list" in json.loads(str(e.value))["error"]
     assert [c[0] for c in _calls(http)].count("POST") == 1
+
+
+@pytest.mark.parametrize("status", [502, 503, 504, 500])
+def test_launch_gateway_answer_is_unknown_not_refused(via_client, http, status):
+    http.side_effect = [_response(200, ONE_ENV), _response(status)]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_launch()
+    body = json.loads(str(e.value))
+    assert body["reason"] == "outcome_unknown"
+    assert "hpc_app_list" in body["error"]
+    assert [c[0] for c in _calls(http)].count("POST") == 1
+
+
+def test_launch_server_error_with_a_reason_is_still_refused(via_client, http):
+    http.side_effect = [_response(200, ONE_ENV), _response(500, {"reason": "submit_failed", "detail": "No."})]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_launch()
+    assert json.loads(str(e.value))["reason"] == "submit_failed"
 
 
 def test_launch_rejects_a_bad_number_before_any_request(via_client, http):
@@ -188,9 +227,11 @@ def test_status_of_an_unknown_launch(via_client, http):
     assert json.loads(str(e.value))["reason"] == "launch_not_found"
 
 
-def test_status_rejects_a_path_like_id(via_client, http):
-    with pytest.raises(ToolError):
-        server.hpc_app_status("../x")
+@pytest.mark.parametrize("bad", ["../x", "?x", "..", "a%2Fb", "a b", "#", "", LAUNCH.upper(), LAUNCH + "x"])
+def test_status_rejects_a_path_like_id(via_client, http, bad):
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_status(bad)
+    assert json.loads(str(e.value))["reason"] == "invalid_launch_id"
     http.assert_not_called()
 
 
@@ -202,8 +243,10 @@ def test_stop_reports_the_launch_as_it_is(via_client, http, state):
     assert out["launch"]["state"] == state
 
 
-def test_stop_names_the_reconnect_step_on_execution_not_granted(via_client, http):
-    http.side_effect = [_response(403, {"error": "execution_not_granted", "message": "x"})]
+def test_stop_gateway_answer_is_unknown_not_refused(via_client, http):
+    http.side_effect = [_response(504)]
     with pytest.raises(ToolError) as e:
         server.hpc_app_stop(LAUNCH)
-    assert json.loads(str(e.value))["reason"] == "execution_not_granted"
+    body = json.loads(str(e.value))
+    assert body["reason"] == "outcome_unknown" and "hpc_app_status" in body["error"]
+    assert len(http.call_args_list) == 1

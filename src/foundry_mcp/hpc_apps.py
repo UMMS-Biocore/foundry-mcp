@@ -8,13 +8,30 @@ server module stays the only place that knows how a client is made.
 """
 
 import json
-from typing import Callable, List, Optional, Tuple
+import re
+from typing import Callable, List, Tuple
 
 from mcp.server.fastmcp.exceptions import ToolError
 
 from .client import RequestFailed
 
 LAUNCHES = "/api/v1/hpc-app-launches"
+
+# Same shape as LAUNCH_ID_PATTERN in the backend: 26 lowercase base32 characters.
+_LAUNCH_ID = re.compile(r"[a-z2-7]{26}")
+
+# A gateway answer with no verdict from the backend: the write may or may not have
+# happened, so it is reported as unknown, never as a refusal.
+_GATEWAY_STATUSES = (502, 503, 504)
+
+_LAUNCH_MAY_EXIST = (
+    "The launch may have been created before the answer was lost. Call hpc_app_list to "
+    "check before trying again, so a second job is not started."
+)
+_STOP_MAY_HAVE_ARRIVED = (
+    "The stop may have reached the server before the answer was lost. Call hpc_app_status "
+    "to see whether the launch is stopping before trying again."
+)
 
 # `call(method, endpoint, **kwargs)` returns (HTTP status, parsed body).
 Call = Callable[..., Tuple[int, object]]
@@ -48,6 +65,16 @@ def _refused(body, status: int, fallback_reason: str, fallback_message: str):
     reason = body.get("reason") or error_code or fallback_reason
     message = body.get("detail") or body.get("message") or fallback_message
     _fail(message, reason, http_status=status)
+
+
+def _outcome_unknown(body, status: int, message: str):
+    """Raise outcome_unknown when a write got a gateway answer instead of the backend's."""
+    if status in _GATEWAY_STATUSES or (status >= 500 and not isinstance(body, dict)):
+        _fail(
+            f"Foundry Connect did not answer (HTTP {status}). {message}",
+            "outcome_unknown",
+            http_status=status,
+        )
 
 
 def _page_link(web_base: str) -> str:
@@ -157,12 +184,10 @@ def launch(
         "POST",
         LAUNCHES,
         data=body,
-        may_have_arrived=(
-            "The launch may have been created before the answer was lost. Call hpc_app_list to "
-            "check before trying again, so a second job is not started."
-        ),
+        may_have_arrived=_LAUNCH_MAY_EXIST,
     )
     if status not in (200, 201):
+        _outcome_unknown(created, status, _LAUNCH_MAY_EXIST)
         _refused(created, status, "launch_refused", "The app could not be launched.")
     return json.dumps(_launch_answer(created, web_base), indent=2)
 
@@ -178,9 +203,10 @@ def list_launches(call: Call, web_base: str) -> str:
 
 
 def _check_launch_id(launch_id: str) -> str:
-    if not isinstance(launch_id, str) or not launch_id.strip() or "/" in launch_id:
+    launch_id = launch_id.strip() if isinstance(launch_id, str) else ""
+    if not _LAUNCH_ID.fullmatch(launch_id):
         _fail("launch_id must be a launch id as hpc_app_launch or hpc_app_list returned it.", "invalid_launch_id")
-    return launch_id.strip()
+    return launch_id
 
 
 def status_of(call: Call, web_base: str, launch_id: str) -> str:
@@ -193,8 +219,11 @@ def status_of(call: Call, web_base: str, launch_id: str) -> str:
 
 def stop(call: Call, web_base: str, launch_id: str) -> str:
     launch_id = _check_launch_id(launch_id)
-    status, body = _request(call, "POST", f"{LAUNCHES}/{launch_id}/stop")
+    status, body = _request(
+        call, "POST", f"{LAUNCHES}/{launch_id}/stop", may_have_arrived=_STOP_MAY_HAVE_ARRIVED
+    )
     if status not in (200, 202):
+        _outcome_unknown(body, status, _STOP_MAY_HAVE_ARRIVED)
         _refused(body, status, "stop_failed", "Could not stop that launch.")
     # 202 answers with the launch as it is: stopping, or already ended.
     return json.dumps(_launch_answer(body, web_base), indent=2)

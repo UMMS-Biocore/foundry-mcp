@@ -7612,6 +7612,11 @@ def hpc_app_launch(
     user, then call again with the id. `data_roots` are names from that list;
     each is mounted read only unless you pass {"name": ..., "mode": "rw"}.
 
+    The launch starts in requested. Call hpc_app_status until it is running
+    before telling the person to open it, and report the end reason if it
+    ends first. If the answer says outcome_unknown, call hpc_app_list before
+    launching again, so a second job is not started.
+
     A 403 with reason execution_not_granted means this connection may not run
     apps: the user must reconnect Foundry Connect and tick the permission.
     """
