@@ -81,6 +81,16 @@
     with `cleanup_delay_hours` is refused before anything is sent.
 
 ### Changed
+- **`create_run` saves the default process forms**: a new run of a
+  Foundry pipeline now gets its per process forms (and the pipeline form)
+  filled with the pipeline's defaults, the same values the Run page fills
+  for a new run, so the forms no longer open blank. Forms and fields the
+  run already holds are kept as they are; only missing ones are added. A
+  form the Run page computes from other fields (an array row with an
+  autoform rule) is left for the Run page to fill and is named in
+  `process_option_defaults.left_to_run_page`. External pipelines are left
+  alone. If the save is refused, the run is still returned with
+  `process_option_defaults_error`.
 - **`update_run(process_options=...)` now merges instead of replacing**
   (behaviour change). The save endpoint replaces a run's whole set of
   process forms, so sending one form, or one form with only some fields,

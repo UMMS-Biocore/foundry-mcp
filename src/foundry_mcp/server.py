@@ -2115,10 +2115,19 @@ def _run_form(details, run_name):
     }
 
 
-def _run_form_envelope(run_id, details, run_name, verb, via_client, full_definitions=False):
+_UNREAD = object()
+
+
+def _run_form_envelope(run_id, details, run_name, verb, via_client, full_definitions=False,
+                       parameter_list=_UNREAD):
+    """parameter_list is the one the caller read already (an exception when that
+    read failed); left out, it is read here."""
     form = _run_form(details, run_name)
     try:
-        parameter_list = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
+        if parameter_list is _UNREAD:
+            parameter_list = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
+        if isinstance(parameter_list, Exception):
+            raise parameter_list
         definitions = _input_definitions(parameter_list)
         if full_definitions:
             form["input_definitions"] = definitions
@@ -2165,6 +2174,184 @@ def _run_form_envelope(run_id, details, run_name, verb, via_client, full_definit
     )
 
 
+# Default per process forms, filled the way the Run page fills a new run
+# (frontend runs/overview/inputs/via-pipeline-inputs.tsx), so a run created
+# here saves the same processOptions as one created and saved in the browser.
+
+def _js_truthy(value):
+    """JavaScript truthiness: the Run page keeps a default only when it is truthy."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == value and value != 0
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def _form_text(value):
+    """A form value as the Run page saves it: every leaf as text, lists and
+    objects kept, a missing value blank."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, list):
+        return [_form_text(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _form_text(v) for k, v in value.items()}
+    return str(value)
+
+
+def _show_settings(item):
+    value = item.get("showSett") if _js_truthy(item.get("showSett")) else item.get("showsett")
+    if not _js_truthy(value):
+        return None
+    return ",".join(str(v) for v in value) if isinstance(value, list) else str(value)
+
+
+def _unique_by_name(items):
+    """Schema items with a varName, the first of each short name kept."""
+    seen, kept = set(), []
+    for item in items or []:
+        if not isinstance(item, dict) or not isinstance(item.get("varName"), str) or not item["varName"]:
+            continue
+        name = item["varName"].split(".")[-1]
+        if name not in seen:
+            seen.add(name)
+            kept.append(item)
+    return kept
+
+
+def _style_groups(style, kind):
+    first = style[0] if isinstance(style, list) and style and isinstance(style[0], dict) else {}
+    groups = first.get(kind)
+    return [g for g in groups if isinstance(g, list)] if isinstance(groups, list) else []
+
+
+def _row_kinds(var_names, style):
+    """(array names, spreadsheet names): the fields the Run page lays out in
+    array or spreadsheet rows, grouped as groupProcessInputs does."""
+    rows, matched = [], set()
+    for name in var_names:
+        for kind in ("multicol", "spreadsheet"):
+            for group in _style_groups(style, kind):
+                if name in group and not any(name in row for row in rows):
+                    row = [n for n in group if n in var_names and n not in matched]
+                    if row:
+                        rows.append(row)
+                        matched.update(row)
+        if name not in matched:
+            rows.append([name])
+            matched.add(name)
+    kinds = {}
+    for kind in ("array", "spreadsheet"):
+        groups = _style_groups(style, kind)
+        kinds[kind] = {n for row in rows if any(all(i in row for i in g) for g in groups) for n in row}
+    return kinds["array"], kinds["spreadsheet"]
+
+
+def _form_defaults(items, style, grouped_names, field_defaults):
+    """One form's default values, or None when the Run page computes them
+    itself (an array row with an autoform rule, which reads other fields).
+    field_defaults is the form's {field: default} from _form_field_defaults;
+    the Run page keeps a default only when it is truthy."""
+    names = [i["varName"] for i in items if i["varName"] in grouped_names]
+    array_names, sheet_names = _row_kinds(names, style)
+    if any(_js_truthy(i.get("autoform")) for i in items if i["varName"] in array_names):
+        return None
+    values = {}
+    for item in items:
+        var_name = item["varName"]
+        default = field_defaults.get(var_name)
+        default = default if _js_truthy(default) else None
+        if array_names and var_name in array_names:
+            if isinstance(default, list):
+                for index, value in enumerate(default, start=1):
+                    values[f"{var_name}_ind{index}"] = _form_text(value)
+        elif sheet_names and var_name in sheet_names:
+            values[var_name] = _form_text(default if isinstance(default, list)
+                                          else ["" if default is None else default])
+        elif item.get("type") == "checkbox":
+            values[var_name] = "true" if default in ("true", True) else "false"
+        else:
+            values[var_name] = _form_text("" if default is None else default)
+    return values
+
+
+def _default_process_options(parameter_list):
+    """(processOptions, forms left to the Run page) a new run of a Foundry
+    pipeline gets in the browser: every per process form, and the pipeline
+    form `pipe`, filled from the parameter list's schema defaults. None when
+    the parameter list is unreadable or belongs to an external pipeline."""
+    inputs = (parameter_list or {}).get("inputs")
+    if not isinstance(inputs, dict) or not isinstance(inputs.get("pipe"), dict):
+        return None
+    pipe = inputs["pipe"]
+    pipe_schema = [i for i in pipe.get("schema") or [] if isinstance(i, dict)]
+    pipe_items = _unique_by_name(i for i in pipe_schema if not str(i.get("varName", "")).startswith("params."))
+    # Pipeline fields another input shows under its settings are not laid out in rows.
+    nodes = [i for i in pipe.get("inputNodes") or [] if isinstance(i, dict)
+             and str(i.get("varName", "")).startswith("params.")]
+    hidden = set()
+    for item in _unique_by_name(pipe_schema + nodes):
+        shown = _show_settings(item)
+        if shown:
+            hidden.update(shown.split(","))
+    blocks = [("pipe", pipe_items, pipe.get("style"),
+               {i["varName"] for i in pipe_items if f"pipe.{i['varName']}" not in hidden})]
+    for key, block in (inputs.get("processes") or {}).items():
+        block = block if isinstance(block, dict) else {}
+        items = _unique_by_name(i for i in block.get("schema") or []
+                                if isinstance(i, dict) and not str(i.get("varName", "")).startswith("params."))
+        if items:
+            blocks.append((str(key), items, block.get("style"), {i["varName"] for i in items}))
+    field_defaults = _form_field_defaults(parameter_list) or {}
+    defaults, left = {}, []
+    for key, items, style, grouped in blocks:
+        values = _form_defaults(items, style, grouped, field_defaults.get(key) or {})
+        if values is None:
+            left.append(key)
+        else:
+            defaults[key] = values
+    return defaults, sorted(left)
+
+
+def _fill_default_process_options(via_client, run_id, details, parameter_list):
+    """Save the default forms a new run is missing. Saved forms and fields are
+    kept as they are; only missing ones are added. Returns (report, the saved
+    processOptions or None when nothing was saved); raises when the run's own
+    forms cannot be read or the save is refused."""
+    found = _default_process_options(parameter_list)
+    if found is None:
+        return None, None
+    defaults, left = found
+    saved = _saved_process_options(details, run_id)
+    merged = {key: (dict(form) if isinstance(form, dict) else form) for key, form in saved.items()}
+    filled = []
+    for key, form in defaults.items():
+        if key not in merged:
+            merged[key] = dict(form)
+            filled.append(key)
+        elif isinstance(merged[key], dict):
+            missing = {field: value for field, value in form.items() if field not in merged[key]}
+            if missing:
+                merged[key] = {**missing, **merged[key]}
+                filled.append(key)
+    report = {"filled_forms": sorted(filled), "left_to_run_page": left}
+    if not filled:
+        return report, None
+    permission, group_id = _permission_from_details(details or {}, run_id)
+    via_client.call(
+        method="PATCH",
+        endpoint=f"/api/v1/run/{run_id}/save",
+        data={"permission": permission, "groupId": group_id, "processOptions": merged},
+    )
+    return report, merged
+
+
 @mcp.tool()
 def create_run(
     pipeline_id: int, project_id: int, name: str, full_definitions: bool = False, publish_dir: str = None
@@ -2179,6 +2366,12 @@ def create_run(
     by default; pass full_definitions=True to add each input's description
     and dropdown options (or call list_run_environments(run_id,
     full_definitions=True) later, which does not create another run).
+
+    The new run's per process forms are saved with the pipeline's defaults,
+    filled as the Run page fills a new run, so the forms are not blank. A form
+    the Run page computes from other fields is left for it to fill
+    (process_option_defaults.left_to_run_page). Change form values later with
+    update_run(process_options=...), which merges into the saved forms.
 
     publish_dir (an absolute path on the run environment) is saved on the
     new run right away, so its final results are kept outside the work
@@ -2220,7 +2413,36 @@ def create_run(
                     f"Run {run_id} was created, but its publish directory was not saved: {e}. "
                     f"Retry with update_run(run_id='{run_id}', publish_dir=...)."
                 )
-        result = _run_form_envelope(run_id, details, name, "Created", via_client, full_definitions)
+        try:
+            parameter_list = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
+        except Exception as e:
+            parameter_list = e
+        # Save the default per process forms, as a new run saved in the browser has them.
+        forms_report, forms_error = None, None
+        if isinstance(parameter_list, Exception):
+            forms_error = f"Could not read the pipeline's process forms, so no defaults were saved: {parameter_list}"
+        else:
+            try:
+                forms_report, merged = _fill_default_process_options(via_client, run_id, details or {}, parameter_list)
+                if merged is not None:
+                    details = {**(details or {}), "processOptions": merged}
+            except Exception as e:
+                forms_error = (
+                    f"Run {run_id} was created, but its default process forms were not saved: {e}. "
+                    "Fill them with update_run(process_options=...), which merges into the saved forms."
+                )
+        result = _run_form_envelope(run_id, details, name, "Created", via_client, full_definitions,
+                                    parameter_list=parameter_list)
+        if forms_report is not None:
+            result["data"]["process_option_defaults"] = forms_report
+            if forms_report["filled_forms"]:
+                result["summary"] += (
+                    f" Default values are saved in {len(forms_report['filled_forms'])} process form(s), "
+                    "as the Run page fills them."
+                )
+        if forms_error:
+            result["data"]["process_option_defaults_error"] = forms_error
+            result["summary"] += " The default process forms were not saved (see process_option_defaults_error)."
         if saved:
             result["data"]["saved_publish_dir"] = saved
             result["summary"] += f" Publish directory {saved} is saved."

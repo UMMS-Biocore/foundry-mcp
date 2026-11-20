@@ -156,9 +156,34 @@ DETAILS = {
 }
 
 
+def _routed_client(details=None, params=None, create=None, save=None):
+    """A client that answers by endpoint, so the order of reads does not matter.
+    save is the PATCH answer, or an exception to raise."""
+    details = DETAILS if details is None else details
+    params = PARAMS if params is None else params
+
+    def call(**kw):
+        if kw["method"] == "POST":
+            return {"id": 41} if create is None else create
+        if kw["method"] == "PATCH":
+            if isinstance(save, Exception):
+                raise save
+            return "" if save is None else save
+        if kw["endpoint"].endswith("/details"):
+            return details
+        if isinstance(params, Exception):
+            raise params
+        return params
+    return _patched_client(side_effect=call)
+
+
+def _calls(client, method):
+    return [c.kwargs for c in client.call.call_args_list if c.kwargs["method"] == method]
+
+
 class TestCreateRun:
     def test_creates_then_returns_the_form(self):
-        client = _patched_client(side_effect=[{"id": 41, "projectPipelineId": 41}, DETAILS, PARAMS])
+        client = _routed_client(create={"id": 41, "projectPipelineId": 41})
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         assert client.call.call_args_list[0].kwargs == {
@@ -171,17 +196,17 @@ class TestCreateRun:
         assert data["run_environments"][0]["id"] == 550
         assert "bashVariable" not in data["run_environments"][0]
         assert data["proposed_execution_directory"] == {"550": "/home/jdoe/foundry-connect-runs/r1"}
-        assert data["process_options"] == {"grp": {"a": 1}}
+        assert data["process_options"] == {"grp": {"a": 1}, "pipe": {"run_cleanup": "true"}}
 
     def test_works_with_a_server_that_only_returns_projectPipelineId(self):
-        client = _patched_client(side_effect=[{"projectPipelineId": 42}, DETAILS, PARAMS])
+        client = _routed_client(create={"projectPipelineId": 42})
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         assert out["data"]["run_id"] == 42
 
     def test_no_usable_environment_is_said_plainly(self):
         empty = {**DETAILS, "runEnvironment": {"selectedId": None, "availableList": []}}
-        client = _patched_client(side_effect=[{"id": 43}, empty, PARAMS])
+        client = _routed_client(details=empty, create={"id": 43})
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         assert "no run environment" in out["summary"].lower()
@@ -190,6 +215,187 @@ class TestCreateRun:
         client = _patched_client(side_effect=RuntimeError("No permission to read this project"))
         with patch.object(server, "get_client", return_value=client):
             assert json.loads(server.create_run(3, 7, "r1")) == {"error": "No permission to read this project"}
+
+
+# A Foundry parameter list with one form of each kind the Run page fills.
+FORMS_PARAMS = {
+    "pipelineType": "via",
+    "inputs": {
+        "pipe": {
+            "schema": [
+                {"varName": "params.reads_dir", "type": "input", "defaultVal": "/data"},
+                {"varName": "run_cleanup", "type": "checkbox", "defaultVal": "true"},
+                {"varName": "keep_logs", "type": "checkbox", "defaultVal": "no"},
+                {"varName": "label", "type": "input"},
+            ],
+            "style": [],
+        },
+        "processes": {
+            "4": {
+                "schema": [
+                    {"varName": "threads", "type": "input", "defaultVal": 4},
+                    {"varName": "mode", "type": "dropdown", "defaultVal": "slow", "opt": ["fast", "slow"]},
+                    {"varName": "zero", "type": "input", "defaultVal": 0},
+                    {"varName": "threads", "type": "input", "defaultVal": 4},
+                    {"varName": "params.min_len", "type": "input", "defaultVal": "20"},
+                ],
+                "style": [],
+            },
+            "12_5": {
+                "schema": [
+                    {"varName": "adapter", "type": "input", "defaultVal": ["AAA", "CCC"]},
+                    {"varName": "min_q", "type": "input", "defaultVal": "20"},
+                    {"varName": "note", "type": "input"},
+                ],
+                "style": [{"multicol": [["adapter", "min_q"]], "array": [["adapter", "min_q"]],
+                           "condi": None, "spreadsheet": None}],
+            },
+            "7": {
+                "schema": [
+                    {"varName": "sample", "type": "input", "defaultVal": "s1"},
+                    {"varName": "group", "type": "input"},
+                    {"varName": "batch", "type": "input", "defaultVal": ["b1", "b2"]},
+                ],
+                "style": [{"multicol": None, "array": None, "condi": None,
+                           "spreadsheet": [["sample", "group", "batch"]]}],
+            },
+            "8": {"schema": [{"varName": "params.only_main", "type": "input"}], "style": []},
+        },
+    },
+}
+
+
+class TestDefaultProcessOptions:
+    def test_fills_every_form_the_way_the_run_page_does(self):
+        defaults, left = server._default_process_options(FORMS_PARAMS)
+        assert left == []
+        assert defaults == {
+            # A checkbox is on only for a true default; a field with no default is blank.
+            "pipe": {"run_cleanup": "true", "keep_logs": "false", "label": ""},
+            # A field named twice is saved once, values are saved as text, and a 0
+            # default counts as none (as in the browser).
+            "4": {"threads": "4", "mode": "slow", "zero": ""},
+            # An array row saves one numbered field per default value; a scalar
+            # default in an array row is not filled; a field outside the row is.
+            "12_5": {"adapter_ind1": "AAA", "adapter_ind2": "CCC", "note": ""},
+            # A spreadsheet column is a list: a scalar default becomes one row.
+            "7": {"sample": ["s1"], "group": [""], "batch": ["b1", "b2"]},
+        }
+
+    def test_a_pipeline_with_no_forms_still_has_the_pipeline_form(self):
+        params = {"inputs": {"pipe": {"schema": [{"varName": "params.x", "type": "input"}]}, "processes": {}}}
+        assert server._default_process_options(params) == ({"pipe": {}}, [])
+
+    def test_an_array_row_with_autoform_is_left_to_the_run_page(self):
+        params = {"inputs": {"pipe": {"schema": []}, "processes": {"9": {
+            "schema": [{"varName": "kind", "type": "input", "defaultVal": ["a"], "autoform": [[["x=(1)", "y"]]]}],
+            "style": [{"array": [["kind"]], "multicol": None, "spreadsheet": None}],
+        }}}}
+        defaults, left = server._default_process_options(params)
+        assert defaults == {"pipe": {}}
+        assert left == ["9"]
+
+    def test_a_pipeline_field_hidden_behind_show_settings_is_still_filled(self):
+        params = {"inputs": {"pipe": {
+            "schema": [
+                {"varName": "params.extra", "type": "checkbox", "showsett": "pipe.cols"},
+                {"varName": "cols", "type": "input", "defaultVal": ["c1", "c2"]},
+            ],
+            "style": [{"array": [["cols"]], "multicol": None, "spreadsheet": None}],
+        }, "processes": {}}}
+        # Hidden fields are not grouped into rows, so the list is saved as is.
+        assert server._default_process_options(params) == ({"pipe": {"cols": ["c1", "c2"]}}, [])
+
+    @pytest.mark.parametrize("params", [
+        None, {}, {"inputs": None},
+        {"inputs": {"main": {"schema": [{"varName": "params.main.x", "defaultVal": "1"}]}}},
+    ])
+    def test_an_unreadable_or_external_parameter_list_gives_none(self, params):
+        assert server._default_process_options(params) is None
+
+
+class TestCreateRunProcessDefaults:
+    def test_new_run_saves_the_default_forms_with_its_permission(self):
+        details = {**DETAILS, "permission": 15, "groupId": 7, "processOptions": None}
+        client = _routed_client(details=details, params=FORMS_PARAMS)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        expected, _ = server._default_process_options(FORMS_PARAMS)
+        assert _calls(client, "PATCH") == [{
+            "method": "PATCH", "endpoint": "/api/v1/run/41/save",
+            "data": {"permission": 15, "groupId": 7, "processOptions": expected},
+        }]
+        # The parameter list is read once and serves both the defaults and the form.
+        assert len([c for c in _calls(client, "GET") if c["endpoint"].endswith("/parameter-list")]) == 1
+        assert out["data"]["process_options"] == expected
+        assert out["data"]["process_option_defaults"]["filled_forms"] == ["12_5", "4", "7", "pipe"]
+        assert "default" in out["summary"].lower()
+        assert out["data"]["input_definitions"]
+
+    def test_saved_values_are_never_overwritten(self):
+        saved = {"4": {"threads": "16"}, "custom": {"k": "v"}}
+        details = {**DETAILS, "processOptions": saved}
+        client = _routed_client(details=details, params=FORMS_PARAMS)
+        with patch.object(server, "get_client", return_value=client):
+            server.create_run(3, 7, "r1")
+        sent = _calls(client, "PATCH")[0]["data"]["processOptions"]
+        assert sent["4"] == {"threads": "16", "mode": "slow", "zero": ""}
+        assert sent["custom"] == {"k": "v"}
+        assert sent["pipe"] == {"run_cleanup": "true", "keep_logs": "false", "label": ""}
+
+    def test_nothing_is_saved_when_every_default_is_already_there(self):
+        expected, _ = server._default_process_options(FORMS_PARAMS)
+        details = {**DETAILS, "processOptions": expected}
+        client = _routed_client(details=details, params=FORMS_PARAMS)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        assert _calls(client, "PATCH") == []
+        assert out["data"]["process_option_defaults"]["filled_forms"] == []
+
+    def test_a_form_left_to_the_run_page_is_not_saved_at_all(self):
+        params = {"inputs": {"pipe": {"schema": []}, "processes": {"9": {
+            "schema": [{"varName": "kind", "type": "input", "defaultVal": ["a"], "autoform": [[["x=(1)", "y"]]]}],
+            "style": [{"array": [["kind"]]}],
+        }}}}
+        client = _routed_client(details={**DETAILS, "processOptions": {}}, params=params)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        sent = _calls(client, "PATCH")[0]["data"]["processOptions"]
+        # Even an empty entry would stop the Run page from filling the form itself.
+        assert "9" not in sent
+        assert out["data"]["process_option_defaults"]["left_to_run_page"] == ["9"]
+
+    def test_a_failed_save_still_returns_the_created_run(self):
+        client = _routed_client(params=FORMS_PARAMS, save=RuntimeError("save refused"))
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        assert out["data"]["run_id"] == 41
+        assert "save refused" in out["data"]["process_option_defaults_error"]
+        assert out["data"]["process_options"] == DETAILS["processOptions"]
+
+    def test_an_unreadable_parameter_list_saves_nothing(self):
+        client = _routed_client(params=RuntimeError("down"))
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        assert _calls(client, "PATCH") == []
+        assert out["data"]["input_definitions"] is None
+        assert "process_option_defaults_error" in out["data"]
+
+    def test_an_external_pipeline_is_left_alone(self):
+        params = {"pipelineType": "nextflow", "inputs": {"main": {"schema": [{"varName": "params.main.x"}]}}}
+        client = _routed_client(params=params)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        assert _calls(client, "PATCH") == []
+        assert "process_option_defaults_error" not in out["data"]
+
+    def test_unreadable_saved_forms_are_never_replaced(self):
+        details = {**DETAILS, "pipelineReadable": False}
+        client = _routed_client(details=details, params=FORMS_PARAMS)
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.create_run(3, 7, "r1"))
+        assert _calls(client, "PATCH") == []
+        assert "process_option_defaults_error" in out["data"]
 
 
 class TestDefaultPublishDirectory:
@@ -210,21 +416,21 @@ class TestDefaultPublishDirectory:
 
 class TestCreateRunPublishDirectory:
     def test_form_proposes_a_publish_directory_per_environment(self):
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        client = _routed_client()
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         assert out["data"]["proposed_publish_directory"] == {"550": "/home/jdoe/foundry-connect-runs/r1/publish"}
         steps = " ".join(out["next_steps"])
         assert "proposed_publish_directory" in steps and "update_run(" in steps and "publish_dir=" in steps
-        # A proposal only: nothing is saved without publish_dir.
-        assert not any(c.kwargs["method"] == "PATCH" for c in client.call.call_args_list)
+        # A proposal only: no publish directory is saved without publish_dir.
+        assert not any("publishDir" in c["data"] for c in _calls(client, "PATCH"))
 
     def test_given_publish_dir_is_saved_with_the_runs_permission(self):
         details = {**DETAILS, "permission": 15, "groupId": 7}
-        client = _patched_client(side_effect=[{"id": 41}, details, "", PARAMS])
+        client = _routed_client(details=details)
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(3, 7, "r1", publish_dir="/data/results/r1"))
-        assert client.call.call_args_list[2].kwargs == {
+        assert _calls(client, "PATCH")[0] == {
             "method": "PATCH", "endpoint": "/api/v1/run/41/save",
             "data": {"permission": 15, "groupId": 7, "publishDir": "/data/results/r1"},
         }
@@ -255,7 +461,7 @@ class TestCreateRunPublishDirectory:
 
     def test_a_run_with_no_saved_permission_is_not_saved(self):
         details = {**DETAILS, "permission": None}
-        client = _patched_client(side_effect=[{"id": 41}, details, PARAMS])
+        client = _routed_client(details=details)
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(3, 7, "r1", publish_dir="/data/results/r1"))
         assert "permission" in out["data"]["publish_dir_error"]
@@ -418,7 +624,7 @@ class TestInputDefinitions:
         assert server._input_definitions({"inputs": None}) == []
 
     def test_create_run_form_carries_the_definitions(self):
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        client = _routed_client()
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         assert client.call.call_args_list[2].kwargs == {"method": "GET", "endpoint": "/api/v1/run/41/parameter-list"}
@@ -426,7 +632,7 @@ class TestInputDefinitions:
         assert out["data"]["inputs"] == []
 
     def test_a_failed_parameter_list_still_returns_the_form(self):
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, RuntimeError("boom")])
+        client = _routed_client(params=RuntimeError("boom"))
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         assert out["data"]["run_id"] == 41
@@ -500,7 +706,7 @@ class TestUpdateRunReply:
 
 class TestCompactDefinitions:
     def test_create_run_defaults_to_compact_definitions(self):
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        client = _routed_client()
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
         defs = out["data"]["input_definitions"]
@@ -513,7 +719,7 @@ class TestCompactDefinitions:
         assert "list_run_environments(run_id='41', full_definitions=True)" in note
 
     def test_create_run_full_definitions_returns_the_full_list(self):
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        client = _routed_client()
         with patch.object(server, "get_client", return_value=client):
             out = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1", full_definitions=True))
         assert out["data"]["input_definitions"] == server._input_definitions(PARAMS)
@@ -542,10 +748,10 @@ class TestCompactDefinitions:
         assert server._compact_input_definitions(defs) == [{"name": "x", "required": False, "default": "1"}]
 
     def test_the_rest_of_the_form_is_unchanged(self):
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        client = _routed_client()
         with patch.object(server, "get_client", return_value=client):
             compact = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1"))
-        client = _patched_client(side_effect=[{"id": 41}, DETAILS, PARAMS])
+        client = _routed_client()
         with patch.object(server, "get_client", return_value=client):
             full = json.loads(server.create_run(pipeline_id=3, project_id=7, name="r1", full_definitions=True))
         for key in ("input_definitions", "input_definitions_note"):
