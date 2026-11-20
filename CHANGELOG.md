@@ -380,6 +380,11 @@
   still fails on an input the pipeline requires with no default, and blanks
   and the other placeholders (`NO_FILE`, `None`, `null`) fail as before.
 
+- **A missing record reads as missing**: tools now pass on the server's own
+  message when something is not found, for example a collection id that no
+  longer exists, instead of a generic not found text that looked like a wrong
+  route. Needs `viafoundry_sdk` 1.4.1.
+
 ## [1.3.0] - 2026-09-30
 
 ### Added
