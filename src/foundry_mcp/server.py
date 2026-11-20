@@ -4803,14 +4803,109 @@ _PREFLIGHT_MIN_REPLICATES = 2
 _DATA_INPUT_TYPES = ("file", "set", "singleFile")
 
 
-def _preflight_definitions(via_client, run_id):
-    """The pipeline's input definitions, or None when they cannot be read."""
+def _preflight_parameter_list(via_client, run_id):
+    """The run's parameter list (input and form definitions), or None when it
+    cannot be read."""
     try:
-        return _input_definitions(via_client.call(
-            method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list"))
+        return via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/parameter-list")
     except Exception as e:
         logger.info(f"Pre-flight could not read input definitions: {e}")
         return None
+
+
+# Names that mark a value input as a path (a reference index, an annotation
+# file, a directory), on top of the file typed inputs. A path input with no
+# usable default must be given a real path: a placeholder such as NO_FILE
+# reaches the pipeline as a literal path that does not exist.
+_PATH_INPUT_TYPES = ("file", "singleFile", "path")
+_PATH_NAME_SUFFIXES = ("_path", "_dir", "_index", "_file")
+
+
+def _is_path_definition(definition):
+    name = (definition.get("name") or "").lower()
+    return definition.get("type") in _PATH_INPUT_TYPES or name.endswith(_PATH_NAME_SUFFIXES)
+
+
+def _needs_value(definition):
+    """A required input the pipeline has no usable default for. For a path
+    input a placeholder default (NO_FILE, NA, blank) counts as no default."""
+    if not definition["required"]:
+        return False
+    default = definition["default"]
+    if _is_path_definition(definition):
+        return not (_filled(default) and str(default).strip())
+    return default in (None, "")
+
+
+def _form_definitions(parameter_list):
+    """{processOptions key: [field names]} of the per process forms a Foundry
+    pipeline defines: the schema items of each process (and of `pipe`, the
+    pipeline level form) whose varName is not a `params.*` input. None when the
+    parameter list is unreadable or is not a Foundry pipeline's, so the caller
+    cannot tell which forms exist."""
+    inputs = (parameter_list or {}).get("inputs")
+    if not isinstance(inputs, dict) or not isinstance(inputs.get("pipe"), dict):
+        return None
+    blocks = [("pipe", inputs["pipe"])] + list((inputs.get("processes") or {}).items())
+    forms = {}
+    for key, block in blocks:
+        fields = [item.get("varName") for item in (block or {}).get("schema") or []
+                  if isinstance(item, dict) and item.get("varName")
+                  and not item["varName"].startswith("params.")]
+        if fields:
+            forms[str(key)] = fields
+    return forms
+
+
+def _form_value_filled(value):
+    """A form value counts as given unless it is missing, blank, or a list of
+    nothing but blanks (a spreadsheet column). False and 0 are choices."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(_form_value_filled(v) for v in value)
+    if isinstance(value, dict):
+        return any(_form_value_filled(v) for v in value.values())
+    return True
+
+
+def _preflight_process_forms(parameter_list, process_options):
+    """Warn about per process forms with nothing in them. A form is empty when
+    none of its fields holds a value (every field blank, an empty or all blank
+    list, or missing), or when the run has no entry for it at all. The forms
+    come from the parameter list; when it cannot be read, only saved forms
+    that list at least one field are judged, since an empty saved entry may
+    belong to a process that has no form. None when no form applies."""
+    options = process_options if isinstance(process_options, dict) else {}
+    forms = _form_definitions(parameter_list)
+    if forms is None:
+        forms = {str(k): list(v) for k, v in options.items() if isinstance(v, dict) and v}
+    if not forms:
+        return None
+    fix = ("Confirm with the user whether these processes should use their built in defaults. "
+           "If not, copy the forms from a run that worked (get_run_details(run_id, "
+           "fields=['processOptions'])) or fill them, then save the complete processOptions "
+           "with update_run(process_options=...).")
+    if not options:
+        names = sorted(forms)
+        return _preflight_check(
+            "process_forms", "warn",
+            f"The run has no process options, but the pipeline has {len(names)} process "
+            f"form(s): {', '.join(names)}. Each process will run with its built in defaults.",
+            fix, forms=names)
+    empty = sorted(key for key in forms
+                   if not (isinstance(options.get(key), dict)
+                           and any(_form_value_filled(v) for v in options[key].values())))
+    if empty:
+        return _preflight_check(
+            "process_forms", "warn",
+            f"{len(empty)} process form(s) are entirely empty: {', '.join(empty)}. "
+            "Those processes will run with their built in defaults.",
+            fix, forms=empty)
+    return _preflight_check("process_forms", "pass", f"{len(forms)} process form(s) have values.")
 
 
 def _filled(value):
@@ -5103,7 +5198,11 @@ def preflight_run(run_id: str) -> str:
     dataset, that each group has replicates, and that no required input is
     empty. An input set to "NA" (what update_run asks for on an input the run
     does not use) is listed as a warning, not a failure, unless the pipeline
-    requires it and gives it no default. Call this between update_run and
+    requires it and gives it no default. A required path input (file typed,
+    or named *_path, *_dir, *_index, *_file) whose default is a placeholder such
+    as NO_FILE needs a real value too. Per process forms (processOptions) that
+    are entirely empty, or missing from the run, are listed as a warning by
+    form key. Call this between update_run and
     initiate_run — every problem it
     finds is one that would otherwise surface as a failed or silently-skipped
     job after the queue time has already been spent.
@@ -5154,9 +5253,9 @@ def preflight_run(run_id: str) -> str:
         # "NA" is what update_run asks for on an input the run does not use, so
         # it is a deliberate choice, not a blank, unless the pipeline needs a
         # value there (required with no default).
-        definitions = _preflight_definitions(via_client, run_id)
-        needs_value = {d["name"] for d in definitions or []
-                       if d["required"] and d["default"] in (None, "")}
+        parameter_list = _preflight_parameter_list(via_client, run_id)
+        definitions = None if parameter_list is None else _input_definitions(parameter_list)
+        needs_value = {d["name"] for d in definitions or [] if _needs_value(d)}
         not_used = [i["name"] for i in inputs
                     if isinstance(i["value"], str)
                     and i["value"].strip() == _PREFLIGHT_NOT_USED]
@@ -5214,6 +5313,13 @@ def preflight_run(run_id: str) -> str:
                     "{name, vmetaCollectionId} from search_datasets.",
                 )
             )
+
+        # Per process forms: a run created through the API can leave them blank,
+        # which the run page shows but nothing else does. A warning, because a
+        # process may rightly run on its built in defaults.
+        forms = _preflight_process_forms(parameter_list, details.get("processOptions"))
+        if forms:
+            checks.append(forms)
 
         # A run created from scratch launches only once both are saved.
         usable_ids = {e.get("id") for e in run_env.get("availableList") or []}
