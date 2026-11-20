@@ -21,7 +21,7 @@ def mock_credentials():
     """Set credentials in context."""
     set_credentials(
         hostname='https://test.viafoundry.com',
-        token='test-token-12345'
+        token='via_mcp_test-token-12345'
     )
     yield
     set_credentials(None, None)
@@ -57,12 +57,11 @@ def test_get_client_configures_auth_token(mock_client_class, mock_credentials):
     # Verify configure_auth_token was called with correct parameters
     mock_instance.configure_auth_token.assert_called_once_with(
         hostname='https://test.viafoundry.com',
-        token='test-token-12345'
+        token='via_mcp_test-token-12345'
     )
 
 
-@patch('src.foundry_mcp.config.load_env_file')
-def test_get_client_missing_credentials(mock_load_env):
+def test_get_client_missing_credentials():
     """Test that get_client raises error when credentials are missing."""
     set_credentials(None, None)
     with pytest.raises(ValueError, match="Missing credentials"):
@@ -115,11 +114,11 @@ def test_get_client_caches_by_credentials(mock_client_class):
     mock_client_class.side_effect = [mock_instance1, mock_instance2]
 
     # First set of credentials
-    set_credentials('https://host1.viafoundry.com', 'token-1111')
+    set_credentials('https://host1.viafoundry.com', 'via_mcp_token-1111')
     client1 = get_client()
 
     # Different credentials
-    set_credentials('https://host2.viafoundry.com', 'token-2222')
+    set_credentials('https://host2.viafoundry.com', 'via_mcp_token-2222')
     client2 = get_client()
 
     # Should be different instances
