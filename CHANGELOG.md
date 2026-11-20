@@ -91,6 +91,16 @@
   `process_option_defaults.left_to_run_page`. External pipelines are left
   alone. If the save is refused, the run is still returned with
   `process_option_defaults_error`.
+- **`plan_run` falls back to pipeline defaults**: a pipeline with no
+  successful run you can see used to get an empty plan. It now gets one
+  built from the pipeline's input definitions and their defaults, read
+  through the most recent run of the pipeline in any state, with the same
+  hiding of reference paths and step switches. The new `source` field reads
+  `pipeline_defaults` (or `example_run` for a plan copied from a run), and
+  the summary says plainly the values are defaults, not an example run.
+  Such a plan never suggests `duplicate_run`. The empty plan remains only
+  when no run of the pipeline is visible at all, and then points at
+  `create_run`, which lists the definitions.
 - **`update_run(process_options=...)` now merges instead of replacing**
   (behaviour change). The save endpoint replaces a run's whole set of
   process forms, so sending one form, or one form with only some fields,

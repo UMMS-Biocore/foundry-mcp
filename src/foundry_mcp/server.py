@@ -3678,8 +3678,13 @@ def _score_pipeline(row, hints, tokens):
     return score, "; ".join(parts) or "keyword overlap"
 
 
-def _find_example_run(via_client, pipeline_id, strict: bool = False):
+def _find_example_run(via_client, pipeline_id, strict: bool = False,
+                      any_status: bool = False):
     """The most recent SUCCESSFUL run on a pipeline — the thing worth cloning.
+
+    any_status=True drops the status filter: the most recent run the user can
+    see in any state. plan_run uses that only to read the pipeline's input
+    definitions through it, never its values.
 
     Best-effort by default: a scientist is better served by a recommendation
     with no example than by no recommendation at all, so failures degrade to
@@ -3688,13 +3693,16 @@ def _find_example_run(via_client, pipeline_id, strict: bool = False):
     run", blaming the data for an infrastructure failure.
     """
     try:
+        # Pipe-grouped so one request matches either backend vocabulary.
+        run_filter = f"pipelineId:eq={pipeline_id}"
+        if not any_status:
+            run_filter += ",status:eq=Completed|NextSuc"
         response = via_client.call(
             method="POST",
             endpoint="/api/v1/run/list",
             params={
                 "take": 1, "skip": 0, "sort": "dateCreated", "order": "desc",
-                # Pipe-grouped so one request matches either backend vocabulary.
-                "filter": f"pipelineId:eq={pipeline_id},status:eq=Completed|NextSuc",
+                "filter": run_filter,
             },
             data={},
         )
@@ -6457,6 +6465,76 @@ def _plan_decisions(details):
     return decisions, stats
 
 
+# Definition types that take a sample collection rather than a typed value.
+_PLAN_SAMPLE_TYPES = ("file", "set")
+
+
+def _plan_from_defaults(via_client, pipeline_id):
+    """A plan built from the pipeline's own input definitions and defaults,
+    for a pipeline with no successful run to copy. The definitions are read
+    through the most recent run the user can see in any state (the parameter
+    list is per run, but it describes the pipeline, not that run's values).
+    None when there is no such run or its definitions cannot be read."""
+    run = _find_example_run(via_client, pipeline_id, strict=True, any_status=True)
+    if not run:
+        return None
+    parameter_list = via_client.call(
+        method="GET", endpoint=f"/api/v1/run/{run['id']}/parameter-list")
+    definitions = _input_definitions(parameter_list)
+    if not definitions:
+        return None
+
+    by_name = {}
+    pseudo_inputs = []
+    for d in definitions:
+        by_name.setdefault(d["name"], d)
+        pseudo_inputs.append({
+            "name": d["name"], "value": d["default"],
+            "type": "vmetaCollection" if d.get("type") in _PLAN_SAMPLE_TYPES else "input",
+        })
+    decisions, stats = _plan_decisions({"inputs": pseudo_inputs})
+    for decision in decisions:
+        d = by_name.get(decision.get("input"))
+        if d is None:
+            continue
+        decision["required"] = d["required"]
+        if d.get("options"):
+            decision["allowed"] = d["options"]
+    stats["process_option_groups"] = len(_form_field_defaults(parameter_list) or {})
+
+    data = {
+        "pipeline": {"id": pipeline_id},
+        "source": "pipeline_defaults",
+        "based_on_run": None,
+        "definitions_read_from_run": run["id"],
+        "decisions": decisions,
+    }
+    data.update(stats)
+    return envelope(
+        summary=(
+            f"Pipeline {pipeline_id} has no successful run you can see, so these "
+            f"{len(decisions)} decision(s) come from the pipeline's input "
+            "definitions and defaults, not from an example run. Defaults are a "
+            "starting point, not a tested configuration. "
+            f"{stats['hidden_reference_paths']} reference/index paths and "
+            f"{stats['process_option_groups']} process-option groups are hidden "
+            "and keep their defaults."
+        ),
+        data=data,
+        next_steps=[
+            "Tell the user these values are pipeline defaults, not a known good "
+            "run, and confirm or change each one with them (current null means "
+            "no default: ask for a value).",
+            f"Then: create_run(pipeline_id={pipeline_id}, project_id=..., name=...) "
+            "lists every input_definition with its default -> update_run with the "
+            "answers, run environment and execution directory -> preflight_run -> "
+            "initiate_run to launch.",
+            "Launching a run uses HPC compute. Confirm with the user before "
+            "initiate_run.",
+        ],
+    )
+
+
 @mcp.tool()
 def plan_run(pipeline_id: int, run_id: str = "") -> str:
     """
@@ -6474,6 +6552,10 @@ def plan_run(pipeline_id: int, run_id: str = "") -> str:
         pipeline_id: The pipeline to plan a run for.
         run_id: Optional. Plan from this specific run instead of the most
             recent successful one.
+
+    With no successful run to plan from, the plan is built from the
+    pipeline's input definitions and defaults instead, and `source` says
+    so ("pipeline_defaults" rather than "example_run").
     """
     try:
         via_client = get_client()
@@ -6485,13 +6567,22 @@ def plan_run(pipeline_id: int, run_id: str = "") -> str:
         else:
             example = _find_example_run(via_client, pipeline_id, strict=True)
             if not example:
+                result = _plan_from_defaults(via_client, pipeline_id)
+                if result is not None:
+                    return json.dumps(result, indent=2)
                 result = envelope(
                     summary=(
                         f"Pipeline {pipeline_id} has no successful run to plan "
-                        "from, so there is no known-good configuration to show."
+                        "from, and its input definitions could not be read "
+                        "(no run of it is visible to read them through), so "
+                        "there is no configuration to show."
                     ),
-                    data={"decisions": [], "pipeline": {"id": pipeline_id}},
+                    data={"decisions": [], "pipeline": {"id": pipeline_id},
+                          "source": None},
                     next_steps=[
+                        f"create_run(pipeline_id={pipeline_id}, project_id=..., "
+                        "name=...) lists the pipeline's input_definitions with "
+                        "their defaults; ask the user for each one from there.",
                         "Call list_runs(search_query=...) to look for a run on "
                         "this pipeline in any state, then plan_run(run_id=...).",
                         "Or pick a different pipeline with "
@@ -6511,6 +6602,7 @@ def plan_run(pipeline_id: int, run_id: str = "") -> str:
             "pipeline": {"id": pipeline.get("id", pipeline_id),
                          "name": pipeline.get("name"),
                          "version": pipeline.get("version")},
+            "source": "example_run",
             "based_on_run": {"id": example["id"],
                              "name": example.get("name") or details.get("name"),
                              "dateCreated": example.get("dateCreated")},
