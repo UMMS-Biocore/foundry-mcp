@@ -11,6 +11,13 @@
     `update_run(publish_dir=...)`. An optional `publish_dir` saves a confirmed
     path on the new run right away, so final results are kept outside the
     work folder that cleanup removes.
+- **`preflight_run` warns about empty process forms**: a new
+  `process_forms` check names each per process form that has no value in
+  any field, or that the run never saved, and warns when the run has no
+  process options at all while the pipeline defines forms. It warns rather
+  than fails, since a process may rightly run on its built in defaults. A
+  required path input whose default is a placeholder such as `NO_FILE` now
+  fails `empty_inputs` until it is given a real path.
 - **Terminate a stale or hung run**
   - `terminate_run(run_id, confirm_terminate)` stops a run's scheduler jobs
     and marks it Terminated, only when `confirm_terminate` is `True`. A run

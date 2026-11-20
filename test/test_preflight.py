@@ -602,3 +602,158 @@ class TestPreflightNotUsedInputs:
         assert self._check(parsed, "empty_inputs")["status"] == "pass"
         assert self._check(parsed, "data_inputs")["detail"] == "Data input set: reads."
         assert "bam_files" in self._check(parsed, "unused_inputs")["detail"]
+
+
+# A Foundry pipeline whose processes carry per process forms. Form fields are
+# the schema items whose varName is not `params.*`; the run saves their values
+# in processOptions under the same key (`pipe` for the pipeline level form).
+FORMS_PARAMS = {"pipelineType": "via", "inputs": {
+    "pipe": {
+        "schema": [{"varName": "params.run_STAR", "type": "dropdown", "defaultVal": "yes"},
+                   {"varName": "pipeline_note", "type": "input"}],
+        "inputNodes": [{"varName": "params.reads", "qualifier": "set", "optional": True}],
+    },
+    "processes": {
+        "13_46": {"schema": [{"varName": "aligner_Parameters", "type": "input"},
+                             {"varName": "description", "type": "input"}]},
+        "4": {"schema": [{"varName": "test_name", "type": "input"}]},
+        "7": {"schema": [{"varName": "params.min_len", "type": "input", "defaultVal": "9"}]},
+    },
+}}
+
+
+class TestPreflightProcessForms:
+    """A run created through the API had blank per process forms that only a
+    human noticed in the UI. Preflight warns about forms with nothing in them."""
+
+    @staticmethod
+    def _check(parsed):
+        return next((c for c in parsed["data"]["checks"] if c["id"] == "process_forms"), None)
+
+    def _run(self, options, params=FORMS_PARAMS, drop_options=False):
+        details = _details()
+        if drop_options:
+            details.pop("processOptions")
+        else:
+            details["processOptions"] = options
+        return _preflight_with(params, details=details, files=ALL_GOOD)
+
+    def test_filled_forms_pass(self):
+        check = self._check(self._run({
+            "pipe": {"pipeline_note": "x"},
+            "13_46": {"aligner_Parameters": ["-k 1"], "description": ["rRNA"]},
+            "4": {"test_name": "t1"},
+        }))
+        assert check["status"] == "pass"
+
+    def test_an_entirely_empty_form_warns_by_name(self):
+        parsed = self._run({
+            "pipe": {"pipeline_note": "x"},
+            "13_46": {"aligner_Parameters": [], "description": ["", " "]},
+            "4": {"test_name": "t1"},
+        })
+        check = self._check(parsed)
+        assert check["status"] == "warn"
+        assert "13_46" in check["detail"]
+        assert "'4'" not in check["detail"] and "pipe" not in check["forms"]
+        assert check["forms"] == ["13_46"]
+        assert check["fix"]
+        assert parsed["data"]["ok"] is True  # a warning, not a failure
+
+    def test_a_form_missing_from_process_options_warns(self):
+        check = self._check(self._run({"pipe": {"pipeline_note": "x"},
+                                       "13_46": {"aligner_Parameters": "-k 1"}}))
+        assert check["status"] == "warn"
+        assert check["forms"] == ["4"]
+
+    def test_no_process_options_at_all_warns_naming_every_form(self):
+        for kwargs in ({"options": {}}, {"options": None, "drop_options": True}):
+            check = self._check(self._run(**kwargs))
+            assert check["status"] == "warn"
+            assert sorted(check["forms"]) == ["13_46", "4", "pipe"]
+            assert "no process options" in check["detail"].lower()
+
+    def test_a_false_checkbox_or_zero_is_a_value(self):
+        check = self._check(self._run({"pipe": {"pipeline_note": False},
+                                       "13_46": {"aligner_Parameters": 0},
+                                       "4": {"test_name": "t"}}))
+        assert check["status"] == "pass"
+
+    def test_a_process_without_form_fields_is_not_a_form(self):
+        """Process 7 has only params.* items, so `{}` there is not an empty form."""
+        check = self._check(self._run({"pipe": {"pipeline_note": "x"},
+                                       "13_46": {"description": "d"},
+                                       "4": {"test_name": "t"}, "7": {}}))
+        assert check["status"] == "pass"
+
+    def test_pipeline_without_forms_has_no_check(self):
+        parsed = _preflight_with(RNASEQ_PARAMS, details=_details(), files=ALL_GOOD)
+        assert self._check(parsed) is None
+
+    def test_unreadable_definitions_still_judge_saved_forms_with_fields(self):
+        details = _details()
+        details["processOptions"] = {"13_46": {"aligner_Parameters": ""}, "281_32": {},
+                                     "4": {"test_name": "t"}}
+        parsed, _ = _preflight(details=details, files=ALL_GOOD)
+        check = self._check(parsed)
+        assert check["status"] == "warn"
+        assert check["forms"] == ["13_46"]  # `{}` cannot be judged without definitions
+
+
+def _path_params(default=None, type_="val", name="star_index"):
+    item = {"varName": f"params.{name}", "qualifier": type_}
+    if default is not None:
+        item["defVal"] = default
+    return {"pipelineType": "via", "inputs": {
+        "pipe": {"schema": [], "inputNodes": [
+            {"varName": "params.reads", "qualifier": "set", "optional": True},
+            {"varName": "params.genome_build", "qualifier": "val"},
+            item,
+        ]},
+        "processes": {},
+    }}
+
+
+class TestPreflightRequiredPathInputs:
+    """A run passed preflight and then failed because its reference path inputs
+    were never filled. A required path input must hold a real path."""
+
+    @staticmethod
+    def _check(parsed):
+        return next(c for c in parsed["data"]["checks"] if c["id"] == "empty_inputs")
+
+    def _run(self, params, extra_inputs):
+        inputs = DEFAULT_INPUTS + extra_inputs
+        return self._check(_preflight_with(params, details=_details(inputs), files=ALL_GOOD))
+
+    def test_whitespace_value_already_fails(self):
+        check = self._run(_path_params(), [_inp("star_index", "   ")])
+        assert check["status"] == "fail" and "star_index" in check["detail"]
+
+    def test_never_saved_with_no_default_already_fails(self):
+        check = self._run(_path_params(), [])
+        assert check["status"] == "fail" and "star_index" in check["detail"]
+
+    def test_placeholder_value_already_fails(self):
+        check = self._run(_path_params(type_="file", name="gtf"), [_inp("gtf", "NO_FILE")])
+        assert check["status"] == "fail" and "gtf" in check["detail"]
+
+    def test_never_saved_with_a_placeholder_default_fails(self):
+        check = self._run(_path_params(default="NO_FILE"), [])
+        assert check["status"] == "fail" and "star_index" in check["detail"]
+
+    def test_file_typed_input_with_a_placeholder_default_fails(self):
+        check = self._run(_path_params(default="NO_FILE", type_="file", name="annotation"), [])
+        assert check["status"] == "fail" and "annotation" in check["detail"]
+
+    def test_na_on_a_path_with_a_placeholder_default_fails(self):
+        check = self._run(_path_params(default="NO_FILE"), [_inp("star_index", "NA")])
+        assert check["status"] == "fail" and "star_index" in check["detail"]
+
+    def test_a_real_default_still_passes(self):
+        check = self._run(_path_params(default="/ref/mm10/star"), [])
+        assert check["status"] == "pass"
+
+    def test_a_non_path_input_with_a_placeholder_default_is_unchanged(self):
+        check = self._run(_path_params(default="NA", name="extra_args"), [])
+        assert check["status"] == "pass"
