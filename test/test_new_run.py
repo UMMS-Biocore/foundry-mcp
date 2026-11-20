@@ -290,7 +290,8 @@ class TestUpdateRunEnvironment:
         client = _patched_client({"ok": True})
         with patch.object(server, "get_client", return_value=client):
             server.update_run("41", [{"name": "a", "value": "b"}], {"g": {}}, 3)
-        client.call.assert_called_once_with(
+        # process_options merges, so the run's details are read before the save.
+        client.call.assert_called_with(
             method="PATCH", endpoint="/api/v1/run/41/save",
             data={"inputs": [{"name": "a", "value": "b", "type": "input"}], "processOptions": {"g": {}}, "permission": 3, "groupId": None},
         )

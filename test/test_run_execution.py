@@ -95,7 +95,8 @@ class TestUpdateRun:
         args = self._valid_args()
         with patch.object(server, "get_client", return_value=client):
             result = server.update_run(**args)
-        client.call.assert_called_once_with(
+        # process_options merges, so the run's details are read before the save.
+        client.call.assert_called_with(
             method="PATCH",
             endpoint="/api/v1/run/999/save",
             data={
@@ -105,7 +106,7 @@ class TestUpdateRun:
                 "groupId": 5,
             },
         )
-        assert json.loads(result) == {"ok": True}
+        assert json.loads(result)["ok"] is True
 
     def test_rejects_empty_string_value(self):
         client = MagicMock()
@@ -135,7 +136,8 @@ class TestUpdateRun:
         args["group_id"] = None
         with patch.object(server, "get_client", return_value=client):
             result = server.update_run(**args)
-        client.call.assert_called_once_with(
+        # process_options merges, so the run's details are read before the save.
+        client.call.assert_called_with(
             method="PATCH",
             endpoint="/api/v1/run/999/save",
             data={
@@ -145,7 +147,7 @@ class TestUpdateRun:
                 "groupId": None,
             },
         )
-        assert json.loads(result) == {"ok": True}
+        assert json.loads(result)["ok"] is True
 
     def test_rejects_mismatched_spreadsheet_arrays(self):
         client = MagicMock()

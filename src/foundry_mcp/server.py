@@ -2486,6 +2486,41 @@ def _validate_update_run(inputs, process_options, permission, group_id, launch_d
             )
 
 
+def _saved_process_options(details, run_id):
+    """The run's saved processOptions from its details, or ValueError when they
+    cannot be read. The save endpoint replaces the whole set, so a merge must
+    never start from a guess."""
+    hint = ("Pass replace_process_options=True only to send process_options as the "
+            "complete set on purpose.")
+    if not isinstance(details, dict):
+        raise ValueError(f"Could not read run {run_id}'s saved process options to merge into. {hint}")
+    if details.get("pipelineReadable") is False:
+        raise ValueError(
+            f"Run {run_id}'s saved process options are not readable with this account, so "
+            f"process_options cannot be merged into them. {hint}"
+        )
+    saved = details.get("processOptions")
+    if saved is None:
+        return {}
+    if not isinstance(saved, dict):
+        raise ValueError(f"Run {run_id}'s saved process options are not a set of forms. {hint}")
+    return saved
+
+
+def _merge_process_options(saved, given):
+    """Deep merge the given forms into the saved ones. A given form's given
+    fields overwrite (a list column is replaced whole); saved fields and forms
+    left out are kept. Returns (merged, merged_forms, kept_forms)."""
+    merged = {key: (dict(form) if isinstance(form, dict) else form) for key, form in saved.items()}
+    for key, form in given.items():
+        if isinstance(form, dict) and isinstance(merged.get(key), dict):
+            merged[key].update(form)
+        else:
+            merged[key] = form
+    kept = sorted(key for key in saved if key not in given)
+    return merged, sorted(given), kept
+
+
 @mcp.tool()
 def update_run(
     run_id: str,
@@ -2501,13 +2536,21 @@ def update_run(
     singularity_options: str = None,
     cleanup_delay_hours: int = None,
     cleanup_enabled: bool = None,
+    replace_process_options: bool = False,
 ) -> str:
     """
     Save a run before launch (PATCH /save). Send only what changes. On a
     Foundry pipeline, inputs merge with the saved ones; on an external
     (nf-core) pipeline the inputs dict is REPLACED whole, so send the complete
-    dict from create_run's form. process_options always REPLACES the whole
-    set, so send it complete or leave it out. `permission` defaults to the
+    dict from create_run's form. process_options MERGES into the run's saved
+    forms: the tool reads the saved set first, a given form's given fields
+    overwrite, and every saved field and form left out is kept, so send only
+    the forms and fields that change. A spreadsheet (list) column given
+    replaces that column whole. If the saved set cannot be read, the save is
+    refused rather than replacing it blind. replace_process_options=True sends
+    process_options as the complete set instead, removing every saved form
+    left out; use it only to delete forms on purpose. The reply names the
+    forms merged and the saved forms kept untouched. `permission` defaults to the
     run's saved permission (and `group_id` to its saved group); pass it only to
     change who can see the run. `group_id` is REQUIRED when `permission` is 15
     (GroupShared) and the run has no saved group. A new
@@ -2518,7 +2561,8 @@ def update_run(
     given, 'collection' when collectionId is), so the types in create_run's
     input_definitions are never copied. No input `value` may be an empty
     string; use "NA" or omit the input. Within one processOptions entry, all
-    spreadsheet (list) columns must be equal length.
+    spreadsheet (list) columns must be equal length after the merge, so when
+    rows are added or removed send every column of that form.
 
     exec_settings sets the resources each task asks the scheduler for (queue,
     memory in GB, cpu, time in minutes, extra scheduler options). Without them
@@ -2577,6 +2621,25 @@ def update_run(
                     "the environment fills in the run's container image."
                 )
         via_client = get_client()
+        merge_forms = process_options is not None and not replace_process_options
+        forms_report = None
+        if merge_forms:
+            try:
+                details = via_client.call(method="GET", endpoint=f"/api/v1/run/{run_id}/details")
+            except Exception as read_error:
+                raise ValueError(
+                    f"Could not read run {run_id}'s saved process options to merge into ({read_error}). "
+                    "Pass replace_process_options=True only to send process_options as the complete set on purpose."
+                ) from read_error
+            saved_forms = _saved_process_options(details, run_id)
+            process_options, merged_forms, kept_forms = _merge_process_options(saved_forms, process_options)
+            # The equal length check runs on what will be saved, saved columns included.
+            _validate_update_run(None, process_options, permission, group_id)
+            forms_report = {"mode": "merged", "merged_forms": merged_forms, "kept_forms": kept_forms}
+            if permission is None:
+                permission, group_id = _permission_from_details(details, run_id, group_id)
+        elif process_options is not None:
+            forms_report = {"mode": "replaced", "sent_forms": sorted(process_options)}
         if permission is None:
             permission, group_id = _saved_permission(via_client, run_id, group_id)
         data = {}
@@ -2603,11 +2666,17 @@ def update_run(
             data.update(_singularity_body(via_client, run_id, singularity_options.strip()))
         saved = via_client.call(method="PATCH", endpoint=f"/api/v1/run/{run_id}/save", data=data)
         if saved:
+            if forms_report is not None:
+                saved = {**saved, "process_options": forms_report} if isinstance(saved, dict) \
+                    else {"result": saved, "process_options": forms_report}
             return json.dumps(saved, indent=2)
         # The server answers a successful save with an empty body.
+        reply = {"run_id": run_id, "saved": _saved_fields(data)}
+        if forms_report is not None:
+            reply["process_options"] = forms_report
         return json.dumps(envelope(
             summary=f"Saved run {run_id}.",
-            data={"run_id": run_id, "saved": _saved_fields(data)},
+            data=reply,
             next_steps=["preflight_run(run_id) to check the run before launching it."],
         ), indent=2)
     except Exception as e:
