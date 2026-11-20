@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **Read back a run against its defaults**: `diff_run_defaults(run_id)` lists
+  only the saved inputs and per process form fields (processOptions) whose
+  value differs from the pipeline default, each with its default, plus the
+  ones left empty where the pipeline has a default and saved keys the
+  pipeline does not define. An agent confirms its edits in a few lines
+  instead of reading every entry. It reads only.
 - **Cluster app launches**: `hpc_app_launch`, `hpc_app_list`,
   `hpc_app_status` and `hpc_app_stop` launch an app (marimo by default) as a
   batch job on one of your cluster run environments, list and check those
