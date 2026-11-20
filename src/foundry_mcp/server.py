@@ -9305,7 +9305,7 @@ def list_pipeline_revisions(pipeline_id: int) -> str:
         }))
 
     try:
-        response = get_client().call(method="GET", endpoint=f"/api/pipeline/v1/{pipeline_id}/revisions")
+        response = get_client().call(method="GET", endpoint=f"/api/v1/pipeline/{pipeline_id}/revisions")
     except Exception as e:
         logger.error(f"Error listing revisions of pipeline {pipeline_id}: {e}")
         refuse(str(e))
@@ -9373,7 +9373,7 @@ def _refuse_shared_pipeline(pipeline, pipeline_id):
 def _revision_ids(via_client, pipeline_id):
     """Every revision's pipeline id, read as list_pipeline_revisions reads them, refusing when unreadable."""
     try:
-        response = via_client.call(method="GET", endpoint=f"/api/pipeline/v1/{pipeline_id}/revisions")
+        response = via_client.call(method="GET", endpoint=f"/api/v1/pipeline/{pipeline_id}/revisions")
     except Exception as e:
         logger.error(f"Error listing revisions of pipeline {pipeline_id} before a save: {e}")
         raise ToolError(json.dumps({
