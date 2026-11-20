@@ -31,6 +31,7 @@ import unicodedata
 import os
 import uuid
 import requests
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 from urllib.parse import urlparse
 
@@ -1459,6 +1460,26 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
                     "error": f"No run found with ID: {run_id}"
                 }, indent=2)
         
+        # The listed status is only as fresh as the backend's last periodic
+        # poll. Surface the status check evidence, and when it says an active
+        # run already finished, force one sync (before reports, which the
+        # sync also refreshes).
+        refreshed = False
+        run_obj = result.get("run")
+        if isinstance(run_obj, dict) and run_id:
+            detail = _fetch_run_status_detail(via_client, run_id)
+            if detail:
+                status, detail, refreshed, refresh_error = _refresh_stale_status(
+                    via_client, run_id, run_obj.get("status"), detail)
+                if refreshed and status:
+                    run_obj["status"] = status
+                    result["status_refreshed"] = True
+                if refresh_error:
+                    result["status_refresh_error"] = refresh_error
+                check = _status_check_summary(detail)
+                if check:
+                    result["status_check"] = check
+
         # If include_reports is True, fetch reports for this run
         if include_reports and run_id:
             logger.info(f"Fetching reports for run ID: {run_id}")
@@ -1504,6 +1525,11 @@ def get_run(run_id: str = None, run_name: str = None, include_reports: bool = Fa
                 ]
             else:
                 result["summary"] = f"Run '{name}' ({run_id}) status: {display}."
+            if refreshed:
+                result["summary"] += (
+                    " The status was refreshed from the run environment just "
+                    "now, because the last periodic check looked out of date."
+                )
 
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -3814,16 +3840,107 @@ def _fetch_run_status(via_client, run_id, strict: bool = False):
     swallowing an outage there reports "Connecting, no progress available",
     which blames the run for an infrastructure failure.
     """
+    detail = _fetch_run_status_detail(via_client, run_id, strict=strict)
+    return detail.get("runStatus") if detail else None
+
+
+def _fetch_run_status_detail(via_client, run_id, strict: bool = False):
+    """The whole status answer as a dict, or None if it cannot be read.
+
+    Besides runStatus, backends with the status check columns return
+    lastStatusCheckAt, nextflowExitStatus and firstErrorLine (each may be null).
+    """
     try:
         response = via_client.call(
             method="GET", endpoint=f"/api/v1/run/{run_id}/status")
         if isinstance(response, dict):
-            return response.get("runStatus")
+            return response
     except Exception as e:
         if strict:
             raise
         logger.info(f"Could not read status for run {run_id}: {e}")
     return None
+
+
+# Statuses where the backend still expects something to happen. A run in one
+# of these whose evidence says it finished gets one forced sync.
+_ACTIVE_RUN_STATUSES = (
+    "Running", "Initializing", "Submitted", "Unreachable",
+    # Legacy vocabulary, backends before 2.20.0.
+    "NextRun", "init", "Waiting", "Aborted",
+)
+
+# The backend's periodic status poll (FetchLogsTask) runs every
+# FETCH_LOGS_INTERVAL, 15 minutes by default. A last check older than two of
+# those intervals means at least one poll was missed, so the label is no
+# longer trustworthy and is worth one forced sync.
+_STATUS_CHECK_STALE_SECONDS = 2 * 15 * 60
+
+_STATUS_CHECK_FIELDS = (
+    ("lastStatusCheckAt", "last_checked_at"),
+    ("nextflowExitStatus", "nextflow_exit_status"),
+    ("firstErrorLine", "first_error_line"),
+)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _status_check_summary(detail):
+    """The status check fields of a status answer, renamed, nulls omitted."""
+    if not isinstance(detail, dict):
+        return {}
+    return {out: detail[key] for key, out in _STATUS_CHECK_FIELDS
+            if detail.get(key) is not None}
+
+
+def _parse_check_time(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _status_looks_finished(status, detail):
+    """True when an active status is contradicted by the status check evidence:
+    Nextflow already reported an exit status, or the last check is stale."""
+    if status not in _ACTIVE_RUN_STATUSES or not isinstance(detail, dict):
+        return False
+    if detail.get("nextflowExitStatus") is not None:
+        return True
+    checked = _parse_check_time(detail.get("lastStatusCheckAt"))
+    if checked is None:
+        return False
+    return (_utcnow() - checked).total_seconds() > _STATUS_CHECK_STALE_SECONDS
+
+
+def _refresh_stale_status(via_client, run_id, status, detail):
+    """Force one sync when the status looks stale, never more.
+
+    Returns (status, detail, refreshed, error). `POST /v1/run/{id}/sync` is
+    declared `authenticated` on the backend, so any signed in user may call
+    it for a run they can see. It never loops or waits.
+    """
+    if not _status_looks_finished(status, detail):
+        return status, detail, False, None
+    try:
+        synced = via_client.call(
+            method="POST", endpoint=f"/api/v1/run/{run_id}/sync", data={})
+    except Exception as e:
+        logger.info(f"Could not sync stale status for run {run_id}: {e}")
+        return status, detail, False, str(e)
+    new_status = synced.get("runStatus") if isinstance(synced, dict) else None
+    fresh = _fetch_run_status_detail(via_client, run_id)
+    if fresh and fresh.get("runStatus"):
+        return fresh["runStatus"], fresh, True, None
+    merged = dict(detail)
+    if new_status:
+        merged["runStatus"] = new_status
+    return new_status or status, merged, True, None
 
 
 def _parse_trace(text, max_listed: int = _WATCH_MAX_LISTED):
@@ -3895,8 +4012,12 @@ def watch_run(run_id: str) -> str:
     try:
         via_client = get_client()
         logger.info(f"Watching run {run_id}")
-        status = _fetch_run_status(via_client, run_id, strict=True)
+        detail = _fetch_run_status_detail(via_client, run_id, strict=True)
+        status = detail.get("runStatus") if detail else None
+        status, detail, refreshed, refresh_error = _refresh_stale_status(
+            via_client, run_id, status, detail)
         human = _human_run_status(status)
+        status_check = _status_check_summary(detail)
 
         progress = None
         try:
@@ -3950,10 +4071,22 @@ def watch_run(run_id: str) -> str:
         else:
             next_steps = [f"See what happened: get_run_log(run_id='{run_id}')."]
 
+        if refreshed:
+            summary += (" The status was refreshed from the run environment "
+                        "just now, because the last periodic check looked out "
+                        "of date.")
+
+        data = {"run_id": run_id, "status": human, "raw_status": status,
+                "check_again": check_again, "progress": progress}
+        if status_check:
+            data["status_check"] = status_check
+        if refreshed:
+            data["status_refreshed"] = True
+        if refresh_error:
+            data["status_refresh_error"] = refresh_error
         result = envelope(
             summary=summary,
-            data={"run_id": run_id, "status": human, "raw_status": status,
-                  "check_again": check_again, "progress": progress},
+            data=data,
             next_steps=next_steps,
         )
         return json.dumps(result, indent=2)
