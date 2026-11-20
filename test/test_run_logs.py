@@ -159,3 +159,136 @@ class TestPicksSubstantiveLogOnClusterRuns:
         with patch.object(server, "get_client", return_value=client):
             parsed = json.loads(server.get_run_log("1"))
         assert parsed["data"]["log_name"] == "err.log"
+
+
+# ---------------------------------------------------------------------------
+# Failed tasks first. On a resumed or failed run the picked log is often the
+# launcher script, not the failing task. The logs endpoint returns no task work
+# directory, so each failed task's .command.err tail comes from the
+# "Command error:" section Nextflow writes into its own log for that task.
+# ---------------------------------------------------------------------------
+
+_TRACE_HEADER = "name\tstatus\thash\texit"
+
+
+def _trace(*rows):
+    return "\n".join([_TRACE_HEADER, *(
+        f"{name}\t{status}\tab/123456\t{exit_code}" for name, status, exit_code in rows
+    )])
+
+
+def _nf_error_block(task, err_lines, work_dir="/scratch/work/ab/123456"):
+    err = "\n".join(f"  {line}" for line in err_lines)
+    return (
+        f"ERROR ~ Error executing process > '{task}'\n\n"
+        f"Caused by:\n  Process `{task}` terminated with an error exit status (1)\n\n"
+        f"Command executed:\n\n  run_tool --in x\n\n"
+        f"Command exit status:\n  1\n\n"
+        f"Command output:\n  (empty)\n\n"
+        f"Command error:\n{err}\n\n"
+        f"Work dir:\n  {work_dir}\n\n"
+        f"Tip: view the complete command output by changing to the process work dir\n"
+    )
+
+
+_LAUNCHER = "#!/bin/bash\n" + "\n".join(f"echo launcher line {i}" for i in range(40))
+
+
+class TestGetRunLogFailedTasks:
+    def _run(self, logs):
+        client = _client(logs)
+        with patch.object(server, "get_client", return_value=client):
+            return json.loads(server.get_run_log("7")), client
+
+    def test_failed_task_names_and_error_tail_come_first(self):
+        trace = _trace(("ALIGN (s1)", "COMPLETED", "0"), ("COUNT (s1)", "FAILED", "1"))
+        nf_log = "N E X T F L O W\n" + _nf_error_block(
+            "COUNT (s1)", ["Traceback (most recent call last):", "KeyError: 'gene_id'"])
+        parsed, client = self._run([
+            {"name": "trace.txt", "content": trace},
+            {"name": "log.txt", "content": nf_log},
+            {"name": ".command.err", "content": _LAUNCHER},
+        ])
+        client.call.assert_called_once()  # no extra requests
+        assert parsed["summary"].startswith("Failed task: COUNT (s1)")
+        assert list(parsed["data"])[0] == "failed_tasks"
+        task = parsed["data"]["failed_tasks"][0]
+        assert task["name"] == "COUNT (s1)"
+        assert task["exit"] == "1"
+        assert task["work_dir"] == "/scratch/work/ab/123456"
+        assert task["command_err_tail"] == (
+            "Traceback (most recent call last):\nKeyError: 'gene_id'")
+        # Today's log tail is still there, unchanged.
+        assert parsed["data"]["log_name"] == ".command.err"
+        assert parsed["data"]["log_tail"] == _LAUNCHER
+
+    def test_error_tail_is_capped_to_the_last_lines(self):
+        lines = [f"err {i}" for i in range(60)]
+        trace = _trace(("COUNT", "FAILED", "1"))
+        parsed, _ = self._run([
+            {"name": "trace.txt", "content": trace},
+            {"name": ".nextflow.log", "content": _nf_error_block("COUNT", lines)},
+        ])
+        tail = parsed["data"]["failed_tasks"][0]["command_err_tail"].splitlines()
+        assert len(tail) == server._RUN_LOG_ERR_TAIL_LINES
+        assert tail[-1] == "err 59"
+
+    def test_caps_the_number_of_tasks_and_says_how_many_were_cut(self):
+        n = server._RUN_LOG_MAX_FAILED_TASKS + 3
+        trace = _trace(*[(f"T{i}", "FAILED", "1") for i in range(n)])
+        parsed, _ = self._run([{"name": "trace.txt", "content": trace},
+                               {"name": "log.txt", "content": _LAUNCHER}])
+        data = parsed["data"]
+        assert len(data["failed_tasks"]) == server._RUN_LOG_MAX_FAILED_TASKS
+        assert data["failed_tasks_total"] == n
+        assert data["failed_tasks_omitted"] == 3
+        assert "3 more" in parsed["summary"]
+
+    def test_task_without_an_error_block_is_reported_and_others_continue(self):
+        trace = _trace(("A", "FAILED", "1"), ("B", "FAILED", "137"))
+        parsed, _ = self._run([
+            {"name": "trace.txt", "content": trace},
+            {"name": "log.txt", "content": _nf_error_block("B", ["Killed"])},
+        ])
+        a, b = parsed["data"]["failed_tasks"]
+        assert "command_err_tail" not in a
+        assert "not found" in a["command_err_unavailable"]
+        assert b["command_err_tail"] == "Killed"
+
+    def test_uses_the_latest_error_block_for_a_retried_task(self):
+        trace = _trace(("A", "FAILED", "1"))
+        nf_log = _nf_error_block("A", ["first try"]) + _nf_error_block("A", ["second try"])
+        parsed, _ = self._run([{"name": "trace.txt", "content": trace},
+                               {"name": "log.txt", "content": nf_log}])
+        assert parsed["data"]["failed_tasks"][0]["command_err_tail"] == "second try"
+
+    def test_one_task_extraction_error_does_not_break_the_reply(self):
+        trace = _trace(("A", "FAILED", "1"), ("B", "FAILED", "1"))
+        logs = [{"name": "trace.txt", "content": trace},
+                {"name": "log.txt", "content": _nf_error_block("B", ["bad input"])}]
+        real = server._failed_task_err_tail
+
+        def flaky(logs_, name):
+            if name == "A":
+                raise RuntimeError("unreadable")
+            return real(logs_, name)
+
+        with patch.object(server, "_failed_task_err_tail", side_effect=flaky):
+            parsed, _ = self._run(logs)
+        a, b = parsed["data"]["failed_tasks"]
+        assert "unreadable" in a["command_err_unavailable"]
+        assert b["command_err_tail"] == "bad input"
+        assert parsed["data"]["log_name"]
+
+    def test_no_failed_task_leaves_the_reply_as_today(self):
+        trace = _trace(("A", "COMPLETED", "0"))
+        logs = [{"name": "trace.txt", "content": trace},
+                {"name": ".command.err", "content": "Traceback\nboom\n"}]
+        parsed, _ = self._run(logs)
+        assert "failed_tasks" not in parsed["data"]
+        assert parsed["summary"].startswith("Showing the tail of '.command.err'")
+
+    def test_no_trace_leaves_the_reply_as_today(self):
+        parsed, _ = self._run([{"name": ".command.err", "content": "Traceback\nboom\n"}])
+        assert "failed_tasks" not in parsed["data"]
+        assert parsed["summary"].startswith("Showing the tail of '.command.err'")

@@ -54,6 +54,13 @@
     `create_run` or `list_run_environments` for descriptions and options.
   - `get_run_details` takes `fields` to return only some top level keys of
     the full run object instead of the whole of it.
+- **`get_run_log` shows failed tasks first**
+  - `get_run_log` now starts with the run's failed tasks when its trace
+    has any: each task's name, exit code, work directory and the last 20
+    lines of its error output, taken from the error block Nextflow writes
+    for that task. At most 5 tasks are listed and the reply says how many
+    more were cut. The log tail follows unchanged, and a run with no trace
+    or no failed task gets the same reply as before.
 - **An administrator can update another user's process**
   - `update_process` no longer refuses an administrator on ownership. The
     server already authorizes an admin to update any process and keeps its
