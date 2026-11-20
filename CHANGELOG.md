@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Cluster app launches**: `hpc_app_launch`, `hpc_app_list`,
+  `hpc_app_status` and `hpc_app_stop` launch an app (marimo by default) as a
+  batch job on one of your cluster run environments, list and check those
+  launches, and stop one. Each answer carries the mount map and the Foundry
+  Connect link where the person opens the app. A launch is never retried, and
+  a lost or gateway answer is reported as unknown with a pointer to
+  `hpc_app_list`, so a second job is not started. The tools need a connection
+  with the permission to run apps.
 - **Pipeline header on create and update**: `create_pipeline` and
   `update_pipeline` take an optional `script_pipe_header` and save it as
   the pipeline header, so a copied pipeline keeps its header config.
