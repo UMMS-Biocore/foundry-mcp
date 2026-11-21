@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Where a run's outputs were published**: `list_published_outputs(run_id,
+  attempt_id=None)` lists each final output of a run with the folder it was
+  published to on the run environment (or its s3 or gs address), the files
+  the platform copied back for reports and a count, so an agent reads an
+  output in place instead of guessing paths. An empty file list does not mean
+  the folder is empty, and `truncated` says when paths were left out. It
+  reads only, and an older server without the listing gets a clear message.
 - **Read back a run against its defaults**: `diff_run_defaults(run_id)` lists
   only the saved inputs and per process form fields (processOptions) whose
   value differs from the pipeline default, each with its default, plus the

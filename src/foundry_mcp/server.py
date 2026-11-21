@@ -1805,6 +1805,98 @@ def get_run_log(run_id: str, attempt_id: int = None) -> str:
         return json.dumps({"error": str(e)})
 
 
+@mcp.tool()
+def list_published_outputs(run_id: str, attempt_id: int = None) -> str:
+    """
+    List where each final output of a run was published on its run environment.
+    Use this to find the folder of an output (for example the BAM files or the
+    count table) so it can be read in place on the cluster or object store,
+    instead of guessing paths. Reads only.
+
+    data.outputs holds one entry per output: process, output, dir (the absolute
+    folder of that output on the run environment, or its s3:// or gs:// address),
+    files (only the files the platform copied back for reports) and file_count.
+    An empty files list does not mean the folder is empty. data.truncated is
+    true when some outputs or paths were left out (at most 200 outputs, 50
+    files per output and 500 files in all). attempt_id picks an earlier attempt;
+    by default the current attempt is shown.
+    """
+    if not run_id:
+        return json.dumps({"error": "run_id is required."})
+    try:
+        via_client = get_client()
+        params = {"attemptId": attempt_id} if attempt_id else None
+        answer = via_client.call(
+            method="GET", endpoint=f"/api/v1/run/{run_id}/published-outputs",
+            params=params,
+        ) or {}
+    except Exception as e:
+        text = str(e)
+        if "Error 305" in text:
+            return json.dumps({
+                "error": (
+                    f"Published outputs for run {run_id} were not found. Either "
+                    f"the run (or attempt) does not exist or this connection "
+                    f"cannot read it, or this server is older and does not list "
+                    f"published outputs yet."
+                ),
+                "hint": (f"Check the run id with get_run(run_id='{run_id}'); "
+                         f"on an older server use list_results(run_id='{run_id}')."),
+            })
+        logger.error(f"Error listing published outputs for run {run_id}: {e}")
+        return json.dumps({"error": f"Could not list published outputs: {text}"})
+
+    publish_dir = answer.get("publishDir") or ""
+    storage = answer.get("storage") or "cluster"
+    truncated = bool(answer.get("truncated"))
+    outputs = [
+        {
+            "process": item.get("processName"),
+            "output": item.get("outputName"),
+            "dir": item.get("dir"),
+            "files": list(item.get("files") or []),
+            "file_count": item.get("fileCount", 0),
+        }
+        for item in (answer.get("outputs") or []) if isinstance(item, dict)
+    ]
+    data = {
+        "publish_dir": publish_dir,
+        "storage": storage,
+        "outputs": outputs,
+        "total_files": answer.get("totalFiles", 0),
+        "truncated": truncated,
+    }
+    attempt_text = f" (attempt {attempt_id})" if attempt_id else ""
+    if not publish_dir:
+        return json.dumps(envelope(
+            summary=(f"Run {run_id}{attempt_text} has no publish directory yet, "
+                     f"so no published outputs are known."),
+            data=data,
+            next_steps=[f"Check the run's status and directories with "
+                        f"get_run_details(run_id='{run_id}')."],
+        ), indent=2)
+
+    where = "the cluster" if storage == "cluster" else f"{storage} object storage"
+    noun = "output" if len(outputs) == 1 else "outputs"
+    summary = (
+        f"Run {run_id}{attempt_text} publishes {len(outputs)} {noun} under "
+        f"{publish_dir} on {where}. Each dir is where that output lives on the "
+        f"run environment. files lists only the files copied back for reports, "
+        f"so an empty list does not mean the folder is empty. truncated is "
+        f"{'true: some outputs or paths were left out' if truncated else 'false: nothing was left out'}."
+    )
+    return json.dumps(envelope(
+        summary=summary,
+        data=data,
+        next_steps=[
+            f"To read a copied file, find it with list_files(report_id='{run_id}') "
+            f"and open it with load_file or download_file.",
+            "For an output whose files list is empty or cut short, read its dir "
+            "directly on the run environment.",
+        ],
+    ), indent=2)
+
+
 # ============================================================================
 # Run Execution Tools
 # ============================================================================
