@@ -7,10 +7,14 @@ take the HTTP call and the Foundry Connect web address as arguments, so the
 server module stays the only place that knows how a client is made.
 """
 
+import base64
+import binascii
 import json
 import re
+import uuid
 from typing import Callable, List, Tuple
 
+from mcp.server.fastmcp import Image
 from mcp.server.fastmcp.exceptions import ToolError
 
 from .client import RequestFailed
@@ -233,3 +237,236 @@ def stop(call: Call, web_base: str, launch_id: str) -> str:
         _refused(body, status, "stop_failed", "Could not stop that launch.")
     # 202 answers with the launch as it is: stopping, or already ended.
     return json.dumps(_launch_answer(body, web_base), indent=2)
+
+
+# ---------------------------------------------------------------- notebook operations
+
+# Same shapes as the backend validates (common/src/api/hpcApp.ts).
+_OP_ID = re.compile(r"[A-Za-z0-9_-]{8,64}")
+_NOTEBOOK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.py")
+OPERATIONS = (
+    "execute", "cells", "create_cell", "edit_cell", "run_cell", "delete_cell", "status", "interrupt",
+)
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+# One POST or GET waits this long on the server, under the 60 s gateway and client limits.
+_SERVER_WAIT_SECONDS = 25
+_MAX_STATUS_WAIT_SECONDS = 50
+_MAX_TIMEOUT_SECONDS = 3600
+_MAX_TOTAL_WAIT_SECONDS = 3600
+
+_OUTCOME_UNKNOWN_NEXT = (
+    "The result of this operation was lost, so it may or may not have run. Do not run it again. "
+    "Call app_execute with op=cells to read the notebook as it is now, check whether the change "
+    "landed, and ask the person before doing anything else."
+)
+_CONFLICT_NEXT = (
+    "The cell changed since you last read it, or the person is editing it. Nothing of yours was "
+    "written. Show the person their cell from the answer, ask how to proceed, then read the cells "
+    "again before editing."
+)
+_ANSWER_KEYS = (
+    "op", "state", "reason", "truncated", "outputBytes", "events", "result", "replayed",
+    "outputRetained", "sessionRestarted",
+)
+
+
+def _running_next(op_id: str) -> str:
+    return (
+        f"Still running in the background. Call app_operation_status with launch_id and "
+        f"op_id {op_id} to wait for the result. Do not start the same operation again."
+    )
+
+
+def _op_fail(error: str, reason: str, op_id: str, **extra):
+    _fail(error, reason, op_id=op_id, **extra)
+
+
+def _op_refused(body, status: int, op_id: str, fallback_reason: str, fallback_message: str):
+    body = body if isinstance(body, dict) else {}
+    if status == 403 and body.get("error") == "execution_not_granted":
+        _op_fail(_RECONNECT, "execution_not_granted", op_id, http_status=status)
+    reason = body.get("reason") or body.get("error") or fallback_reason
+    message = body.get("detail") or body.get("message") or fallback_message
+    _op_fail(message, reason, op_id, http_status=status)
+
+
+def _image_format(mimetype) -> str:
+    sub = str(mimetype or "image/png").lower().split("/")[-1]
+    return "jpeg" if sub in ("jpg", "jpeg") else "png"
+
+
+def _decode(data):
+    if not isinstance(data, str) or not data:
+        return None
+    try:
+        return base64.b64decode(data, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+
+
+def _take_images(node, images: list):
+    """Replace each image payload in the answer with a marker and collect it as Image content."""
+    if isinstance(node, list):
+        for item in node:
+            _take_images(item, images)
+        return
+    if not isinstance(node, dict):
+        return
+    mimetype = node.get("mimetype") or node.get("type")
+    is_image_event = node.get("t") == "image" or str(mimetype or "").startswith("image/")
+    for field in ("data", "thumbnail"):
+        if field in node and (is_image_event or field == "thumbnail"):
+            raw = _decode(node[field])
+            if raw is not None:
+                images.append(Image(data=raw, format=_image_format(mimetype)))
+                node[field] = "[image attached]"
+    for value in node.values():
+        _take_images(value, images)
+
+
+def _operation_answer(body, op_id: str):
+    """The tool answer for an ended or running operation: JSON text, plus images when there are any."""
+    body = body if isinstance(body, dict) else {}
+    state = body.get("state")
+    answer = {"op_id": op_id}
+    if state in ("reserved", "running", None):
+        answer.update({"state": "running", "next_step": _running_next(op_id)})
+        return json.dumps(answer, indent=2)
+    answer.update({name: body[name] for name in _ANSWER_KEYS if name in body})
+    if state == "outcome_unknown":
+        answer["next_step"] = _OUTCOME_UNKNOWN_NEXT
+    elif state == "conflict":
+        answer["next_step"] = _CONFLICT_NEXT
+    images: list = []
+    _take_images(answer, images)
+    text = json.dumps(answer, indent=2)
+    return [text, *images] if images else text
+
+
+def _operation_args(op, code, cell_id, expected_code_sha256, after, run) -> dict:
+    def need(ok: bool, message: str):
+        if not ok:
+            _fail(message, "invalid_argument")
+
+    has_code = isinstance(code, str) and code != ""
+    has_cell = isinstance(cell_id, str) and cell_id.strip() != ""
+    has_sha = isinstance(expected_code_sha256, str) and bool(_SHA256.fullmatch(expected_code_sha256))
+    if op == "execute":
+        need(has_code, "execute needs code.")
+        return {"code": code}
+    if op == "create_cell":
+        need(has_code, "create_cell needs code.")
+        args = {"code": code, "run": bool(run)}
+        if isinstance(after, str) and after.strip():
+            args["after"] = after.strip()
+        return args
+    if op == "edit_cell":
+        need(has_cell and has_code, "edit_cell needs cell_id and code.")
+        need(has_sha, "edit_cell needs expected_code_sha256, the codeSha256 from the last cells read.")
+        return {"cellId": cell_id.strip(), "code": code, "expectedCodeSha256": expected_code_sha256, "run": bool(run)}
+    if op == "run_cell":
+        need(has_cell, "run_cell needs cell_id.")
+        return {"cellId": cell_id.strip()}
+    if op == "delete_cell":
+        need(has_cell, "delete_cell needs cell_id.")
+        need(has_sha, "delete_cell needs expected_code_sha256, the codeSha256 from the last cells read.")
+        return {"cellId": cell_id.strip(), "expectedCodeSha256": expected_code_sha256}
+    return {}
+
+
+def _int_between(value, name: str, low: int, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < low or value > high:
+        _fail(f"{name} must be a whole number from {low} to {high}.", "invalid_argument")
+    return value
+
+
+def execute(
+    call: Call,
+    launch_id: str,
+    op: str,
+    op_id: str,
+    notebook: str,
+    code: str,
+    cell_id: str,
+    expected_code_sha256: str,
+    after: str,
+    run: bool,
+    timeout_seconds: int,
+    wait_seconds: int,
+):
+    launch_id = _check_launch_id(launch_id)
+    if op not in OPERATIONS:
+        _fail(f"op must be one of: {', '.join(OPERATIONS)}.", "invalid_argument")
+    op_id = op_id.strip() if isinstance(op_id, str) else ""
+    if not op_id:
+        op_id = uuid.uuid4().hex
+    elif not _OP_ID.fullmatch(op_id):
+        _fail("op_id must be 8 to 64 letters, digits, underscores or hyphens.", "invalid_argument")
+    notebook = notebook or "notebook.py"
+    if not isinstance(notebook, str) or not _NOTEBOOK.fullmatch(notebook):
+        _fail("notebook must be a .py file name directly under /workspace.", "invalid_argument")
+    timeout_seconds = _int_between(timeout_seconds, "timeout_seconds", 1, _MAX_TIMEOUT_SECONDS)
+    wait_seconds = _int_between(wait_seconds, "wait_seconds", 0, _MAX_TOTAL_WAIT_SECONDS)
+    args = _operation_args(op, code, cell_id, expected_code_sha256, after, run)
+
+    body = {
+        "opId": op_id,
+        "op": op,
+        "notebook": notebook,
+        "args": args,
+        "waitSeconds": _SERVER_WAIT_SECONDS,
+        "timeoutSeconds": timeout_seconds,
+    }
+    lost = (
+        f"The answer was lost. The operation may have started. Call app_operation_status with "
+        f"op_id {op_id} to read its result. Do not start it again."
+    )
+    endpoint = f"{LAUNCHES}/{launch_id}/operations"
+    # Safe to retry: the server keys the operation on op_id and replays the stored record.
+    try:
+        status, answer = call("POST", endpoint, data=body, retry=True)
+    except RequestFailed as e:
+        if e.may_have_arrived:
+            _op_fail(f"{e.message} {lost}", "outcome_unknown", op_id)
+        _op_fail(e.message, e.reason, op_id)
+    if status in _GATEWAY_STATUSES or (status >= 500 and not (isinstance(answer, dict) and answer.get("reason"))):
+        _op_fail(f"Foundry Connect did not answer (HTTP {status}). {lost}", "outcome_unknown", op_id, http_status=status)
+    if status == 200:
+        return _operation_answer(answer, op_id)
+    if status != 202:
+        _op_refused(answer, status, op_id, "operation_refused", "The operation was refused.")
+
+    waited = _SERVER_WAIT_SECONDS
+    while waited < wait_seconds:
+        step = min(_SERVER_WAIT_SECONDS, wait_seconds - waited)
+        polled = _poll(call, launch_id, op_id, step)
+        if polled is not None:
+            return polled
+        waited += step
+    return _operation_answer({"state": "running"}, op_id)
+
+
+def _poll(call: Call, launch_id: str, op_id: str, wait: int):
+    """One wait on an operation: its answer when it ended, None while it still runs."""
+    try:
+        status, body = call(
+            "GET", f"{LAUNCHES}/{launch_id}/operations/{op_id}", params={"waitSeconds": wait}, retry=True
+        )
+    except RequestFailed as e:
+        _op_fail(e.message, e.reason, op_id)
+    if status == 202:
+        return None
+    if status == 200:
+        return _operation_answer(body, op_id)
+    _op_refused(body, status, op_id, "operation_status_failed", "Could not read that operation.")
+
+
+def operation_status(call: Call, launch_id: str, op_id: str, wait_seconds: int):
+    launch_id = _check_launch_id(launch_id)
+    op_id = op_id.strip() if isinstance(op_id, str) else ""
+    if not _OP_ID.fullmatch(op_id):
+        _fail("op_id must be the op_id app_execute returned.", "invalid_argument")
+    wait_seconds = _int_between(wait_seconds, "wait_seconds", 0, _MAX_STATUS_WAIT_SECONDS)
+    polled = _poll(call, launch_id, op_id, wait_seconds)
+    return polled if polled is not None else _operation_answer({"state": "running"}, op_id)

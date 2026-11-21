@@ -269,3 +269,221 @@ def test_stop_gateway_answer_is_unknown_not_refused(via_client, http):
     body = json.loads(str(e.value))
     assert body["reason"] == "outcome_unknown" and "hpc_app_status" in body["error"]
     assert len(http.call_args_list) == 1
+
+
+# ---------------------------------------------------------------- app_execute
+
+import base64  # noqa: E402
+
+from mcp.server.fastmcp import Image  # noqa: E402
+
+OPS = f"/api/v1/hpc-app-launches/{LAUNCH}/operations"
+OP_ID = "0123456789abcdef0123456789abcdef"
+SHA = "a" * 64
+
+
+def _ended(state="succeeded", **extra):
+    body = {
+        "opId": OP_ID, "op": "execute", "state": state, "reason": None, "truncated": False,
+        "outputBytes": 2, "events": [{"t": "stdout", "text": "hi"}], "result": None,
+        "replayed": False, "outputRetained": True, "sessionRestarted": False,
+    }
+    body.update(extra)
+    return body
+
+
+RUNNING = {"opId": OP_ID, "state": "running"}
+
+
+def _text(out):
+    return json.loads(out if isinstance(out, str) else out[0])
+
+
+@pytest.mark.parametrize(
+    "kwargs, op, args",
+    [
+        ({"op": "execute", "code": "print(1)"}, "execute", {"code": "print(1)"}),
+        ({"op": "cells"}, "cells", {}),
+        ({"op": "create_cell", "code": "x = 1", "after": "Hbol", "run": False}, "create_cell",
+         {"code": "x = 1", "after": "Hbol", "run": False}),
+        ({"op": "create_cell", "code": "x = 1"}, "create_cell", {"code": "x = 1", "run": True}),
+        ({"op": "edit_cell", "cell_id": "Hbol", "code": "x = 2", "expected_code_sha256": SHA}, "edit_cell",
+         {"cellId": "Hbol", "code": "x = 2", "expectedCodeSha256": SHA, "run": True}),
+        ({"op": "run_cell", "cell_id": "Hbol"}, "run_cell", {"cellId": "Hbol"}),
+        ({"op": "delete_cell", "cell_id": "Hbol", "expected_code_sha256": SHA}, "delete_cell",
+         {"cellId": "Hbol", "expectedCodeSha256": SHA}),
+        ({"op": "status"}, "status", {}),
+        ({"op": "interrupt"}, "interrupt", {}),
+    ],
+)
+def test_app_execute_request_shape_per_op(via_client, http, kwargs, op, args):
+    http.side_effect = [_response(200, _ended())]
+    out = _text(server.app_execute(LAUNCH, op_id=OP_ID, notebook="n.py", timeout_seconds=120, **kwargs))
+    assert _calls(http) == [("POST", OPS)]
+    assert _sent_body(http.call_args) == {
+        "opId": OP_ID, "op": op, "notebook": "n.py", "args": args, "waitSeconds": 25, "timeoutSeconds": 120,
+    }
+    assert out["op_id"] == OP_ID and out["state"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"op": "nope"},
+        {"op": "execute"},
+        {"op": "create_cell"},
+        {"op": "edit_cell", "cell_id": "Hbol", "code": "x"},
+        {"op": "edit_cell", "code": "x", "expected_code_sha256": SHA},
+        {"op": "run_cell"},
+        {"op": "delete_cell", "cell_id": "Hbol"},
+        {"op": "execute", "code": "1", "op_id": "short"},
+        {"op": "execute", "code": "1", "notebook": "../x.py"},
+        {"op": "execute", "code": "1", "timeout_seconds": 0},
+        {"op": "execute", "code": "1", "timeout_seconds": 3601},
+        {"op": "execute", "code": "1", "wait_seconds": -1},
+    ],
+)
+def test_app_execute_rejects_a_bad_call_before_any_request(via_client, http, kwargs):
+    with pytest.raises(ToolError) as e:
+        server.app_execute(LAUNCH, **kwargs)
+    assert json.loads(str(e.value))["reason"] == "invalid_argument"
+    http.assert_not_called()
+
+
+def test_app_execute_rejects_a_path_like_launch_id(via_client, http):
+    with pytest.raises(ToolError) as e:
+        server.app_execute("../x", op="cells")
+    assert json.loads(str(e.value))["reason"] == "invalid_launch_id"
+    http.assert_not_called()
+
+
+def test_app_execute_generates_an_op_id_and_returns_it(via_client, http):
+    http.side_effect = [_response(200, _ended())]
+    out = _text(server.app_execute(LAUNCH, op="cells"))
+    sent = _sent_body(http.call_args)["opId"]
+    assert len(sent) == 32 and out["op_id"] == sent
+
+
+def test_app_execute_retry_after_a_lost_answer_reuses_the_op_id(via_client, http):
+    http.side_effect = [requests.ConnectionError("lost"), _response(200, _ended())]
+    out = _text(server.app_execute(LAUNCH, op="execute", code="1"))
+    assert _calls(http) == [("POST", OPS), ("POST", OPS)]
+    first, second = (_sent_body(c) for c in http.call_args_list)
+    assert first == second and first["opId"] == out["op_id"]
+
+
+def test_app_execute_202_then_polls_until_done(via_client, http):
+    http.side_effect = [_response(202, RUNNING), _response(200, _ended())]
+    out = _text(server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID))
+    assert _calls(http) == [("POST", OPS), ("GET", f"{OPS}/{OP_ID}")]
+    assert http.call_args_list[1].kwargs["params"] == {"waitSeconds": 20}
+    assert out["state"] == "succeeded"
+
+
+def test_app_execute_polls_with_25_then_the_remainder(via_client, http):
+    http.side_effect = [_response(202, RUNNING)] + [_response(202, RUNNING)] * 3
+    server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID, wait_seconds=70)
+    waits = [c.kwargs["params"]["waitSeconds"] for c in http.call_args_list[1:]]
+    assert waits == [25, 20]
+
+
+def test_app_execute_running_after_the_wait_names_the_follow_up(via_client, http):
+    http.side_effect = [_response(202, RUNNING), _response(202, RUNNING)]
+    out = _text(server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID))
+    assert len(http.call_args_list) == 2
+    assert out["state"] == "running" and out["op_id"] == OP_ID
+    assert "app_operation_status" in out["next_step"] and OP_ID in out["next_step"]
+
+
+def test_app_execute_with_a_short_wait_does_not_poll(via_client, http):
+    http.side_effect = [_response(202, RUNNING)]
+    out = _text(server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID, wait_seconds=10))
+    assert _calls(http) == [("POST", OPS)]
+    assert out["state"] == "running"
+
+
+def test_app_execute_outcome_unknown_says_not_to_rerun(via_client, http):
+    http.side_effect = [_response(200, _ended("outcome_unknown", reason="app_proxy_lost", events=[]))]
+    out = _text(server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID))
+    assert out["state"] == "outcome_unknown"
+    assert "not" in out["next_step"].lower() and "cells" in out["next_step"] and "ask" in out["next_step"].lower()
+
+
+def test_app_execute_conflict_says_to_show_the_persons_cell(via_client, http):
+    http.side_effect = [_response(200, _ended("conflict", reason="conflict"))]
+    out = _text(server.app_execute(LAUNCH, op="edit_cell", cell_id="Hbol", code="x", expected_code_sha256=SHA))
+    assert "ask" in out["next_step"].lower() and "cell" in out["next_step"]
+
+
+def test_app_execute_gateway_answer_on_the_post_is_unknown_with_the_op_id(via_client, http):
+    http.side_effect = [_response(504, None)] * 3  # the transport retries a gateway answer
+    with pytest.raises(ToolError) as e:
+        server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
+    body = json.loads(str(e.value))
+    assert body["reason"] == "outcome_unknown" and body["op_id"] == OP_ID
+    assert "app_operation_status" in body["error"]
+
+
+def test_app_execute_image_event_becomes_image_content(via_client, http):
+    png = base64.b64encode(b"\x89PNG-bytes").decode()
+    events = [{"t": "stdout", "text": "x"}, {"t": "output", "mimetype": "image/png", "data": png}]
+    http.side_effect = [_response(200, _ended(events=events))]
+    out = server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
+    assert isinstance(out, list) and len(out) == 2 and isinstance(out[1], Image)
+    assert out[1].data == b"\x89PNG-bytes"
+    assert png not in out[0]
+
+
+def test_app_execute_cell_thumbnail_becomes_image_content(via_client, http):
+    png = base64.b64encode(b"thumb").decode()
+    cells = {"cells": [{"id": "Hbol", "code": "x", "output": {"type": "image/png", "bytes": 5, "thumbnail": png}}]}
+    http.side_effect = [_response(200, _ended(op="cells", result=cells, events=[]))]
+    out = server.app_execute(LAUNCH, op="cells", op_id=OP_ID)
+    assert isinstance(out[1], Image) and out[1].data == b"thumb"
+    assert png not in out[0]
+
+
+def test_app_execute_bad_image_data_stays_text(via_client, http):
+    events = [{"t": "image", "mimetype": "image/png", "data": "!!not base64!!"}]
+    http.side_effect = [_response(200, _ended(events=events))]
+    out = server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
+    assert isinstance(out, str)
+
+
+def test_app_execute_relays_the_origin_refusal(via_client, http):
+    http.side_effect = [_response(409, {"reason": "app_origin_not_isolated", "detail": "Ask your administrator."})]
+    with pytest.raises(ToolError) as e:
+        server.app_execute(LAUNCH, op="cells")
+    body = json.loads(str(e.value))
+    assert body["reason"] == "app_origin_not_isolated" and body["error"] == "Ask your administrator."
+    assert body["http_status"] == 409 and body["op_id"]
+
+
+def test_app_execute_names_the_reconnect_step_when_not_granted(via_client, http):
+    http.side_effect = [_response(403, NOT_GRANTED)]
+    with pytest.raises(ToolError) as e:
+        server.app_execute(LAUNCH, op="cells")
+    assert json.loads(str(e.value))["reason"] == "execution_not_granted"
+
+
+def test_app_operation_status_gets_with_the_wait(via_client, http):
+    http.side_effect = [_response(200, _ended())]
+    out = _text(server.app_operation_status(LAUNCH, OP_ID, wait_seconds=10))
+    assert _calls(http) == [("GET", f"{OPS}/{OP_ID}")]
+    assert http.call_args.kwargs["params"] == {"waitSeconds": 10}
+    assert out["state"] == "succeeded"
+
+
+def test_app_operation_status_running_and_unknown_op(via_client, http):
+    http.side_effect = [_response(202, RUNNING), _response(404, {"reason": "operation_not_found"})]
+    assert _text(server.app_operation_status(LAUNCH, OP_ID))["state"] == "running"
+    with pytest.raises(ToolError) as e:
+        server.app_operation_status(LAUNCH, OP_ID)
+    assert json.loads(str(e.value))["reason"] == "operation_not_found"
+
+
+@pytest.mark.parametrize("bad_op, wait", [("short", 25), (OP_ID, 51), (OP_ID, -1)])
+def test_app_operation_status_rejects_bad_arguments(via_client, http, bad_op, wait):
+    with pytest.raises(ToolError):
+        server.app_operation_status(LAUNCH, bad_op, wait_seconds=wait)
+    http.assert_not_called()
