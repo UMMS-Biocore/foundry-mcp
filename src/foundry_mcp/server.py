@@ -8409,7 +8409,7 @@ def hpc_app_launch(
     launching again, so a second job is not started.
 
     A 403 with reason execution_not_granted means this connection may not run
-    apps: the user must reconnect Foundry Connect and tick the permission.
+    apps: the user must reconnect Foundry Connect and tick "Run code in my cluster notebooks".
     """
     return _hpc_apps.launch(
         _hpc_call, _web_base_url(), app, run_environment_id, data_roots, cpus, memory_mb, wall_minutes
@@ -8423,7 +8423,7 @@ def hpc_app_list() -> str:
     (requested, queued, starting, running, stopping, ended) and mounts.
 
     A 403 with reason execution_not_granted means the user must reconnect
-    Foundry Connect and tick the permission to run apps.
+    Foundry Connect and tick "Run code in my cluster notebooks".
     """
     return _hpc_apps.list_launches(_hpc_call, _web_base_url())
 
@@ -8435,7 +8435,7 @@ def hpc_app_status(launch_id: str) -> str:
     resources it asked for and its mount map.
 
     A 403 with reason execution_not_granted means the user must reconnect
-    Foundry Connect and tick the permission to run apps.
+    Foundry Connect and tick "Run code in my cluster notebooks".
     """
     return _hpc_apps.status_of(_hpc_call, _web_base_url(), launch_id)
 
@@ -8448,7 +8448,7 @@ def hpc_app_stop(launch_id: str) -> str:
     with the user first, because unsaved work in the app is lost.
 
     A 403 with reason execution_not_granted means the user must reconnect
-    Foundry Connect and tick the permission to run apps.
+    Foundry Connect and tick "Run code in my cluster notebooks".
     """
     return _hpc_apps.stop(_hpc_call, _web_base_url(), launch_id)
 
@@ -8470,7 +8470,7 @@ def app_execute(
     """
     Read, create, edit and run cells in the person's RUNNING cluster notebook
     (marimo), while they watch. The launch must be running (see hpc_app_status).
-    Every call is recorded. Needs the permission to run apps and, on the server,
+    Every call is recorded. Needs the "Run code in my cluster notebooks" permission and, on the server,
     each app on its own web origin: a 409 app_origin_not_isolated means the
     administrator has to enable that, and nothing ran.
 
@@ -8496,10 +8496,16 @@ def app_execute(
 
     States: succeeded, failed, conflict, cancelled, outcome_unknown, running.
     outcome_unknown means the result was lost and the code may have run: do NOT
-    rerun it, read cells, check what landed and ask the person. conflict means
-    the cell changed under you: show the person's cell and ask, nothing was
-    written. Images come back as image content. Output per call is limited, and
-    truncated says when some was cut.
+    rerun it, read cells, check what landed and ask the person. conflict with
+    reason conflict means the cell changed before your write: nothing was
+    written, show the person's cell and ask. conflict with reason
+    conflict_after_write means your write WAS applied and the cell was also
+    changed by someone else: do not write it again, show the current code and
+    ask. A create or edit with run whose change was saved but whose run did
+    not finish still ends succeeded, with applied true, run null and runState
+    and runReason: do not create or edit it again, read cells, then run_cell.
+    After a run the cell's output is in the answer. Images come back as image
+    content. Output per call is limited, and truncated says when some was cut.
     """
     return _hpc_apps.execute(
         _hpc_call, launch_id, op, op_id, notebook, code, cell_id, expected_code_sha256, after, run,
