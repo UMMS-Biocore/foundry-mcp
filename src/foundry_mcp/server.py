@@ -8490,8 +8490,9 @@ def app_execute(
 
     The answer carries op_id. An empty op_id gets a fresh one; to retry an
     operation whose answer you did not see, pass the SAME op_id, and nothing
-    runs twice. A long operation answers state running with its op_id after
-    wait_seconds: call app_operation_status with that op_id to wait on it.
+    runs twice. wait_seconds (0 to 50) bounds how long this call waits. A long
+    operation answers state running with its op_id after wait_seconds: call
+    app_operation_status with that op_id to wait longer, one call at a time.
 
     States: succeeded, failed, conflict, cancelled, outcome_unknown, running.
     outcome_unknown means the result was lost and the code may have run: do NOT

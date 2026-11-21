@@ -253,7 +253,9 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SERVER_WAIT_SECONDS = 25
 _MAX_STATUS_WAIT_SECONDS = 50
 _MAX_TIMEOUT_SECONDS = 3600
-_MAX_TOTAL_WAIT_SECONDS = 3600
+# The whole app_execute call stays under the same 60 s limits; longer waits go
+# through app_operation_status, one bounded call at a time.
+_MAX_TOTAL_WAIT_SECONDS = 50
 
 _OUTCOME_UNKNOWN_NEXT = (
     "The result of this operation was lost, so it may or may not have run. Do not run it again. "
@@ -291,14 +293,36 @@ def _op_refused(body, status: int, op_id: str, fallback_reason: str, fallback_me
     _op_fail(message, reason, op_id, http_status=status)
 
 
-def _image_format(mimetype) -> str:
-    sub = str(mimetype or "image/png").lower().split("/")[-1]
-    return "jpeg" if sub in ("jpg", "jpeg") else "png"
+# The declared media type of image content must match its bytes, or a model API
+# refuses the whole answer. The format is read from the bytes, never from the
+# output's type: a cell thumbnail is always JPEG whatever the original figure was.
+_IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+def _image_format(raw: bytes):
+    for signature, name in _IMAGE_SIGNATURES:
+        if raw.startswith(signature):
+            return name
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+_DATA_URL = re.compile(r"data:[\w.+/-]*(?:;[\w.+=-]+)*;base64,", re.IGNORECASE)
 
 
 def _decode(data):
+    """Bytes of bare base64 or a base64 data URL, or None when it is neither."""
     if not isinstance(data, str) or not data:
         return None
+    prefix = _DATA_URL.match(data[:256])
+    if prefix:
+        data = data[prefix.end():]
     try:
         return base64.b64decode(data, validate=True)
     except (ValueError, binascii.Error):
@@ -318,8 +342,9 @@ def _take_images(node, images: list):
     for field in ("data", "thumbnail"):
         if field in node and (is_image_event or field == "thumbnail"):
             raw = _decode(node[field])
-            if raw is not None:
-                images.append(Image(data=raw, format=_image_format(mimetype)))
+            image_format = _image_format(raw) if raw is not None else None
+            if image_format is not None:
+                images.append(Image(data=raw, format=image_format))
                 node[field] = "[image attached]"
     for value in node.values():
         _take_images(value, images)
@@ -415,7 +440,7 @@ def execute(
         "op": op,
         "notebook": notebook,
         "args": args,
-        "waitSeconds": _SERVER_WAIT_SECONDS,
+        "waitSeconds": min(_SERVER_WAIT_SECONDS, wait_seconds),
         "timeoutSeconds": timeout_seconds,
     }
     lost = (
@@ -437,7 +462,7 @@ def execute(
     if status != 202:
         _op_refused(answer, status, op_id, "operation_refused", "The operation was refused.")
 
-    waited = _SERVER_WAIT_SECONDS
+    waited = min(_SERVER_WAIT_SECONDS, wait_seconds)
     while waited < wait_seconds:
         step = min(_SERVER_WAIT_SECONDS, wait_seconds - waited)
         polled = _poll(call, launch_id, op_id, step)
@@ -447,14 +472,34 @@ def execute(
     return _operation_answer({"state": "running"}, op_id)
 
 
+def _status_unread_next(op_id: str) -> str:
+    return (
+        f"Its state could not be read, so it may still be running or may have ended. Call "
+        f"app_operation_status with launch_id and op_id {op_id} to read it. Do not start the "
+        f"same operation again."
+    )
+
+
 def _poll(call: Call, launch_id: str, op_id: str, wait: int):
-    """One wait on an operation: its answer when it ended, None while it still runs."""
+    """One wait on an operation: its answer when it ended, None while it still runs.
+
+    A lost answer on this read says nothing about the operation itself, which is
+    keyed by op_id and may still run, so it is never reported as a refusal.
+    """
     try:
         status, body = call(
             "GET", f"{LAUNCHES}/{launch_id}/operations/{op_id}", params={"waitSeconds": wait}, retry=True
         )
     except RequestFailed as e:
-        _op_fail(e.message, e.reason, op_id)
+        _op_fail(f"{e.message} {_status_unread_next(op_id)}", e.reason, op_id)
+    typed = isinstance(body, dict) and bool(body.get("reason"))
+    if status in _GATEWAY_STATUSES or (status >= 500 and not typed):
+        _op_fail(
+            f"Foundry Connect did not answer (HTTP {status}). {_status_unread_next(op_id)}",
+            "operation_status_unavailable",
+            op_id,
+            http_status=status,
+        )
     if status == 202:
         return None
     if status == 200:

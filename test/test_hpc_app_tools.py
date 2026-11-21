@@ -341,6 +341,7 @@ def test_app_execute_request_shape_per_op(via_client, http, kwargs, op, args):
         {"op": "execute", "code": "1", "timeout_seconds": 0},
         {"op": "execute", "code": "1", "timeout_seconds": 3601},
         {"op": "execute", "code": "1", "wait_seconds": -1},
+        {"op": "execute", "code": "1", "wait_seconds": 51},
     ],
 )
 def test_app_execute_rejects_a_bad_call_before_any_request(via_client, http, kwargs):
@@ -380,11 +381,12 @@ def test_app_execute_202_then_polls_until_done(via_client, http):
     assert out["state"] == "succeeded"
 
 
-def test_app_execute_polls_with_25_then_the_remainder(via_client, http):
+def test_app_execute_polls_with_the_remainder_of_the_50_second_cap(via_client, http):
     http.side_effect = [_response(202, RUNNING)] + [_response(202, RUNNING)] * 3
-    server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID, wait_seconds=70)
+    server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID, wait_seconds=50)
+    assert _sent_body(http.call_args_list[0])["waitSeconds"] == 25
     waits = [c.kwargs["params"]["waitSeconds"] for c in http.call_args_list[1:]]
-    assert waits == [25, 20]
+    assert waits == [25]
 
 
 def test_app_execute_running_after_the_wait_names_the_follow_up(via_client, http):
@@ -399,7 +401,26 @@ def test_app_execute_with_a_short_wait_does_not_poll(via_client, http):
     http.side_effect = [_response(202, RUNNING)]
     out = _text(server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID, wait_seconds=10))
     assert _calls(http) == [("POST", OPS)]
+    assert _sent_body(http.call_args)["waitSeconds"] == 10
     assert out["state"] == "running"
+
+
+@pytest.mark.parametrize("status, body", [(504, None), (500, {"error": "Internal Server Error"})])
+def test_app_execute_lost_poll_answer_is_not_a_refusal(via_client, http, status, body):
+    http.side_effect = [_response(202, RUNNING)] + [_response(status, body)] * 3
+    with pytest.raises(ToolError) as e:
+        server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
+    answer = json.loads(str(e.value))
+    assert answer["reason"] == "operation_status_unavailable" and answer["op_id"] == OP_ID
+    assert "app_operation_status" in answer["error"] and "Do not start" in answer["error"]
+
+
+def test_app_execute_poll_connection_failure_names_the_follow_up(via_client, http):
+    http.side_effect = [_response(202, RUNNING)] + [requests.ConnectionError("lost")] * 3
+    with pytest.raises(ToolError) as e:
+        server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
+    answer = json.loads(str(e.value))
+    assert answer["op_id"] == OP_ID and "app_operation_status" in answer["error"]
 
 
 def test_app_execute_outcome_unknown_says_not_to_rerun(via_client, http):
@@ -424,23 +445,45 @@ def test_app_execute_gateway_answer_on_the_post_is_unknown_with_the_op_id(via_cl
     assert "app_operation_status" in body["error"]
 
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\n-bytes"
+JPEG_BYTES = b"\xff\xd8\xff\xe0-bytes"
+
+
 def test_app_execute_image_event_becomes_image_content(via_client, http):
-    png = base64.b64encode(b"\x89PNG-bytes").decode()
+    png = base64.b64encode(PNG_BYTES).decode()
     events = [{"t": "stdout", "text": "x"}, {"t": "output", "mimetype": "image/png", "data": png}]
     http.side_effect = [_response(200, _ended(events=events))]
     out = server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
     assert isinstance(out, list) and len(out) == 2 and isinstance(out[1], Image)
-    assert out[1].data == b"\x89PNG-bytes"
+    assert out[1].data == PNG_BYTES and out[1]._mime_type == "image/png"
     assert png not in out[0]
 
 
-def test_app_execute_cell_thumbnail_becomes_image_content(via_client, http):
-    png = base64.b64encode(b"thumb").decode()
-    cells = {"cells": [{"id": "Hbol", "code": "x", "output": {"type": "image/png", "bytes": 5, "thumbnail": png}}]}
+def test_app_execute_data_url_image_event_becomes_image_content(via_client, http):
+    url = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+    events = [{"t": "output", "mimetype": "image/png", "data": url}]
+    http.side_effect = [_response(200, _ended(events=events))]
+    out = server.app_execute(LAUNCH, op="execute", code="1", op_id=OP_ID)
+    assert isinstance(out, list) and out[1].data == PNG_BYTES and out[1]._mime_type == "image/png"
+    assert url not in out[0]
+
+
+def test_app_execute_cell_thumbnail_format_comes_from_the_bytes(via_client, http):
+    thumb = base64.b64encode(JPEG_BYTES).decode()
+    cells = {"cells": [{"id": "Hbol", "code": "x", "output": {"type": "image/png", "bytes": 5, "thumbnail": thumb}}]}
     http.side_effect = [_response(200, _ended(op="cells", result=cells, events=[]))]
     out = server.app_execute(LAUNCH, op="cells", op_id=OP_ID)
-    assert isinstance(out[1], Image) and out[1].data == b"thumb"
-    assert png not in out[0]
+    assert isinstance(out[1], Image) and out[1].data == JPEG_BYTES
+    assert out[1]._mime_type == "image/jpeg"
+    assert thumb not in out[0]
+
+
+def test_app_execute_bytes_that_are_no_known_image_stay_text(via_client, http):
+    thumb = base64.b64encode(b"not an image").decode()
+    cells = {"cells": [{"id": "Hbol", "code": "x", "output": {"type": "image/png", "thumbnail": thumb}}]}
+    http.side_effect = [_response(200, _ended(op="cells", result=cells, events=[]))]
+    out = server.app_execute(LAUNCH, op="cells", op_id=OP_ID)
+    assert isinstance(out, str)
 
 
 def test_app_execute_bad_image_data_stays_text(via_client, http):
@@ -480,6 +523,14 @@ def test_app_operation_status_running_and_unknown_op(via_client, http):
     with pytest.raises(ToolError) as e:
         server.app_operation_status(LAUNCH, OP_ID)
     assert json.loads(str(e.value))["reason"] == "operation_not_found"
+
+
+def test_app_operation_status_gateway_answer_is_not_a_refusal(via_client, http):
+    http.side_effect = [_response(502, None)] * 3
+    with pytest.raises(ToolError) as e:
+        server.app_operation_status(LAUNCH, OP_ID)
+    answer = json.loads(str(e.value))
+    assert answer["reason"] == "operation_status_unavailable" and OP_ID in answer["error"]
 
 
 @pytest.mark.parametrize("bad_op, wait", [("short", 25), (OP_ID, 51), (OP_ID, -1)])
