@@ -4849,6 +4849,13 @@ def create_dataset_from_accessions(
     example GSE12345_part1, GSE12345_part2) and run each one; an offset past
     the end creates nothing. A dry run of every page shows the whole plan.
 
+    Looking up papers or accessions yourself: NCBI web pages (PMC, GEO)
+    return a captcha to automated clients, so use the EBI APIs instead. Run
+    accessions and FASTQ links: https://www.ebi.ac.uk/ena/portal/api/filereport?accession=<PRJNA, SRP, SRX or SRR>&result=read_run&fields=run_accession,sample_title,library_layout,fastq_ftp
+    Papers and full text: Europe PMC REST,
+    https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=<terms>&format=json
+    and .../rest/<PMCID>/fullTextXML.
+
     Args:
         name: Dataset name (non-empty, unique in the project).
         accessions: Accessions to include, any mix of the types above.
@@ -6185,6 +6192,15 @@ _RECIPES = [
             "To copy a working example's settings instead: duplicate_run(run_id="
             "'<example run>', project_id=..., pipeline_id=...), then update_run "
             "on the NEW run (set run_environment_id if the example's is not yours).",
+            "Public data: create_dataset_from_accessions builds the samples "
+            "from GEO, SRA or ENA accessions. To look up papers or accessions "
+            "yourself, skip NCBI web pages (PMC, GEO): they return a captcha to "
+            "automated clients. Use the ENA filereport API "
+            "(https://www.ebi.ac.uk/ena/portal/api/filereport?accession=<study "
+            "or run>&result=read_run&fields=run_accession,fastq_ftp) for run "
+            "accessions and FASTQ links, and Europe PMC REST "
+            "(https://www.ebi.ac.uk/europepmc/webservices/rest/search?query="
+            "<terms>&format=json) for papers.",
         ],
     },
     {

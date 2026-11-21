@@ -81,6 +81,11 @@
     with `cleanup_delay_hours` is refused before anything is sent.
 
 ### Changed
+- **Data sourcing tips for agents**: the `create_dataset_from_accessions`
+  description and the `get_started` analysis recipe now point agents to the
+  ENA filereport API for run accessions and FASTQ links and to the Europe
+  PMC REST API for papers, and warn that NCBI web pages (PMC, GEO) return a
+  captcha to automated clients. No behaviour change.
 - **`create_run` saves the default process forms**: a new run of a
   Foundry pipeline now gets its per process forms (and the pipeline form)
   filled with the pipeline's defaults, the same values the Run page fills
