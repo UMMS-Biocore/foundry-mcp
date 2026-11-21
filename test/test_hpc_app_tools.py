@@ -538,3 +538,37 @@ def test_app_operation_status_rejects_bad_arguments(via_client, http, bad_op, wa
     with pytest.raises(ToolError):
         server.app_operation_status(LAUNCH, bad_op, wait_seconds=wait)
     http.assert_not_called()
+
+
+def test_the_reconnect_step_names_the_consent_box_word_for_word(via_client, http):
+    http.side_effect = [_response(403, NOT_GRANTED)]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_list()
+    assert '"Run code in my cluster notebooks"' in json.loads(str(e.value))["error"]
+
+
+def test_app_execute_conflict_says_nothing_was_written(via_client, http):
+    http.side_effect = [_response(200, _ended("conflict", reason="conflict"))]
+    out = _text(server.app_execute(LAUNCH, op="edit_cell", cell_id="Hbol", code="x", expected_code_sha256=SHA))
+    assert "Nothing of yours was written" in out["next_step"]
+
+
+def test_app_execute_conflict_after_write_says_the_write_was_applied(via_client, http):
+    http.side_effect = [_response(200, _ended("conflict", reason="conflict_after_write"))]
+    out = _text(server.app_execute(LAUNCH, op="edit_cell", cell_id="Hbol", code="x", expected_code_sha256=SHA))
+    assert "write was applied" in out["next_step"] and "Do not write it again" in out["next_step"]
+    assert "Nothing of yours was written" not in out["next_step"]
+
+
+def test_app_execute_landed_change_whose_run_did_not_finish_says_not_to_resend(via_client, http):
+    result = {"cellId": "Hbol", "codeSha256": SHA, "run": None, "applied": True, "runState": "cancelled", "runReason": "stopped"}
+    http.side_effect = [_response(200, _ended("succeeded", op="create_cell", result=result))]
+    out = _text(server.app_execute(LAUNCH, op="create_cell", code="x", run=True))
+    assert out["state"] == "succeeded" and out["result"]["applied"] is True
+    assert "Do not create or edit the cell again" in out["next_step"] and "run_cell" in out["next_step"]
+
+
+def test_app_execute_plain_success_has_no_next_step(via_client, http):
+    http.side_effect = [_response(200, _ended("succeeded", op="create_cell", result={"cellId": "Hbol", "codeSha256": SHA}))]
+    out = _text(server.app_execute(LAUNCH, op="create_cell", code="x", run=False))
+    assert "next_step" not in out

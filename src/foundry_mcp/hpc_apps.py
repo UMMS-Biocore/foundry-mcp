@@ -40,9 +40,12 @@ _STOP_MAY_HAVE_ARRIVED = (
 # `call(method, endpoint, **kwargs)` returns (HTTP status, parsed body).
 Call = Callable[..., Tuple[int, object]]
 
+# The box exactly as the Foundry Connect consent page labels it.
+APP_EXECUTION_LABEL = "Run code in my cluster notebooks"
+
 _RECONNECT = (
     "This connection may not run apps. Reconnect Foundry Connect to your assistant and tick "
-    "the permission to run apps on your cluster, then try again."
+    f'"{APP_EXECUTION_LABEL}", then try again.'
 )
 
 
@@ -267,6 +270,15 @@ _CONFLICT_NEXT = (
     "written. Show the person their cell from the answer, ask how to proceed, then read the cells "
     "again before editing."
 )
+_CONFLICT_AFTER_WRITE_NEXT = (
+    "Your write was applied, but the cell was also changed by someone else at about the same "
+    "time, so one change replaced the other. Do not write it again. Show the person the cell's "
+    "current code from the answer and ask how to proceed, then read the cells again before editing."
+)
+_APPLIED_NEXT = (
+    "The cell change was saved; only the run did not finish (see runState and runReason). Do not "
+    "create or edit the cell again. Read the cells with op=cells, then use run_cell if it should run."
+)
 _ANSWER_KEYS = (
     "op", "state", "reason", "truncated", "outputBytes", "events", "result", "replayed",
     "outputRetained", "sessionRestarted",
@@ -359,10 +371,14 @@ def _operation_answer(body, op_id: str):
         answer.update({"state": "running", "next_step": _running_next(op_id)})
         return json.dumps(answer, indent=2)
     answer.update({name: body[name] for name in _ANSWER_KEYS if name in body})
+    result = body.get("result") if isinstance(body.get("result"), dict) else {}
     if state == "outcome_unknown":
         answer["next_step"] = _OUTCOME_UNKNOWN_NEXT
     elif state == "conflict":
-        answer["next_step"] = _CONFLICT_NEXT
+        after_write = body.get("reason") == "conflict_after_write"
+        answer["next_step"] = _CONFLICT_AFTER_WRITE_NEXT if after_write else _CONFLICT_NEXT
+    elif result.get("applied") is True:
+        answer["next_step"] = _APPLIED_NEXT
     images: list = []
     _take_images(answer, images)
     text = json.dumps(answer, indent=2)
