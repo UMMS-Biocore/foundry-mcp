@@ -8454,6 +8454,72 @@ def hpc_app_stop(launch_id: str) -> str:
 
 
 @mcp.tool()
+def app_execute(
+    launch_id: str,
+    op: str,
+    op_id: str = "",
+    notebook: str = "notebook.py",
+    code: str = "",
+    cell_id: str = "",
+    expected_code_sha256: str = "",
+    after: str = "",
+    run: bool = True,
+    timeout_seconds: int = 300,
+    wait_seconds: int = 45,
+):
+    """
+    Read, create, edit and run cells in the person's RUNNING cluster notebook
+    (marimo), while they watch. The launch must be running (see hpc_app_status).
+    Every call is recorded. Needs the permission to run apps and, on the server,
+    each app on its own web origin: a 409 app_origin_not_isolated means the
+    administrator has to enable that, and nothing ran.
+
+    op is one of:
+    - cells: read every cell with its id, code, codeSha256 and output. Do this first.
+    - create_cell: add a cell with `code`, optionally after cell `after`; `run` runs it.
+    - edit_cell: replace a cell's code. Needs `cell_id` and `expected_code_sha256`,
+      the codeSha256 from your last cells read; `run` runs it after the edit.
+    - run_cell: run one cell (`cell_id`).
+    - delete_cell: remove a cell (`cell_id`, `expected_code_sha256`).
+    - execute: run `code` once in the notebook's kernel, without adding a cell.
+    - status: the notebook session state. interrupt: stop the running code.
+
+    Edit cells with edit_cell and the hash from the last cells read. Never use
+    execute with code that imports marimo._code_mode to change cells: it skips
+    the conflict check that protects the person's own edits.
+
+    The answer carries op_id. An empty op_id gets a fresh one; to retry an
+    operation whose answer you did not see, pass the SAME op_id, and nothing
+    runs twice. wait_seconds (0 to 50) bounds how long this call waits. A long
+    operation answers state running with its op_id after wait_seconds: call
+    app_operation_status with that op_id to wait longer, one call at a time.
+
+    States: succeeded, failed, conflict, cancelled, outcome_unknown, running.
+    outcome_unknown means the result was lost and the code may have run: do NOT
+    rerun it, read cells, check what landed and ask the person. conflict means
+    the cell changed under you: show the person's cell and ask, nothing was
+    written. Images come back as image content. Output per call is limited, and
+    truncated says when some was cut.
+    """
+    return _hpc_apps.execute(
+        _hpc_call, launch_id, op, op_id, notebook, code, cell_id, expected_code_sha256, after, run,
+        timeout_seconds, wait_seconds,
+    )
+
+
+@mcp.tool()
+def app_operation_status(launch_id: str, op_id: str, wait_seconds: int = 25):
+    """
+    Wait up to wait_seconds (0 to 50) for an app_execute operation and return
+    its result, using the op_id app_execute returned. State running means it is
+    still going: call this again. outcome_unknown means do not rerun it: read
+    cells with app_execute and ask the person. Output is kept for 10 minutes
+    after the end; after that read the notebook with op=cells instead.
+    """
+    return _hpc_apps.operation_status(_hpc_call, launch_id, op_id, wait_seconds)
+
+
+@mcp.tool()
 def launch_app(app_id: str, run_type: str = "standalone", parameters: dict = None) -> str:
     """
     Launch/run an application or pipeline in Foundry Connect.

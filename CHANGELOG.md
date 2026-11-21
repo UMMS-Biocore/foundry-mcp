@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Notebook cell tools for assistants**: `app_execute` reads, creates, edits,
+  runs and deletes cells in your running cluster notebook, and
+  `app_operation_status` waits on a long one. Every call carries an operation
+  id, so a retry never runs code twice. A result that was lost is reported as
+  `outcome_unknown` and is never rerun, and a cell that changed under the
+  assistant comes back as `conflict` with nothing written. Images come back as
+  image content. The tools need the permission to run apps.
 - **Where a run's outputs were published**: `list_published_outputs(run_id,
   attempt_id=None)` lists each final output of a run with the folder it was
   published to on the run environment (or its s3 or gs address), the files
