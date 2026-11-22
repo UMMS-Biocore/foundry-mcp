@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- **Disk space estimate in preflight**: `preflight_run(run_id, input_bytes=None)`
+  now asks the server how much space the run is expected to need (scaled from
+  past runs of the same pipeline revision, or a rough multiple of the input
+  size when there is too little history) and how much is free under the
+  execution directory. The answer is a `size_estimate` warning section with
+  the figure, its work and report parts, what the input size leaves out and
+  whether it exceeds the free space. It never fails the preflight, and an
+  older server without the estimate gets a one line note. A dataset created
+  from accessions passes its raw size along on its own.
 - **Notebook cell tools for assistants**: `app_execute` reads, creates, edits,
   runs and deletes cells in your running cluster notebook, and
   `app_operation_status` waits on a long one. Every call carries an operation

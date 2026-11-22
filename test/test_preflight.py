@@ -757,3 +757,125 @@ class TestPreflightRequiredPathInputs:
     def test_a_non_path_input_with_a_placeholder_default_is_unchanged(self):
         check = self._run(_path_params(default="NA", name="extra_args"), [])
         assert check["status"] == "pass"
+
+
+GB = 1024 ** 3
+
+
+def _sized_preflight(estimate=None, error=None, input_bytes=None, **kwargs):
+    """Preflight with the size estimate route answering `estimate`, or raising
+    `error`. Returns the parsed result and the body the route received."""
+    client = _client(files=ALL_GOOD, **kwargs)
+    inner = client.call.side_effect
+    seen = {}
+
+    def _call(**kw):
+        if kw.get("endpoint", "").endswith("/size-estimate"):
+            seen["body"] = kw.get("data")
+            seen["method"] = kw.get("method")
+            if error is not None:
+                raise error
+            return estimate
+        return inner(**kw)
+
+    client.call.side_effect = _call
+    with patch.object(server, "get_client", return_value=client):
+        args = {} if input_bytes is None else {"input_bytes": input_bytes}
+        return json.loads(server.preflight_run("12194", **args)), seen
+
+
+HISTORY = {
+    "basis": "history", "runsUsed": 5, "minRuns": 3,
+    "inputBytes": 10 * GB, "inputSource": "request", "inputNote": None,
+    "fallbackFactor": None, "bytesPerInputByte": 3.0,
+    "estimatedWorkBytes": 25 * GB, "estimatedReportBytes": 5 * GB,
+    "estimatedBytes": 40 * GB,
+    "freeSpace": {"checked": True, "availableBytes": 500 * GB, "checkedPath": "/x"},
+    "warn": False,
+    "message": "This run is expected to need about 40 GB, based on 5 past runs.",
+}
+
+ROUGH = {
+    "basis": "no_history_rough", "runsUsed": 1, "minRuns": 3,
+    "inputBytes": 2 * GB, "inputSource": "datasets",
+    "inputNote": "Not counted in the input size: 1 dataset could not be read.",
+    "fallbackFactor": 6, "bytesPerInputByte": None,
+    "estimatedWorkBytes": None, "estimatedReportBytes": None,
+    "estimatedBytes": 12 * GB,
+    "freeSpace": {"checked": False, "reason": "no execution directory"},
+    "warn": False,
+    "message": "No history: a rough figure, 6 times the input size: about 12 GB.",
+}
+
+
+class TestPreflightSizeEstimate:
+    def setup_method(self):
+        server._ACCESSION_BYTES.clear()
+
+    def test_history_answer_is_shown_with_its_parts(self):
+        parsed, seen = _sized_preflight(HISTORY, input_bytes=10 * GB)
+        assert seen["method"] == "POST"
+        assert seen["body"] == {"inputBytes": 10 * GB}
+        size = parsed["data"]["size_estimate"]
+        assert size["available"] is True
+        assert size["basis"] == "history"
+        assert size["runsUsed"] == 5
+        assert size["message"] == HISTORY["message"]
+        assert size["estimatedBytes"] == 40 * GB
+        assert size["estimated_size"] == "40.0 GB"
+        assert size["estimated_parts"] == {
+            "inputs": "10.0 GB", "work": "25.0 GB", "report": "5.0 GB"}
+        assert size["free_space"] == "500.0 GB"
+        assert size["warn"] is False
+        assert parsed["data"]["ok"] is True
+        assert "WARNING" not in parsed["summary"]
+
+    def test_no_input_bytes_sends_an_empty_body(self):
+        _, seen = _sized_preflight(HISTORY)
+        assert seen["body"] == {}
+
+    def test_a_dataset_created_from_accessions_supplies_its_raw_total(self):
+        server._remember_accession_bytes("69743e8d41a0a599bb36f6a8", 7 * GB)
+        _, seen = _sized_preflight(HISTORY)
+        assert seen["body"] == {"inputBytes": 7 * GB}
+
+    def test_rough_fallback_keeps_its_note_and_factor(self):
+        parsed, _ = _sized_preflight(ROUGH)
+        size = parsed["data"]["size_estimate"]
+        assert size["basis"] == "no_history_rough"
+        assert size["fallbackFactor"] == 6
+        assert size["inputNote"] == ROUGH["inputNote"]
+        assert size["estimated_size"] == "12.0 GB"
+        assert "estimated_parts" not in size
+        assert size["freeSpace"] == {"checked": False, "reason": "no execution directory"}
+        assert "free_space" not in size
+        assert parsed["data"]["ok"] is True
+
+    def test_warn_true_is_a_warning_and_never_a_failure(self):
+        warn = dict(HISTORY, warn=True,
+                    freeSpace={"checked": True, "availableBytes": 20 * GB, "checkedPath": "/x"})
+        parsed, _ = _sized_preflight(warn)
+        assert parsed["data"]["size_estimate"]["warn"] is True
+        assert parsed["data"]["ok"] is True
+        assert parsed["data"]["failures"] == 0
+        assert all(c["status"] != "fail" for c in parsed["data"]["checks"])
+        assert "WARNING" in parsed["summary"]
+        assert "size_estimate" in parsed["next_steps"][0]
+
+    def test_a_route_error_degrades_to_a_note(self):
+        parsed, _ = _sized_preflight(error=RuntimeError("500 Server Error"))
+        size = parsed["data"]["size_estimate"]
+        assert size == {"available": False, "warn": False, "note": size["note"]}
+        assert "could not be read" in size["note"]
+        assert parsed["data"]["ok"] is True
+        assert "error" not in parsed
+
+    def test_an_older_server_without_the_route_degrades_to_a_note(self):
+        import requests
+        response = MagicMock(status_code=404)
+        parsed, _ = _sized_preflight(
+            error=requests.HTTPError("Not Found", response=response))
+        size = parsed["data"]["size_estimate"]
+        assert size["available"] is False
+        assert "does not offer" in size["note"]
+        assert parsed["data"]["ok"] is True
