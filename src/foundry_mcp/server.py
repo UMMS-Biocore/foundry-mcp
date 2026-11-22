@@ -5089,6 +5089,7 @@ def create_dataset_from_accessions(
                 f"The dataset is NOT ready to use; add the missing records or delete it and retry.")
 
         data["vmetaCollectionId"] = dataset_id
+        _remember_accession_bytes(dataset_id, plan["total_raw_bytes"])
         return json.dumps(envelope(
             summary=f"Dataset '{name.strip()}' created: {summary}.",
             data=data,
@@ -5719,9 +5720,83 @@ def _preflight_genome(definitions, inputs):
         "Set it with update_run(inputs=...).",
         input=unset[0])
 
+# Raw byte totals of datasets this server process created from accessions,
+# keyed by dataset id, so preflight_run can hand the size estimate the
+# archive's figure when the caller does not pass one. Best effort: it lives
+# only as long as the process and holds at most _ACCESSION_BYTES_MAX entries.
+_ACCESSION_BYTES = {}
+_ACCESSION_BYTES_MAX = 500
+
+
+def _remember_accession_bytes(dataset_id, total_raw_bytes):
+    if not dataset_id or not isinstance(total_raw_bytes, int) or total_raw_bytes <= 0:
+        return
+    _ACCESSION_BYTES.pop(dataset_id, None)
+    _ACCESSION_BYTES[dataset_id] = total_raw_bytes
+    while len(_ACCESSION_BYTES) > _ACCESSION_BYTES_MAX:
+        _ACCESSION_BYTES.pop(next(iter(_ACCESSION_BYTES)))
+
+
+def _remembered_input_bytes(sample_inputs):
+    """The summed accession byte total of the run's sample datasets, when
+    this process created every one of them from accessions, else None."""
+    ids = {i.get("vmetaCollectionId") for i in sample_inputs if i.get("vmetaCollectionId")}
+    if not ids or any(d not in _ACCESSION_BYTES for d in ids):
+        return None
+    return sum(_ACCESSION_BYTES[d] for d in ids)
+
+
+_SIZE_ESTIMATE_FIELDS = (
+    "message", "basis", "runsUsed", "minRuns", "inputBytes", "inputSource",
+    "inputNote", "fallbackFactor", "estimatedBytes", "estimatedWorkBytes",
+    "estimatedReportBytes", "freeSpace", "warn",
+)
+
+
+def _preflight_size_estimate(via_client, run_id, input_bytes):
+    """The run's disk space estimate as a WARNING section for preflight_run.
+    It never fails or refuses the preflight: a route error, or a 404 from a
+    server that predates the route, becomes a one line note."""
+    body = {"inputBytes": int(input_bytes)} if input_bytes else {}
+    try:
+        answer = via_client.call(
+            method="POST", endpoint=f"/api/v1/run/{run_id}/size-estimate", data=body)
+    except Exception as e:
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None)
+        if status == 404 or "404" in str(e):
+            note = "This server does not offer a run size estimate yet, so none was checked."
+        else:
+            note = f"The run size estimate could not be read ({e}), so none was checked."
+        logger.info(f"Pre-flight size estimate for run {run_id}: {note}")
+        return {"available": False, "note": note, "warn": False}
+    if isinstance(answer, dict) and isinstance(answer.get("data"), dict):
+        answer = answer["data"]
+    if not isinstance(answer, dict) or "basis" not in answer:
+        return {"available": False, "warn": False,
+                "note": "The run size estimate returned no usable answer, so none was checked."}
+    section = {k: answer.get(k) for k in _SIZE_ESTIMATE_FIELDS}
+    section["available"] = True
+    section["warn"] = bool(answer.get("warn"))
+    if section["estimatedBytes"] is not None:
+        section["estimated_size"] = _human_size(section["estimatedBytes"])
+        if section["basis"] == "history":
+            section["estimated_parts"] = {
+                "inputs": _human_size(section["inputBytes"]),
+                "work": _human_size(section["estimatedWorkBytes"]),
+                "report": _human_size(section["estimatedReportBytes"]),
+            }
+    free = section.get("freeSpace") or {}
+    if isinstance(free, dict) and free.get("checked"):
+        section["free_space"] = _human_size(free.get("availableBytes"))
+    section["note"] = ("A WARNING only: the figure is statistical and never blocks a launch. "
+                       + ("The estimate exceeds the free space; tell the user before launching."
+                          if section["warn"] else "Show it to the user with the other warnings."))
+    return section
+
 
 @mcp.tool()
-def preflight_run(run_id: str) -> str:
+def preflight_run(run_id: str, input_bytes: Optional[int] = None) -> str:
     """
     Check a run for the mistakes that waste cluster time, BEFORE launching it.
 
@@ -5739,8 +5814,19 @@ def preflight_run(run_id: str) -> str:
     finds is one that would otherwise surface as a failed or silently-skipped
     job after the queue time has already been spent.
 
+    It also asks the server for the run's disk space estimate (from past runs
+    of the same pipeline revision, or a rough multiple of the input size when
+    there is too little history) and the free space under the execution
+    directory. That answer is in `size_estimate`, a WARNING section only: it
+    never fails the preflight. When `size_estimate.warn` is true the estimate
+    exceeds the free space; tell the user before launching.
+
     Args:
         run_id: The run to check.
+        input_bytes: Optional input size in bytes for the size estimate, for
+            example `total_raw_bytes` from create_dataset_from_accessions. When
+            omitted, a total this server recorded when it created the run's
+            datasets from accessions is used, else the server works it out.
     """
     try:
         via_client = get_client()
@@ -5980,6 +6066,10 @@ def preflight_run(run_id: str) -> str:
         warnings = sum(1 for c in checks if c["status"] == "warn")
         ok = failures == 0
 
+        if input_bytes is None:
+            input_bytes = _remembered_input_bytes(sample_inputs)
+        size_estimate = _preflight_size_estimate(via_client, run_id, input_bytes)
+
         if ok:
             summary = (f"Run {run_id} looks ready to launch "
                        f"({len(checks)} checks, {warnings} warning(s)).")
@@ -5996,13 +6086,18 @@ def preflight_run(run_id: str) -> str:
                 "lists how.",
                 "Then call preflight_run again; only launch once it passes.",
             ]
+        if size_estimate["warn"]:
+            summary += " WARNING: the size estimate exceeds the free space."
+            next_steps.insert(0, "Show the user the size_estimate warning: the run "
+                                 "may fill its execution directory before it finishes.")
 
         result = envelope(
             summary=summary,
             data={"ok": ok, "failures": failures, "warnings": warnings,
                   "run": {"id": run_id, "name": details.get("name"),
                           "launched": launched},
-                  "checks": checks},
+                  "checks": checks,
+                  "size_estimate": size_estimate},
             next_steps=next_steps,
         )
         return json.dumps(result, indent=2)
