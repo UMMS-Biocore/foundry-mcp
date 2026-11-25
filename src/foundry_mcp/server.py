@@ -4526,12 +4526,143 @@ def list_results(run_id: str) -> str:
         return json.dumps({"error": str(e)})
 
 
+# GET /api/v1/app pages: take defaults to 10 and may not exceed 200, so the app
+# helpers page through with the largest page and stop at _APP_LIST_MAX apps.
+_APP_LIST_PAGE = 200
+_APP_LIST_MAX = 2000
+# The route's type defaults to 1, apps the caller owns. Type 4 is what the app
+# pickers in the web app use: the caller's own apps, public apps and apps
+# shared with one of the caller's groups. Type 3 (every app) refuses anyone
+# who is not an admin, and is an administration view rather than a catalogue.
+# Sorting by id keeps LIMIT/OFFSET pages stable: the default sort, creation
+# date, has ties, and tied rows can move between pages.
+_APP_LIST_QUERY = {"type": "4", "sort": "id", "order": "asc"}
+# Type 1: only the apps the caller owns. suggest_apps matches apps by name,
+# and an app row does not say whether its owner is an admin, so a public or
+# group shared app another user named "IGV" would look like the real one.
+_APP_OWNED_QUERY = dict(_APP_LIST_QUERY, type="1")
+# The fields list_apps returns per app, so 2000 rows stay small.
+_APP_LIST_FIELDS = ("id", "name", "description", "version", "status", "image", "appKind")
+
+
+class _AppSearchRefused(Exception):
+    """The server answered 400 to the search parameter on the first page."""
+
+
+def _http_status(error: Exception) -> Optional[int]:
+    """The HTTP status behind an SDK error, from the error or its chained HTTPError."""
+    seen = error
+    while seen is not None:
+        status = getattr(seen, "status_code", None)
+        if isinstance(status, int):
+            return status
+        response = getattr(seen, "response", None)
+        if isinstance(getattr(response, "status_code", None), int):
+            return response.status_code
+        seen = seen.__cause__ or seen.__context__
+    return None
+
+
+def _refuses_search(error: Exception) -> bool:
+    """
+    True only when the server refused search as an unknown parameter, which
+    is how a server without server side search answers. A 400 about the
+    search value (too long, for one) is a real error and returns False.
+
+    The route answers a validation failure with
+    {message: "'search' is not allowed", details: [{path, type}, ...]}, and
+    the SDK keeps that body only on the chained HTTPError.
+    """
+    if _http_status(error) != 400:
+        return False
+    seen = error
+    while seen is not None:
+        response = getattr(seen, "response", None) if isinstance(seen, requests.HTTPError) else None
+        if response is not None:
+            try:
+                body = response.json()
+            except ValueError:
+                return False
+            if not isinstance(body, dict):
+                return False
+            for detail in body.get("details") or []:
+                if (isinstance(detail, dict) and detail.get("type") == "object.unknown"
+                        and detail.get("path") == ["search"]):
+                    return True
+            message = str(body.get("message") or "").lower()
+            return "search" in message and "not allowed" in message
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _fetch_app_pages(via_client, search: str = None, query: dict = None):
+    """
+    Page GET /api/v1/app. Returns (apps, total or None, more), where more is
+    true when the server holds apps that were not fetched.
+
+    A 400 on the first page that rejects search raises _AppSearchRefused.
+    Every other error, and any error on a later page, propagates unchanged.
+    """
+    apps, seen, skip, total = [], set(), 0, None
+    while len(apps) < _APP_LIST_MAX:
+        take = min(_APP_LIST_PAGE, _APP_LIST_MAX - len(apps))
+        params = dict(query or _APP_LIST_QUERY, take=take, skip=skip)
+        if search:
+            params["search"] = search
+        try:
+            response = via_client.call(method="GET", endpoint="/api/v1/app", params=params)
+        except Exception as e:
+            if search and skip == 0 and _refuses_search(e):
+                raise _AppSearchRefused(str(e)) from e
+            raise
+        if not (isinstance(response, dict) and "data" in response):
+            # A bare list is not paged: it is the whole answer.
+            rows = response if isinstance(response, list) else []
+            return apps + rows, None, False
+        rows = response.get("data") or []
+        if isinstance(response.get("total"), int):
+            total = response["total"]
+        added = 0
+        for row in rows:
+            app_id = row.get("id") if isinstance(row, dict) else None
+            if app_id is not None and app_id in seen:
+                continue
+            if app_id is not None:
+                seen.add(app_id)
+            apps.append(row)
+            added += 1
+        skip += len(rows)
+        if len(rows) < take:
+            return apps, total, False
+        if total is not None and len(apps) >= total:
+            return apps, total, False
+        if added == 0:
+            # The server ignored skip. Stop rather than loop to the cap, and
+            # say so when it reports more apps than were fetched.
+            return apps, total, total is None or total > len(apps)
+    return apps, total, total is None or total > len(apps)
+
+
+def _compact_app(app):
+    """The list_apps row: a few fields and the owner's username."""
+    if not isinstance(app, dict):
+        return app
+    row = {name: app.get(name) for name in _APP_LIST_FIELDS if name in app}
+    owner = app.get("owner")
+    row["owner"] = owner.get("username") if isinstance(owner, dict) else owner
+    return row
+
+
 def _installed_apps(via_client):
-    """The apps this instance actually has, as [{id, name}]."""
-    response = via_client.call(method="GET", endpoint="/api/v1/app")
-    if isinstance(response, dict):
-        response = response.get("data", [])
-    return [a for a in (response or []) if isinstance(a, dict) and a.get("id")]
+    """
+    The apps suggest_apps may recommend: only the caller's own apps, as the
+    route's rows. Apps shared by other users are left out on purpose, because
+    a suggestion is chosen by name and a shared app's name proves nothing
+    about who made it. list_apps still lists shared apps, with their owner.
+    """
+    apps, _total, _more = _fetch_app_pages(via_client, query=_APP_OWNED_QUERY)
+    return [a for a in apps
+            if isinstance(a, dict) and a.get("id") and a.get("own") is True]
 
 
 @mcp.tool()
@@ -4542,8 +4673,10 @@ def suggest_apps(run_id: str) -> str:
     Cellxgene, alignments and coverage into IGV.
 
     Only apps actually installed on this instance are suggested, so a
-    recommendation never points at an app that is not there. Launching is a
-    separate, explicit step via launch_app.
+    recommendation never points at an app that is not there. Apps are matched
+    by name, so only apps you own are considered: a shared app named like a
+    known one could be anybody's. list_apps shows shared apps with their
+    owner. Launching is a separate, explicit step via launch_app.
 
     Args:
         run_id: The finished run (same as the report id).
@@ -4572,11 +4705,14 @@ def suggest_apps(run_id: str) -> str:
 
         if not suggestions:
             summary = (
-                f"Run {run_id} has no outputs matching an app installed on this "
-                f"instance, so there is no viewer to suggest.")
+                f"Run {run_id} has no outputs matching an app you own, so there "
+                f"is no viewer to suggest. Only your own apps were considered; "
+                f"shared and public apps were not.")
             next_steps = [
                 f"Call list_results(run_id='{run_id}') to see what the run "
-                f"produced, and list_apps() for what is installed.",
+                f"produced.",
+                "Call list_apps() to see shared and public apps with their "
+                "owners, and launch one with launch_app if you trust its owner.",
             ]
         else:
             names = ", ".join(s["app_name"] for s in suggestions)
@@ -8406,93 +8542,68 @@ def update_metadata_records(canvas_id: str, collection_name: str, updates: list[
 # App Launch Tools
 # ============================================================================
 
-# GET /api/v1/app pages: take defaults to 10 and may not exceed 200. list_apps
-# pages through with the largest page and stops at this many apps.
-_APP_LIST_PAGE = 200
-_APP_LIST_MAX = 2000
-
-
-def _fetch_app_pages(via_client, search: str = None):
-    """Page GET /api/v1/app. Returns (apps, total or None, hit_cap)."""
-    apps, seen, skip, total = [], set(), 0, None
-    while len(apps) < _APP_LIST_MAX:
-        take = min(_APP_LIST_PAGE, _APP_LIST_MAX - len(apps))
-        params = {"take": take, "skip": skip}
-        if search:
-            params["search"] = search
-        response = via_client.call(method="GET", endpoint="/api/v1/app", params=params)
-        if not (isinstance(response, dict) and "data" in response):
-            # A bare list is not paged: it is the whole answer.
-            rows = response if isinstance(response, list) else []
-            return apps + rows, None, False
-        rows = response.get("data") or []
-        if isinstance(response.get("total"), int):
-            total = response["total"]
-        added = 0
-        for row in rows:
-            app_id = row.get("id") if isinstance(row, dict) else None
-            if app_id is not None and app_id in seen:
-                continue
-            if app_id is not None:
-                seen.add(app_id)
-            apps.append(row)
-            added += 1
-        skip += len(rows)
-        # A short page is the last one. A page with nothing new means the
-        # server ignored skip, so stop rather than loop to the cap.
-        if len(rows) < take or added == 0:
-            return apps, total, False
-        if total is not None and len(apps) >= total:
-            return apps, total, False
-    more = total is None or total > len(apps)
-    return apps, total, more
-
-
 @mcp.tool()
 def list_apps(search: str = None) -> str:
     """
     List all available applications in Foundry Connect with their names, IDs, and details.
     Use this to find apps by name before launching them.
-    Returns app information including ID, name, description, image, and configuration.
+    Returns one row per app: id, name, description, version, status, image,
+    owner (username) and appKind when the server reports it.
 
-    Pages through every app you can see, up to 2000. `search` is matched by
-    the server, ignoring case, against the app name and owner. Past 2000 the
-    result is an object {apps, total, truncated, note} instead of a list, so
-    narrow with `search`.
+    Covers every app you can launch: your own, public apps and apps shared
+    with your groups, up to 2000. `search` is matched by the server, ignoring
+    case, against the app name and owner. Past 2000 the result is an object
+    {apps, total, truncated, note} instead of a list, so narrow with `search`.
     """
     try:
         via_client = get_client()
         logger.info(f"Listing apps with search filter: {search}")
         needle = (search or "").strip()
+        local_filter = False
 
         try:
-            apps, total, hit_cap = _fetch_app_pages(via_client, needle or None)
-        except Exception as e:
-            if not needle:
-                raise
+            apps, total, more = _fetch_app_pages(via_client, needle or None)
+        except _AppSearchRefused as e:
             # An older server refuses the search parameter: page everything
-            # and filter by name here instead.
-            logger.info(f"Server side app search failed ({e}), filtering locally")
-            apps, total, hit_cap = _fetch_app_pages(via_client)
+            # and match name and owner here instead, as the server would.
+            logger.info(f"Server side app search refused ({e}), filtering locally")
+            apps, total, more = _fetch_app_pages(via_client)
+            low = needle.lower()
+
+            def _owner_name(app):
+                owner = app.get("owner")
+                return owner.get("username") if isinstance(owner, dict) else owner
+
             apps = [
                 app for app in apps
                 if isinstance(app, dict)
-                and needle.lower() in str(app.get("name", "")).lower()
+                and (low in str(app.get("name") or "").lower()
+                     or low in str(_owner_name(app) or "").lower())
             ]
-            total = None
+            local_filter = True
 
-        if hit_cap:
-            shown = f"{total}" if total is not None else "more than that"
+        rows = [_compact_app(app) for app in apps]
+        if more:
+            if local_filter:
+                note = (
+                    f"Found {len(rows)} apps matching '{needle}' among the first "
+                    f"{_APP_LIST_MAX} apps. This server cannot search, so apps "
+                    "beyond those were not checked."
+                )
+                total = None
+            else:
+                of_total = f" of {total}" if total is not None else ""
+                note = (
+                    f"Showing the first {len(rows)} apps{of_total}. "
+                    "Pass search to narrow the list."
+                )
             return json.dumps({
-                "apps": apps,
+                "apps": rows,
                 "total": total,
                 "truncated": True,
-                "note": (
-                    f"Showing the first {len(apps)} apps of {shown}. "
-                    "Pass search to narrow the list."
-                ),
+                "note": note,
             }, indent=2)
-        return json.dumps(apps, indent=2)
+        return json.dumps(rows, indent=2)
     except Exception as e:
         logger.error(f"Error listing apps: {e}")
         return json.dumps({"error": str(e)})

@@ -27,11 +27,12 @@ FILES = [
     _f("Overall_Summary", "summary/overall_summary.tsv", 744),
 ]
 
+# The route marks each row with own; suggest_apps only uses the caller's own.
 APPS = [
-    {"id": 30, "name": "GSEA Explorer"},
-    {"id": 33, "name": "Cellxgene App"},
-    {"id": 45, "name": "IGV"},
-    {"id": 99, "name": "r-skinomicsexplorer"},
+    {"id": 30, "name": "GSEA Explorer", "own": True},
+    {"id": 33, "name": "Cellxgene App", "own": True},
+    {"id": 45, "name": "IGV", "own": True},
+    {"id": 99, "name": "r-skinomicsexplorer", "own": True},
 ]
 
 
