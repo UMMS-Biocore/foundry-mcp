@@ -53,6 +53,7 @@ from .log import get_logger, get_uvicorn_log_config, mask_token
 from .process_ports import PortMergeError, build_update_body
 from . import accessions as _accessions
 from . import hpc_apps as _hpc_apps
+from . import compute as _compute
 
 
 # Get logger for this module
@@ -8618,6 +8619,201 @@ def app_operation_status(launch_id: str, op_id: str, wait_seconds: int = 25):
     after the end; after that read the notebook with op=cells instead.
     """
     return _hpc_apps.operation_status(_hpc_call, launch_id, op_id, wait_seconds)
+
+
+# ============================================================================
+# Compute sessions: Workbench cloud VMs, shared server apps, opening a session
+# ============================================================================
+
+@mcp.tool()
+def compute_open(session_id: str) -> str:
+    """
+    Build the Foundry Connect link that opens one of the person's existing
+    compute sessions in their browser: a Workbench machine
+    (workbench:<instance id>), a shared server app (shinyproxy-app:<instance
+    id>) or a cluster app launch (cluster-app:<launch id>).
+
+    This only builds the link; nothing is sent to the server, no session is
+    launched and no login is read. Give the link to the person. The page
+    signs in through their browser, opens the session if it is running, and
+    says so when it has ended. To start something new use workbench_launch,
+    launch_app or hpc_app_launch instead.
+    """
+    return _compute.open_link(_web_base_url(), session_id)
+
+
+@mcp.tool()
+def workbench_list(take: int = 50, skip: int = 0) -> str:
+    """
+    List your Workbench cloud VMs, newest change first. Each entry has kind
+    "workbench", its session_id for compute_open, instance_id for the other
+    workbench_* tools, the raw status, the compute state (starting, running,
+    stopping, stopped, ended) and the actions that state allows (open, extend,
+    edit, stop, start, terminate, delete). It reads only.
+    """
+    return _compute.list_workbench(_hpc_call, _web_base_url(), take, skip)
+
+
+@mcp.tool()
+def workbench_applications() -> str:
+    """
+    List the Workbench applications you can launch (your own and those shared
+    with you), with the application_id workbench_launch needs, plus the
+    machine types the launch form offers. It reads only.
+    """
+    return _compute.list_workbench_applications(_hpc_call, _web_base_url())
+
+
+@mcp.tool()
+def workbench_launch(application_id: int, instance_type: str, disk_size_gb: int, name: str = "") -> str:
+    """
+    Launch a new Workbench cloud VM from a Workbench application.
+
+    This STARTS A BILLED MACHINE. Confirm the application, machine type
+    (instance_type, from workbench_applications) and disk size in GB with the
+    user before calling. Foundry Connect creates the VM login itself; the
+    person reads it in their browser, never through this tool. The
+    organization is decided by Foundry Connect, never by this tool.
+
+    The answer has the new session_id and the open link. Call workbench_list
+    until the state is running, then give the person the link. A launch is
+    never retried: if the answer says outcome_unknown, call workbench_list
+    before launching again, so a second billed machine is not started.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.launch_workbench(_hpc_call, _web_base_url(), application_id, instance_type, disk_size_gb, name)
+
+
+@mcp.tool()
+def workbench_stop(instance_id: str) -> str:
+    """
+    Stop a running Workbench machine. Its disk is kept, billing for the
+    machine stops, and workbench_start resumes it later. Confirm with the user
+    first, because work not saved to disk in open programs is lost.
+    instance_id is the number from workbench_list, or its workbench:<id>
+    session id.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.stop_workbench(_hpc_call, _web_base_url(), instance_id)
+
+
+@mcp.tool()
+def workbench_start(instance_id: str) -> str:
+    """
+    Resume a stopped Workbench machine (state stopped). It is billed again
+    from now on and gets a fresh auto stop. Confirm with the user first.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.start_workbench(_hpc_call, _web_base_url(), instance_id)
+
+
+@mcp.tool()
+def workbench_extend(instance_id: str, minutes: int) -> str:
+    """
+    Move a running Workbench machine's auto stop to `minutes` from now (1 to
+    14400, which is 10 days). It replaces the current auto stop rather than
+    adding to it, and the machine stays billed until then. Confirm the time
+    with the user.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.extend_workbench(_hpc_call, _web_base_url(), instance_id, minutes)
+
+
+@mcp.tool()
+def workbench_edit(instance_id: str, name: str = None, instance_type: str = None, disk_size_gb: int = None) -> str:
+    """
+    Rename a Workbench machine, change its machine type or grow its disk.
+    Only the fields you pass change. The machine type and disk size can only
+    change while it is stopped, and a disk can only grow, never shrink. A
+    larger machine or disk costs more: confirm with the user first.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.edit_workbench(_hpc_call, _web_base_url(), instance_id, name, instance_type, disk_size_gb)
+
+
+@mcp.tool()
+def workbench_terminate(instance_id: str, confirm_terminate: bool = False) -> str:
+    """
+    Terminate a Workbench machine: DESTRUCTIVE and cannot be undone.
+
+    WARNING: This deletes the cloud VM. Files stored only on the machine are
+    lost and the machine cannot be resumed. To pause it and keep the disk,
+    use workbench_stop instead. First call workbench_list, show the user the
+    machine (name, application, state), say what is lost and get explicit
+    confirmation. Only then call this tool with confirm_terminate=True.
+
+    Args:
+        instance_id: The number from workbench_list, or workbench:<id>.
+        confirm_terminate: Must be True. Any other value refuses the call and
+            nothing is sent to the server.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.terminate_workbench(_hpc_call, _web_base_url(), instance_id, confirm_terminate)
+
+
+@mcp.tool()
+def workbench_delete(instance_id: str, confirm_delete: bool = False) -> str:
+    """
+    Delete a Workbench machine record: DESTRUCTIVE and cannot be undone.
+
+    WARNING: The machine disappears from the person's list and can no longer
+    be opened, resumed or edited. Use it on a machine whose state is ended
+    (deleted or failed). For a machine that is still running or stopped, call
+    workbench_terminate first. Show the user the machine and get explicit
+    confirmation, then call this tool with confirm_delete=True.
+
+    Args:
+        instance_id: The number from workbench_list, or workbench:<id>.
+        confirm_delete: Must be True. Any other value refuses the call and
+            nothing is sent to the server.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.delete_workbench(_hpc_call, _web_base_url(), instance_id, confirm_delete)
+
+
+@mcp.tool()
+def app_terminate(instance_id: str, confirm_terminate: bool = False) -> str:
+    """
+    Terminate a running shared server app instance (one launch_app started):
+    DESTRUCTIVE and cannot be undone.
+
+    WARNING: The app's container stops and anything not saved outside it is
+    lost; opening it again means a new launch. Show the user the app and get
+    explicit confirmation, then call this tool with confirm_terminate=True.
+    For a cluster app use hpc_app_stop, for a Workbench machine the
+    workbench_* tools.
+
+    Args:
+        instance_id: The app instance id, or shinyproxy-app:<id>.
+        confirm_terminate: Must be True. Any other value refuses the call and
+            nothing is sent to the server.
+
+    A refusal with reason compute_control_not_granted means the user must
+    reconnect Foundry Connect to the assistant and tick "Manage my compute
+    sessions".
+    """
+    return _compute.terminate_app(_hpc_call, _web_base_url(), instance_id, confirm_terminate)
 
 
 @mcp.tool()
