@@ -4537,6 +4537,10 @@ _APP_LIST_MAX = 2000
 # Sorting by id keeps LIMIT/OFFSET pages stable: the default sort, creation
 # date, has ties, and tied rows can move between pages.
 _APP_LIST_QUERY = {"type": "4", "sort": "id", "order": "asc"}
+# Type 1: only the apps the caller owns. suggest_apps matches apps by name,
+# and an app row does not say whether its owner is an admin, so a public or
+# group shared app another user named "IGV" would look like the real one.
+_APP_OWNED_QUERY = dict(_APP_LIST_QUERY, type="1")
 # The fields list_apps returns per app, so 2000 rows stay small.
 _APP_LIST_FIELDS = ("id", "name", "description", "version", "status", "image", "appKind")
 
@@ -4568,7 +4572,7 @@ def _refuses_search(error: Exception) -> bool:
     return "search" in text
 
 
-def _fetch_app_pages(via_client, search: str = None):
+def _fetch_app_pages(via_client, search: str = None, query: dict = None):
     """
     Page GET /api/v1/app. Returns (apps, total or None, more), where more is
     true when the server holds apps that were not fetched.
@@ -4579,7 +4583,7 @@ def _fetch_app_pages(via_client, search: str = None):
     apps, seen, skip, total = [], set(), 0, None
     while len(apps) < _APP_LIST_MAX:
         take = min(_APP_LIST_PAGE, _APP_LIST_MAX - len(apps))
-        params = dict(_APP_LIST_QUERY, take=take, skip=skip)
+        params = dict(query or _APP_LIST_QUERY, take=take, skip=skip)
         if search:
             params["search"] = search
         try:
@@ -4627,9 +4631,15 @@ def _compact_app(app):
 
 
 def _installed_apps(via_client):
-    """The apps this instance actually has, as the route's rows."""
-    apps, _total, _more = _fetch_app_pages(via_client)
-    return [a for a in apps if isinstance(a, dict) and a.get("id")]
+    """
+    The apps suggest_apps may recommend: only the caller's own apps, as the
+    route's rows. Apps shared by other users are left out on purpose, because
+    a suggestion is chosen by name and a shared app's name proves nothing
+    about who made it. list_apps still lists shared apps, with their owner.
+    """
+    apps, _total, _more = _fetch_app_pages(via_client, query=_APP_OWNED_QUERY)
+    return [a for a in apps
+            if isinstance(a, dict) and a.get("id") and a.get("own") is not False]
 
 
 @mcp.tool()
@@ -4640,8 +4650,10 @@ def suggest_apps(run_id: str) -> str:
     Cellxgene, alignments and coverage into IGV.
 
     Only apps actually installed on this instance are suggested, so a
-    recommendation never points at an app that is not there. Launching is a
-    separate, explicit step via launch_app.
+    recommendation never points at an app that is not there. Apps are matched
+    by name, so only apps you own are considered: a shared app named like a
+    known one could be anybody's. list_apps shows shared apps with their
+    owner. Launching is a separate, explicit step via launch_app.
 
     Args:
         run_id: The finished run (same as the report id).

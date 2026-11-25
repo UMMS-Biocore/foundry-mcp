@@ -236,8 +236,48 @@ class TestListAppsSearchFallback:
 
 
 class TestInstalledApps:
-    def test_suggest_apps_sees_every_visible_app(self):
+    def test_pages_through_the_callers_own_apps_only(self):
         client, calls = _fake_backend(_apps(25) + [_app(26, owner_id=9, perms=PUBLIC)])
         apps = server._installed_apps(client)
-        assert [a["id"] for a in apps] == list(range(1, 27))
-        assert all(c["type"] == "4" and c["sort"] == "id" for c in calls)
+        assert [a["id"] for a in apps] == list(range(1, 26))
+        assert all(c["type"] == "1" and c["sort"] == "id" for c in calls)
+
+    def test_list_apps_still_shows_shared_apps_with_their_owner(self):
+        client, _ = _fake_backend([_app(1), _app(2, owner_id=9, perms=PUBLIC)])
+        out = _run(client)
+        assert [(a["id"], a["owner"]) for a in out] == [(1, "user7"), (2, "user9")]
+
+
+class _Frame(list):
+    def to_dict(self, orient="records"):
+        return list(self)
+
+
+def _suggest(apps):
+    client, _ = _fake_backend(apps)
+    client.reports.fetch_report_data.return_value = {"report": True}
+    client.reports.get_all_files.return_value = _Frame([{
+        "id": "align/sample.bam", "processName": "align",
+        "file_path": "align/sample.bam", "name": "sample.bam",
+        "extension": "bam", "fileSize": 10,
+    }])
+    with patch.object(server, "get_client", return_value=client):
+        return json.loads(server.suggest_apps("1"))
+
+
+class TestSuggestAppsImpersonation:
+    def test_same_named_app_of_another_user_is_not_suggested(self):
+        out = _suggest([_app(5, owner_id=9, perms=PUBLIC, name="IGV")])
+        ids = [s["app_id"] for s in out["data"]["suggestions"]]
+        assert 5 not in ids
+
+    def test_group_shared_same_named_app_is_not_suggested(self):
+        out = _suggest([_app(5, owner_id=9, perms=GROUP, group_id=100, name="IGV")])
+        assert [s["app_id"] for s in out["data"]["suggestions"]] == []
+
+    def test_the_callers_own_app_is_suggested(self):
+        out = _suggest([
+            _app(5, owner_id=9, perms=PUBLIC, name="IGV"),
+            _app(6, name="IGV"),
+        ])
+        assert [s["app_id"] for s in out["data"]["suggestions"]] == [6]
