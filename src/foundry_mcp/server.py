@@ -8406,41 +8406,93 @@ def update_metadata_records(canvas_id: str, collection_name: str, updates: list[
 # App Launch Tools
 # ============================================================================
 
+# GET /api/v1/app pages: take defaults to 10 and may not exceed 200. list_apps
+# pages through with the largest page and stops at this many apps.
+_APP_LIST_PAGE = 200
+_APP_LIST_MAX = 2000
+
+
+def _fetch_app_pages(via_client, search: str = None):
+    """Page GET /api/v1/app. Returns (apps, total or None, hit_cap)."""
+    apps, seen, skip, total = [], set(), 0, None
+    while len(apps) < _APP_LIST_MAX:
+        take = min(_APP_LIST_PAGE, _APP_LIST_MAX - len(apps))
+        params = {"take": take, "skip": skip}
+        if search:
+            params["search"] = search
+        response = via_client.call(method="GET", endpoint="/api/v1/app", params=params)
+        if not (isinstance(response, dict) and "data" in response):
+            # A bare list is not paged: it is the whole answer.
+            rows = response if isinstance(response, list) else []
+            return apps + rows, None, False
+        rows = response.get("data") or []
+        if isinstance(response.get("total"), int):
+            total = response["total"]
+        added = 0
+        for row in rows:
+            app_id = row.get("id") if isinstance(row, dict) else None
+            if app_id is not None and app_id in seen:
+                continue
+            if app_id is not None:
+                seen.add(app_id)
+            apps.append(row)
+            added += 1
+        skip += len(rows)
+        # A short page is the last one. A page with nothing new means the
+        # server ignored skip, so stop rather than loop to the cap.
+        if len(rows) < take or added == 0:
+            return apps, total, False
+        if total is not None and len(apps) >= total:
+            return apps, total, False
+    more = total is None or total > len(apps)
+    return apps, total, more
+
+
 @mcp.tool()
 def list_apps(search: str = None) -> str:
     """
     List all available applications in Foundry Connect with their names, IDs, and details.
     Use this to find apps by name before launching them.
     Returns app information including ID, name, description, image, and configuration.
+
+    Pages through every app you can see, up to 2000. `search` is matched by
+    the server, ignoring case, against the app name and owner. Past 2000 the
+    result is an object {apps, total, truncated, note} instead of a list, so
+    narrow with `search`.
     """
     try:
         via_client = get_client()
         logger.info(f"Listing apps with search filter: {search}")
-        
-        # Call the /api/v1/app endpoint to get all apps
-        response = via_client.call(
-            method="GET",
-            endpoint="/api/v1/app"
-        )
-        
-        # Extract apps from paginated response
-        if isinstance(response, dict) and 'data' in response:
-            apps = response['data']
-        else:
-            apps = response if isinstance(response, list) else []
-        
-        # If search filter provided, filter apps by name
-        if search and isinstance(apps, list):
-            search_lower = search.lower()
-            filtered_apps = [
+        needle = (search or "").strip()
+
+        try:
+            apps, total, hit_cap = _fetch_app_pages(via_client, needle or None)
+        except Exception as e:
+            if not needle:
+                raise
+            # An older server refuses the search parameter: page everything
+            # and filter by name here instead.
+            logger.info(f"Server side app search failed ({e}), filtering locally")
+            apps, total, hit_cap = _fetch_app_pages(via_client)
+            apps = [
                 app for app in apps
-                if search_lower in str(app.get('name', '')).lower()
+                if isinstance(app, dict)
+                and needle.lower() in str(app.get("name", "")).lower()
             ]
-            result = filtered_apps
-        else:
-            result = apps
-        
-        return json.dumps(result, indent=2)
+            total = None
+
+        if hit_cap:
+            shown = f"{total}" if total is not None else "more than that"
+            return json.dumps({
+                "apps": apps,
+                "total": total,
+                "truncated": True,
+                "note": (
+                    f"Showing the first {len(apps)} apps of {shown}. "
+                    "Pass search to narrow the list."
+                ),
+            }, indent=2)
+        return json.dumps(apps, indent=2)
     except Exception as e:
         logger.error(f"Error listing apps: {e}")
         return json.dumps({"error": str(e)})
