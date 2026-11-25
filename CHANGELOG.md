@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- **Compute session tools**: `workbench_list`, `workbench_applications`,
+  `workbench_launch`, `workbench_stop`, `workbench_start`, `workbench_extend`,
+  `workbench_edit`, `workbench_terminate` and `workbench_delete` manage your
+  Workbench cloud VMs, `app_terminate` stops a shared server app instance, and
+  `compute_open` builds the Foundry Connect link that opens an existing
+  session in the person's browser without launching anything. Every list
+  entry carries its `kind`, `session_id`, compute state and allowed actions.
+  Terminate and delete are destructive and refuse to run without an explicit
+  confirmation flag. A launch or change is never retried, and a lost answer
+  is reported as unknown. No tool reads or sets a VM login. The tools that
+  change a session need the "Manage my compute sessions" permission, and a
+  connection without it is told to reconnect and tick that box.
 - **Disk space estimate in preflight**: `preflight_run(run_id, input_bytes=None)`
   now asks the server how much space the run is expected to need (scaled from
   past runs of the same pipeline revision, or a rough multiple of the input

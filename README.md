@@ -184,6 +184,31 @@ Discover and launch applications in Foundry Connect.
 
 ---
 
+### 🖥️ Compute Sessions (11 tools)
+
+Manage your Workbench cloud VMs and shared server apps, and open any compute
+session. Every tool that starts, stops, changes or deletes a session needs the
+**Manage my compute sessions** permission: reconnect the assistant and tick that
+box if a tool answers `compute_control_not_granted`. No tool reads a VM login or
+any other browser credential; `compute_open` only builds a link the person opens
+in their own browser.
+
+| Tool                     | What It Does                                                 |
+| ------------------------ | ------------------------------------------------------------ |
+| `compute_open`           | Build the Foundry Connect link that opens an existing session (Workbench, shared server app or cluster app) in the browser |
+| `workbench_list`         | List your Workbench machines with their state and allowed actions |
+| `workbench_applications` | List the Workbench applications you can launch and the machine types |
+| `workbench_launch`       | Launch a billed Workbench machine, after the user confirms   |
+| `workbench_stop`         | Stop a machine and keep its disk                             |
+| `workbench_start`        | Resume a stopped machine                                     |
+| `workbench_extend`       | Move a machine's auto stop, up to 10 days ahead              |
+| `workbench_edit`         | Rename a machine, change its machine type or grow its disk   |
+| `workbench_terminate`    | Delete a machine's cloud VM (destructive, needs `confirm_terminate=True`) |
+| `workbench_delete`       | Remove an ended machine from your list (destructive, needs `confirm_delete=True`) |
+| `app_terminate`          | Terminate a shared server app instance (destructive, needs `confirm_terminate=True`) |
+
+---
+
 ### 📦 Workspaces (6 tools)
 
 Run code in a container in a workspace on a run environment that has container
