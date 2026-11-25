@@ -4564,12 +4564,35 @@ def _http_status(error: Exception) -> Optional[int]:
 
 
 def _refuses_search(error: Exception) -> bool:
-    """True when the error is a 400 whose reason names the search parameter."""
+    """
+    True only when the server refused search as an unknown parameter, which
+    is how a server without server side search answers. A 400 about the
+    search value (too long, for one) is a real error and returns False.
+
+    The route answers a validation failure with
+    {message: "'search' is not allowed", details: [{path, type}, ...]}, and
+    the SDK keeps that body only on the chained HTTPError.
+    """
     if _http_status(error) != 400:
         return False
-    refusal = _server_refusal(error) or {}
-    text = f"{refusal.get('error', '')} {error}".lower()
-    return "search" in text
+    seen = error
+    while seen is not None:
+        response = getattr(seen, "response", None) if isinstance(seen, requests.HTTPError) else None
+        if response is not None:
+            try:
+                body = response.json()
+            except ValueError:
+                return False
+            if not isinstance(body, dict):
+                return False
+            for detail in body.get("details") or []:
+                if (isinstance(detail, dict) and detail.get("type") == "object.unknown"
+                        and detail.get("path") == ["search"]):
+                    return True
+            message = str(body.get("message") or "").lower()
+            return "search" in message and "not allowed" in message
+        seen = seen.__cause__ or seen.__context__
+    return False
 
 
 def _fetch_app_pages(via_client, search: str = None, query: dict = None):
@@ -4639,7 +4662,7 @@ def _installed_apps(via_client):
     """
     apps, _total, _more = _fetch_app_pages(via_client, query=_APP_OWNED_QUERY)
     return [a for a in apps
-            if isinstance(a, dict) and a.get("id") and a.get("own") is not False]
+            if isinstance(a, dict) and a.get("id") and a.get("own") is True]
 
 
 @mcp.tool()
@@ -4682,11 +4705,14 @@ def suggest_apps(run_id: str) -> str:
 
         if not suggestions:
             summary = (
-                f"Run {run_id} has no outputs matching an app installed on this "
-                f"instance, so there is no viewer to suggest.")
+                f"Run {run_id} has no outputs matching an app you own, so there "
+                f"is no viewer to suggest. Only your own apps were considered; "
+                f"shared and public apps were not.")
             next_steps = [
                 f"Call list_results(run_id='{run_id}') to see what the run "
-                f"produced, and list_apps() for what is installed.",
+                f"produced.",
+                "Call list_apps() to see shared and public apps with their "
+                "owners, and launch one with launch_app if you trust its owner.",
             ]
         else:
             names = ", ".join(s["app_name"] for s in suggestions)
@@ -8539,13 +8565,20 @@ def list_apps(search: str = None) -> str:
             apps, total, more = _fetch_app_pages(via_client, needle or None)
         except _AppSearchRefused as e:
             # An older server refuses the search parameter: page everything
-            # and filter by name here instead.
+            # and match name and owner here instead, as the server would.
             logger.info(f"Server side app search refused ({e}), filtering locally")
             apps, total, more = _fetch_app_pages(via_client)
+            low = needle.lower()
+
+            def _owner_name(app):
+                owner = app.get("owner")
+                return owner.get("username") if isinstance(owner, dict) else owner
+
             apps = [
                 app for app in apps
                 if isinstance(app, dict)
-                and needle.lower() in str(app.get("name", "")).lower()
+                and (low in str(app.get("name") or "").lower()
+                     or low in str(_owner_name(app) or "").lower())
             ]
             local_filter = True
 

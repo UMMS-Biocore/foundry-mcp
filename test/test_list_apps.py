@@ -11,17 +11,30 @@ PUBLIC, GROUP, PRIVATE = 63, 15, 3
 MY_GROUPS = {100}
 
 
-def _sdk_error(status, message):
-    """Raise like the SDK: its RuntimeError chained to the HTTPError."""
+# The SDK's own text for every 400: the server's reason is not in it.
+SDK_BAD_REQUEST = "Error 302: Bad Request: Check the request parameters or payload."
+
+
+def _sdk_error(status, message="Internal Server Error", details=None):
+    """
+    Raise like the SDK: a RuntimeError with its fixed text, raised while
+    handling the HTTPError, so the route's body survives only on that
+    chained HTTPError's response.
+    """
     response = requests.Response()
     response.status_code = status
-    response._content = json.dumps({"message": message}).encode()
+    response._content = json.dumps({"message": message, "details": details or []}).encode()
     response.headers["Content-Type"] = "application/json"
     try:
         raise requests.HTTPError(response=response)
     except requests.HTTPError:
-        raise RuntimeError(f"Error 302: Bad Request: {message}"
-                           if status == 400 else f"Error 999: HTTP {status}")
+        raise RuntimeError(SDK_BAD_REQUEST if status == 400
+                           else f"Error 999: HTTP {status}")
+
+
+def _joi_refusal(path, kind, message):
+    """The route's 400 for a query that fails validation."""
+    _sdk_error(400, message, [{"message": message, "path": [path], "type": kind}])
 
 
 def _visible(app, view):
@@ -53,12 +66,15 @@ def _fake_backend(apps, supports_search=True, fail_on=None, seed=0):
         params = dict(params or {})
         calls.append(params)
         if fail_on and fail_on[0] == len(calls):
-            _sdk_error(fail_on[1], "Internal Server Error")
+            _sdk_error(fail_on[1])
         if "search" in params and not supports_search:
-            _sdk_error(400, '"search" is not allowed')
+            _joi_refusal("search", "object.unknown", "'search' is not allowed")
+        if len(str(params.get("search") or "")) > 200:
+            _joi_refusal("search", "string.max",
+                         "'search' length must be less than or equal to 200 characters long")
         take = int(params.get("take", 10))
         if take > 200:
-            _sdk_error(400, '"take" must be less than or equal to 200')
+            _joi_refusal("take", "number.max", "'take' must be less than or equal to 200")
         skip = int(params.get("skip", 0))
         view = str(params.get("type", "1"))
         sort = params.get("sort", "dateCreated")
@@ -69,7 +85,7 @@ def _fake_backend(apps, supports_search=True, fail_on=None, seed=0):
             rows = [a for a in rows
                     if needle in a["name"].lower()
                     or needle in a["owner"]["username"].lower()]
-        rows = list(rows)
+        rows = [dict(a, own=a["owner"]["id"] == ME) for a in rows]
         rng.shuffle(rows)
         rows.sort(key=lambda a: a[sort], reverse=(order == "desc"))
         return {"skip": skip, "take": take, "total": len(rows),
@@ -220,10 +236,34 @@ class TestListAppsSearchFallback:
 
     def test_other_bad_request_is_reported(self):
         client = MagicMock()
-        client.call.side_effect = lambda **kw: _sdk_error(400, '"type" must be a string')
+        client.call.side_effect = lambda **kw: _joi_refusal(
+            "type", "string.base", "'type' must be a string")
         out = _run(client, search="x")
-        assert "error" in out
+        assert out == {"error": SDK_BAD_REQUEST}
         assert client.call.call_count == 1
+
+    def test_a_rejected_search_value_is_reported_not_retried(self):
+        # The server knows search, it only refuses this value: the fallback
+        # would silently return a locally filtered list instead.
+        client, calls = _fake_backend(_apps(30))
+        out = _run(client, search="x" * 201)
+        assert out == {"error": SDK_BAD_REQUEST}
+        assert len(calls) == 1
+
+    def test_fallback_reads_the_refusal_from_the_response_body(self):
+        # The SDK text never names search; only the chained body does.
+        client, calls = _fake_backend(_apps(3), supports_search=False)
+        _run(client, search="app0002")
+        assert len(calls) == 2
+        client = MagicMock()
+        client.call.side_effect = lambda **kw: _sdk_error(400, "something else")
+        assert _run(client, search="app0002") == {"error": SDK_BAD_REQUEST}
+
+    def test_fallback_also_matches_the_owner(self):
+        apps = [_app(1), _app(2, owner_id=9, perms=PUBLIC)]
+        client, _ = _fake_backend(apps, supports_search=False)
+        out = _run(client, search="USER9")
+        assert [a["id"] for a in out] == [2]
 
     def test_fallback_truncation_says_rest_was_not_checked(self):
         apps = _apps(server._APP_LIST_MAX + 10)
@@ -281,3 +321,25 @@ class TestSuggestAppsImpersonation:
             _app(6, name="IGV"),
         ])
         assert [s["app_id"] for s in out["data"]["suggestions"]] == [6]
+
+    def test_rows_not_marked_own_are_dropped_even_if_the_server_ignores_type(self):
+        rows = [
+            dict(_app(5, owner_id=9, perms=PUBLIC, name="IGV"), own=False),
+            {k: v for k, v in _app(6, owner_id=9, perms=PUBLIC, name="IGV").items()},
+        ]
+        client = MagicMock()
+        client.call.return_value = {"skip": 0, "take": 200, "total": 2, "data": rows}
+        client.reports.fetch_report_data.return_value = {"report": True}
+        client.reports.get_all_files.return_value = _Frame([{
+            "id": "a.bam", "processName": "align", "file_path": "a.bam",
+            "name": "a.bam", "extension": "bam", "fileSize": 10,
+        }])
+        assert "own" not in rows[1]
+        with patch.object(server, "get_client", return_value=client):
+            out = json.loads(server.suggest_apps("1"))
+        assert out["data"]["suggestions"] == []
+
+    def test_no_suggestion_says_only_own_apps_were_considered(self):
+        out = _suggest([_app(5, owner_id=9, perms=PUBLIC, name="IGV")])
+        assert "your own apps" in out["summary"]
+        assert any("list_apps" in step and "shared" in step for step in out["next_steps"])
