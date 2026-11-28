@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **Launch limits for cluster apps**: `hpc_app_launch` now tells the assistant to
+  read each run environment's limits (app caps for cpus, memory and wall time,
+  the Longest job limit and CPU minutes per window) from the launch options,
+  and to keep cpus x minutes and wall minutes within them. A launch refused for
+  being over a limit returns the environment's limits, so the request can be
+  lowered, or the person told that the environment's owner can raise the limit.
 - **Compute session tools**: `workbench_list`, `workbench_applications`,
   `workbench_launch`, `workbench_stop`, `workbench_start`, `workbench_extend`,
   `workbench_edit`, `workbench_terminate` and `workbench_delete` manage your

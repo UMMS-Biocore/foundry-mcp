@@ -63,7 +63,7 @@ def _request(call: Call, method: str, endpoint: str, may_have_arrived: str = "",
         _fail(message, e.reason)
 
 
-def _refused(body, status: int, fallback_reason: str, fallback_message: str):
+def _refused(body, status: int, fallback_reason: str, fallback_message: str, **extra):
     """Raise a ToolError from a refusal, keeping the server's reason and sentence."""
     body = body if isinstance(body, dict) else {}
     error_code = body.get("error")
@@ -71,7 +71,7 @@ def _refused(body, status: int, fallback_reason: str, fallback_message: str):
         _fail(_RECONNECT, "execution_not_granted", http_status=status)
     reason = body.get("reason") or error_code or fallback_reason
     message = body.get("detail") or body.get("message") or fallback_message
-    _fail(message, reason, http_status=status)
+    _fail(message, reason, http_status=status, **extra)
 
 
 def _outcome_unknown(body, status: int, message: str):
@@ -201,7 +201,12 @@ def launch(
     )
     if status not in (200, 201):
         _outcome_unknown(created, status, _LAUNCH_MAY_EXIST)
-        _refused(created, status, "launch_refused", "The app could not be launched.")
+        extra = {}
+        reason = created.get("reason") if isinstance(created, dict) else None
+        if reason == "resources_exceed_caps" and isinstance(chosen.get("limits"), dict):
+            # Hand the environment's limits back so the request can be lowered to fit.
+            extra["limits"] = chosen["limits"]
+        _refused(created, status, "launch_refused", "The app could not be launched.", **extra)
     return json.dumps(_launch_answer(created, web_base), indent=2)
 
 

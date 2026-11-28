@@ -166,6 +166,54 @@ def test_launch_names_the_reconnect_step_when_the_post_is_refused(via_client, ht
     assert [c[0] for c in _calls(http)].count("POST") == 1
 
 
+LIMITS = {
+    "maxCpus": 8,
+    "maxMemoryMb": 32768,
+    "maxWallMinutes": 720,
+    "maxJobWallMinutes": 240,
+    "maxWindowCpuMinutes": 5000,
+}
+
+
+def test_launch_lists_the_limits_of_every_environment_it_offers(via_client, http):
+    with_limits = {
+        "environments": [dict(e, limits=LIMITS) for e in TWO_ENV["environments"]],
+        "apps": TWO_ENV["apps"],
+    }
+    http.side_effect = [_response(200, with_limits)]
+    out = json.loads(server.hpc_app_launch())
+    assert [e["limits"] for e in out["environments"]] == [LIMITS, LIMITS]
+
+
+def test_launch_refused_over_the_limits_hands_back_the_environments_limits(via_client, http):
+    options = {"environments": [dict(ONE_ENV["environments"][0], limits=LIMITS)], "apps": ONE_ENV["apps"]}
+    refusal = {
+        "reason": "resources_exceed_caps",
+        "detail": "500 minutes is above this run environment's Longest job limit of 240 minutes.",
+    }
+    http.side_effect = [_response(200, options), _response(409, refusal)]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_launch(wall_minutes=500)
+    body = json.loads(str(e.value))
+    assert body["reason"] == "resources_exceed_caps"
+    assert body["limits"] == LIMITS
+    assert body["http_status"] == 409
+
+
+def test_other_refusals_do_not_carry_limits(via_client, http):
+    options = {"environments": [dict(ONE_ENV["environments"][0], limits=LIMITS)], "apps": ONE_ENV["apps"]}
+    http.side_effect = [_response(200, options), _response(400, {"reason": "data_root_unknown", "detail": "No."})]
+    with pytest.raises(ToolError) as e:
+        server.hpc_app_launch(data_roots=["nope"])
+    assert "limits" not in json.loads(str(e.value))
+
+
+def test_launch_documents_the_limits():
+    doc = server.hpc_app_launch.__doc__
+    assert "limits" in doc and "maxJobWallMinutes" in doc and "maxWindowCpuMinutes" in doc
+    assert "Longest job" in doc
+
+
 def test_launch_keeps_the_servers_refusal_reason_and_detail(via_client, http):
     http.side_effect = [_response(200, ONE_ENV), _response(400, {"reason": "data_root_unknown", "detail": "No data root named nope."})]
     with pytest.raises(ToolError) as e:
