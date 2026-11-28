@@ -8662,6 +8662,22 @@ def hpc_app_launch(
     user, then call again with the id. `data_roots` are names from that list;
     each is mounted read only unless you pass {"name": ..., "mode": "rw"}.
 
+    Each run environment in that list carries `limits`: maxCpus, maxMemoryMb and
+    maxWallMinutes (the app caps), maxJobWallMinutes (its "Longest job" limit) and
+    maxWindowCpuMinutes (CPU minutes per window); null means not set. Read them
+    before you choose numbers, and keep wall_minutes within maxWallMinutes and
+    maxJobWallMinutes, cpus within maxCpus, memory_mb within maxMemoryMb, and
+    cpus x wall_minutes within maxWindowCpuMinutes. The default of 60 minutes
+    is only a default: lower it when the environment's limit is smaller. When
+    the answer lists environments (needs_choice or run_environment_unavailable)
+    read the limits there; a refusal with reason resources_exceed_caps returns
+    the chosen environment's limits as `limits`.
+
+    If the launch is refused because the request is above the environment's
+    "Longest job" limit (resources_exceed_caps), lower wall_minutes or cpus to
+    fit and confirm that with the person, or tell them the environment's owner
+    can raise the limit.
+
     The launch starts in requested. Call hpc_app_status until it is running
     before telling the person to open it, and report the end reason if it
     ends first. If the answer says outcome_unknown, call hpc_app_list before
